@@ -8089,10 +8089,10 @@ html { -webkit-text-size-adjust: 100%; }
   <div class="vhead" style="flex-wrap:wrap;gap:10px">
     <div>
       <h2><i class="fa-solid fa-file-export" style="color:var(--teal)"></i> Экспорт данных и шаблоны маркетплейсов</h2>
-      <p>Рабочая выгрузка для Ozon (46 полей + справочная колонка ЧЗ), общий XLSX/CSV, снапшоты и профили. Перед загрузкой перенесите данные в актуальный шаблон выбранной категории из кабинета Ozon.</p>
+      <p>Рабочая выгрузка для Ozon (46 полей + 2 справочные колонки (ЧЗ, сертификат донора)), общий XLSX/CSV, снапшоты и профили. Перед загрузкой перенесите данные в актуальный шаблон выбранной категории из кабинета Ozon.</p>
     </div>
     <div class="sp"></div>
-    <button type="button" class="btn ok" id="btnExportOzonTop" style="font-weight:700" title="Рабочая выгрузка Ozon (46 полей + справочная колонка ЧЗ; сверить с актуальным шаблоном)"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON (рабочий файл)</button>
+    <button type="button" class="btn ok" id="btnExportOzonTop" style="font-weight:700" title="Рабочая выгрузка Ozon (46 полей + 2 справочные колонки (ЧЗ, сертификат донора); сверить с актуальным шаблоном)"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON (рабочий файл)</button>
     <button type="button" class="btn pri" id="btnExportOpen" title="Открыть окно выбора произвольных колонок"><i class="fa-solid fa-file-export"></i> Экспорт каталога XLSX…</button>
   </div>
 
@@ -8141,7 +8141,7 @@ try {
           <i class="fa-solid fa-cloud-arrow-down" style="color:#2fd6a3;font-size:22px"></i>
           <div>
             <h3 style="font-size:16px;color:#fff;margin:0">Рабочая выгрузка товаров для Ozon</h3>
-            <div class="hint" style="color:#93c5fd;font-size:11.5px;margin-top:2px">46 полей + справочная колонка ЧЗ · текущий шаблон и обязательные поля проверьте в кабинете Ozon</div>
+            <div class="hint" style="color:#93c5fd;font-size:11.5px;margin-top:2px">46 полей + 2 справочные колонки (ЧЗ, сертификат донора) · текущий шаблон и обязательные поля проверьте в кабинете Ozon</div>
           </div>
         </div>
         <div class="sp" style="flex:1"></div>
@@ -8250,7 +8250,7 @@ try {
         <div><i class="fa-solid fa-barcode" style="color:var(--amber)"></i> OEM-номера: <b>разделитель «; » для поиска Ozon</b></div>
         <div><i class="fa-solid fa-qrcode" style="color:var(--teal)"></i> Маркировка: <b>Да / Нет</b></div>
         <div class="sp" style="flex:1"></div>
-        <span class="hint mono">46 полей + справочная колонка ЧЗ рабочего файла</span>
+        <span class="hint mono">46 полей + 2 справочные колонки (ЧЗ, сертификат донора) рабочего файла</span>
       </div>
     </div>
 
@@ -8323,7 +8323,7 @@ try {
         <div class="hint">Фильтры: <span class="mono">default</span>, <span class="mono">upcase</span>, <span class="mono">downcase</span>, <span class="mono">trim</span>, <span class="mono">join: " / "</span>, <span class="mono">split: ","</span>, <span class="mono">replace: "a","b"</span>, <span class="mono">truncate: 30</span>, <span class="mono">pad: 13</span>, <span class="mono">delimit: " "</span>, <span class="mono">money</span>, <span class="mono">round: 2</span>, <span class="mono">plus</span>, <span class="mono">times</span></div>
         <div id="tplPreview" style="margin-top:9px"></div>
         <div style="margin-top:13px;padding:11px 12px;border:1px solid rgba(47,214,163,.25);border-radius:10px;background:rgba(47,214,163,.04)">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><i class="fa-solid fa-link" style="color:var(--teal)"></i><b style="font-size:12px">Применить этот Liquid-шаблон к полю Ozon</b><span class="hint">46 полей + справочная колонка ЧЗ рабочего файла сохраняются без изменений</span></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><i class="fa-solid fa-link" style="color:var(--teal)"></i><b style="font-size:12px">Применить этот Liquid-шаблон к полю Ozon</b><span class="hint">46 полей + 2 справочные колонки (ЧЗ, сертификат донора) рабочего файла сохраняются без изменений</span></div>
           <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
             <div style="flex:1 1 230px"><label class="f" for="tplOzonField">Поле в файле Ozon</label><select id="tplOzonField" style="width:100%">
               <option value="2">Название товара</option><option value="20">Партномер</option><option value="22">Название модели</option><option value="29">#Хештеги</option><option value="30">Аннотация</option><option value="32">Объединить в похожие товары</option><option value="33">OEM-номер</option><option value="34">Альтернативные артикулы</option><option value="42">Комплектация</option>
@@ -8836,6 +8836,19 @@ try {
     <span class="hint mono" id="impFileName"></span>
     <button type="button" class="btn sm gh" data-close><i class="fa-solid fa-xmark"></i></button></div>
   <div class="mbody" style="padding:0">
+    <!-- v12.9.20: первый файл — целевой (его обогащаем данными для шаблона маркетплейса),
+         последующие загрузки — только файлы-доноры: они наполняют карточки первого файла
+         и не меняют собственные поля каталога. -->
+    <div id="impRoleBar" style="display:flex;gap:10px;align-items:center;padding:9px 16px;border-bottom:1px solid var(--line);background:#101528;flex-wrap:wrap">
+      <span class="hint" style="letter-spacing:.08em;text-transform:uppercase">Роль файла</span>
+      <div class="tabbar" id="impRole">
+        <button type="button" data-role="target"><i class="fa-solid fa-crosshairs"></i> Целевой · первый файл</button>
+        <button type="button" data-role="donor"><i class="fa-solid fa-hand-holding-heart"></i> Донор · обогатить целевой</button>
+      </div>
+      <span class="hint" id="impRoleHint" style="flex:1 1 320px;line-height:1.5"></span>
+      <button type="button" class="btn sm gh" id="impRoleForget" title="Забыть, какой файл был первым: следующая загрузка снова станет целевой"><i class="fa-solid fa-rotate-left"></i> Сбросить первый файл</button>
+    </div>
+    <div id="impTargetInfo" style="display:none;padding:9px 16px;border-bottom:1px solid var(--line);background:#121a30;font-size:11.5px;line-height:1.6"></div>
     <div style="display:flex;gap:10px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:#131830;flex-wrap:wrap">
       <div><label class="f">Ключ сопоставления</label><select id="impKey"><option value="article">только article</option><option value="article+brand">article + brand</option></select></div>
       <div><label class="f">Режим</label><select id="impMode"><option value="upsert">Дозагрузка (обновить + добавить)</option><option value="replace">Замена ассортимента (отсутствующие SKU скрываются)</option><option value="newonly">Только новые SKU</option></select><div class="hint" style="max-width:330px">Дозагрузка сохраняет текущие SKU: непустые значения обновляют поля, пустые — пропускаются. Проверьте ключ и маппинг. Загружайте файлы по одному.</div></div>
@@ -8868,7 +8881,7 @@ try {
     </div>
   </div>
   <div class="mfoot"><span class="hint mono" id="impMeta"></span><div class="sp" style="flex:1"></div>
-    <button type="button" class="btn gh" data-close>Отмена</button>
+    <button type="button" class="btn gh" id="impCancel">Отмена</button>
     <button type="button" class="btn pri" id="impApply"><i class="fa-solid fa-database"></i> Применить к каталогу</button></div>
 </div></div>
 
@@ -8927,7 +8940,7 @@ try {
     <div style="background:rgba(47,214,163,0.1);border:1px solid rgba(47,214,163,0.3);border-radius:8px;padding:9px 13px;margin:10px 0 12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
       <div>
         <b style="color:var(--teal)"><i class="fa-solid fa-cloud-arrow-down"></i> Рабочая выгрузка для Ozon?</b>
-        <span class="hint" style="margin-left:8px">46 полей + справочная колонка ЧЗ для сверки с актуальным шаблоном выбранной категории</span>
+        <span class="hint" style="margin-left:8px">46 полей + 2 справочные колонки (ЧЗ, сертификат донора) для сверки с актуальным шаблоном выбранной категории</span>
       </div>
       <button type="button" class="btn sm ok" id="btnExportOzonFromModal" style="font-weight:700"><i class="fa-solid fa-file-export"></i> Экспорт OZON (рабочий файл)</button>
     </div>
@@ -9117,7 +9130,7 @@ try {
   <div class="mbox" style="width:1160px;max-width:96vw">
     <div class="mhead">
       <i class="fa-solid fa-cloud-arrow-down" style="color:var(--teal)"></i>
-      <h3>Рабочая выгрузка Ozon <span class="tag" style="background:#13274f;color:#60a5fa;margin-left:8px;font-size:11px">46 полей + справочная колонка ЧЗ · не официальный шаблон</span></h3>
+      <h3>Рабочая выгрузка Ozon <span class="tag" style="background:#13274f;color:#60a5fa;margin-left:8px;font-size:11px">46 полей + 2 справочные колонки (ЧЗ, сертификат донора) · не официальный шаблон</span></h3>
       <div class="sp" style="flex:1"></div>
       <span class="hint mono" id="ozCountInfo">Подготовка...</span>
       <button type="button" class="btn sm gh" data-close><i class="fa-solid fa-xmark"></i></button>
@@ -9252,7 +9265,7 @@ try {
       </div>
     </div>
     <div class="mfoot" style="display:flex;gap:10px;align-items:center;padding:12px 16px;border-top:1px solid var(--line)">
-      <span class="hint mono">Рабочая выгрузка: 46 полей + справочная колонка ЧЗ · проверьте текущий шаблон категории</span>
+      <span class="hint mono">Рабочая выгрузка: 46 полей + 2 справочные колонки (ЧЗ, сертификат донора) · проверьте текущий шаблон категории</span>
       <div class="sp" style="flex:1"></div>
       <button type="button" class="btn gh" data-close>Отмена</button>
       <div class="sep" style="margin:11px 0 9px"></div>
@@ -13302,7 +13315,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.42-client+audit.5';
+const APP_VERSION = '12.9.44-client+donor.2';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -24989,18 +25002,63 @@ DEMO-TRN-001;TRN-001;DriveLine;Шрус наружный;OE-TRN-001;Трансм
 `;
 
 const Import = {
+  /* v12.9.20: можно выбрать сразу несколько файлов. Первый (или единственный) — целевой;
+     дополнительные открываются как файлы-доноры для его обогащения. */
   pick() {
     const inp = document.createElement('input');
-    inp.type = 'file'; inp.accept = '.xlsx,.xls,.csv,.ods'; inp.multiple = false;
-    inp.onchange = async () => { const f=inp.files && inp.files[0]; if (f) await Import.read(f); };
+    inp.type = 'file'; inp.accept = '.xlsx,.xls,.csv,.ods'; inp.multiple = true;
+    inp.onchange = async () => {
+      const files = Array.from(inp.files || []);
+      if (!files.length) return;
+      let q = files;
+      if (files.length > 1) {
+        const prev = Import.targetState();
+        const replaceNote = (prev && prev.file && String(prev.file) !== String(files[0].name))
+          ? 'Сейчас целевой файл — <b>' + esc(prev.file) + '</b>; новый заменит его.<br>' : '';
+        const ok = await askConfirm('Загружено файлов: ' + files.length,
+          replaceNote +
+          '<b>' + esc(files[0].name) + '</b> — целевой файл: его строки обогащаются данными из остальных файлов.<br>' +
+          'Доноры: ' + files.slice(1).map(f => '<b>' + esc(f.name) + '</b>').join(', ') + '.<br>' +
+          'Донор не меняет собственные поля каталога — он только заполняет данные для шаблона маркетплейса. ' +
+          'Можно загрузить донор по одному и выбрать роль вручную.', 'Разобрать файлы', true);
+        if (!ok) q = [files[0]];
+      }
+      for (let i = 0; i < q.length; i++) {
+        const role = i === 0 ? 'target' : 'donor';
+        if (role === 'target') { Import._forceTarget = true; Import._swappingTarget = true; }   /* явный выбор пользователя */
+        const opened = await Import.read(q[i], { role });
+        if (!opened) break;               /* файл не прочитан — очередь дальше не идём */
+        const rest = q.slice(i + 1);
+        if (rest.length) {                /* очередь: следующий файл подхватывается после «Применить» */
+          Import.queue = rest;
+          break;
+        }
+      }
+    };
     inp.click();
+  },
+  /* Продолжение очереди выбранных файлов: вызывается после «Применить»/«Отмена». */
+  async nextQueued() {
+    const q = Import.queue;
+    if (!q || !q.length) return false;
+    const f = q.shift();
+    if (!q.length) Import.queue = null;
+    return Import.read(f, { role: 'donor' });
   },
   demo() {
     if (S.rows.length && !confirm('Демо-набор будет добавлен через обычный импорт. Продолжить?')) return;
     const file = new File([DEMO_IMPORT_CSV], 'UNIT-CONTROL-demo-data.csv', { type: 'text/csv;charset=utf-8' });
-    Import.read(file);
+    Import.read(file, { role: 'target', demo: true });
   },
-  async read(file) {
+  async read(file, opts) {
+    opts = opts || {};
+    /* Роль определяется ДО разбора: по решению пользователя, по сохранённому первому файлу
+       или по простому правилу «первый загруженный файл = целевой». */
+    const role = Import.resolveRole(file, opts.role);
+    /* v12.9.44: возвращаем признак успеха — очередь файлов в pick()/nextQueued()
+       иначе не узнаёт, что файл открыт, и молча теряла все файлы после первого. */
+    let opened = false;
+    try {
     await withProgress('Чтение файла', file.name, async () => {
       Prog.step(35);
       /* Не начинаем крупное чтение, если браузер уже сообщает критическое давление
@@ -25056,28 +25114,239 @@ const Import = {
       const advisorTemplate = (headers.length === 17 || headers.length === 18) && headers[0] === 'Артикул' && headers[1] === 'Бренд' &&
         headers.includes('Вознаграждение Ozon, %') && headers.includes('Логистика Ozon, ₽/ед') &&
         (headers.includes('Ozon realFBS доставка, ₽/ед') || headers.includes('Ozon DBS доставка, ₽/ед'));
-      const guess = advisorTemplate ? null : Import.guessProfile(file.name, headers);
+      const supplierPrice = !advisorTemplate && Import.isDonorHeaderSet(headers);
+      const guess = (advisorTemplate || supplierPrice) ? null : Import.guessProfile(file.name, headers);
       const keepVis = $('#impKeepVisibility'); if (keepVis) keepVis.checked = true;
       if ($('#impMode')) $('#impMode').value = 'upsert';
+      if (role === 'donor' && $('#impMode')) $('#impMode').value = 'upsert';
       const isDimensionCostFile = /весогабарит/i.test(file.name) && headers.some(h => /^цена$/i.test(h.trim())) &&
         ['Вес (кг)','Длина (см)','Ширина (см)','Высота (см)'].every(label => headers.some(h => h.trim().toLowerCase() === label.toLowerCase()));
-      if (isDimensionCostFile) {
-        $('#impPriceIsCost')?.classList.add('on');
-        if ($('#impKey') && headers.some(h => /^(?:бренд|brand)$/i.test(h.trim()))) $('#impKey').value = 'article+brand';
-      }
+      if (isDimensionCostFile && $('#impKey')) $('#impKey').value = 'article+brand';
       if (advisorTemplate) {
         /* The helper's sale-price column is never a supplier-cost column. */
         $('#impPriceIsCost')?.classList.remove('on');
         if ($('#impKey')) $('#impKey').value = 'article+brand';
         if ($('#impMode')) $('#impMode').value = 'upsert';
       }
-      S.pending = { file: file.name, headers, body, advisorTemplate, map: (guess ? guess.config : autoMap(headers)).map(m => ({ ...m })) };
+      const baseMap = guess ? guess.config : supplierPrice ? Import.donorMap(headers) : autoMap(headers);
+      S.pending = { file: file.name, headers, body, advisorTemplate, supplierPrice, map: baseMap.map(m => ({ ...m })) };
+      Import._role = role;
+      S.pending.role = role;
+      /* Прайс поставщика: «Цена» — это закупка. Для донора переключатель включается сам,
+         иначе закупочная цена попала бы в цену продажи целевого файла. */
+      const pic = $('#impPriceIsCost');
+      if (pic) pic.classList.toggle('on', supplierPrice || role === 'donor' || isDimensionCostFile);
+      if (supplierPrice || role === 'donor' || isDimensionCostFile) { if ($('#impKey')) $('#impKey').value = 'article+brand'; }
       Import.normalize();
       Import.render();
       $('#impFileName').innerHTML = `<i class="fa-solid fa-file-lines" style="color:var(--teal)"></i> ${esc(file.name)} · ${fmt(body.length)} строк · ${headers.length} колон${headers.length % 10 === 1 && headers.length % 100 !== 11 ? 'ка' : headers.length % 10 >= 2 && headers.length % 10 <= 4 && (headers.length % 100 < 10 || headers.length % 100 > 20) ? 'ки' : 'ок'}`;
       modal('#mImport');
       if (guess) Toast.info('Подобран профиль маппинга', '«' + guess.name + '» для файла, похошего на ' + (guess.file_pattern || '—'));
+      if (role === 'donor') {
+        const t = Import.targetState();
+        Toast.info('Файл-донор', (t ? 'Данные дополнят целевой файл «' + t.file + '». ' : 'Первого файла ещё нет, поэтому донор ничего не изменит: загрузите целевой файл первым. ')
+          + 'Собственные поля каталога не меняются.');
+      } else {
+        Toast.info('Целевой файл', 'Его строки обогащаются данными для шаблона маркетплейса; следующие файлы можно загружать как доноры.');
+      }
+      Import.refreshRoleUI();
+      opened = true;
     });
+    } catch (e) {
+      /* Файл не прочитан (битый CSV, чужой формат): очередь не должна крутиться дальше
+         по тому же сломанному файлу, но и молча глотать ошибку нельзя. */
+      console.warn('[UC] import read:', e);
+      return false;
+    }
+    return opened;
+  },
+  /* ===================== v12.9.20 · РОЛЬ ФАЙЛА: ЦЕЛЕВОЙ / ДОНОР =====================
+     Правило пользователя: приложение обогащает только ПЕРВЫЙ загруженный файл данными,
+     которые нужны шаблону загрузки маркетплейса. Любой следующий файл — донор: из него
+     берутся только значения для полей карточки (себестоимость, остаток, штрихкод,
+     применимость, ТН ВЭД, кратность, сертификат), а собственные поля каталога донор
+     не переписывает и новых SKU не создаёт.
+     Состояние живёт в каталоге (S.settings.importTarget) и переживает перезагрузку. */
+  _role: 'target',
+  queue: null,
+  TARGET_KEY: 'importTarget',
+  targetState() {
+    const s = S.settings || (S.settings = {});
+    const t = s.importTarget;
+    return t && typeof t === 'object' && !Array.isArray(t) ? t : null;
+  },
+  async forgetTarget(quiet) {
+    if (S.settings) delete (S.settings).importTarget;
+    try { await UI2.saveSettings(); } catch (e) { console.warn('[UC] importTarget save:', e); }
+    Import.refreshRoleUI();
+    if (!quiet) Toast.info('Первый файл сброшен', 'Следующая загрузка снова станет целевой: её строки будут обогащаться данными для шаблона маркетплейса.');
+  },
+  /* Целевой ли это файл. Роль «auto» = решение по сохранённому первому файлу. */
+  resolveRole(file, want) {
+    const stamp = Import.targetState();
+    let role = want === 'target' || want === 'donor' ? want : 'auto';
+    if (role === 'auto') {
+      /* Первый файл, загруженный повторно (обновление каталога из того же прайса),
+         остаётся целевым. Донором становится только ДРУГОЙ файл. */
+      const sameName = !!(stamp && String(stamp.file || '') && String(stamp.file) === String(file && file.name || ''));
+      role = (!stamp || sameName) ? 'target' : 'donor';
+    }
+    /* Второй целевой файл допустим только как осознанная замена: спрашиваем. */
+    const forced = !!Import._forceTarget;
+    if (role === 'target' && stamp && !forced) {
+      const same = String(stamp.file || '') === String(file.name || '');
+      if (!same) role = 'donor';
+    }
+    /* Флаг снимаем только здесь — в момент, когда роль уже выдана. Раньше он гасился
+       в resolveRole, из-за чего явный выбор пользователя («этот файл — целевой»)
+       обесценивался на следующем шаге, и файл снова становился донором. */
+    Import._forceTarget = false;
+    return role;
+  },
+  setRole(role, opts) {
+    opts = opts || {};
+    if (!S.pending) return;
+    role = role === 'donor' ? 'donor' : 'target';
+    S.pending.role = role; Import._role = role;
+    /* v12.9.44: роль сохраняется как выбрана. Прежняя «проверка» переприсваивала
+       то же значение — она ничего не запрещала и только путала чтение. */
+    Import.fillProfiles();
+    Import.normalize(); Import.render();
+  },
+  refreshRoleUI() {
+    const bar = $('#impRole'); if (!bar) return;
+    const role = (S.pending && S.pending.role) || Import._role || 'target';
+    $$('#impRole button').forEach(b => b.classList.toggle('on', b.dataset.role === role));
+    const stamp = Import.targetState();
+    const hint = $('#impRoleHint'), info = $('#impTargetInfo'), forget = $('#impRoleForget');
+    if (forget) forget.style.display = stamp ? '' : 'none';
+    if (!hint) return;
+    if (role === 'donor') {
+      hint.innerHTML = 'Файл-донор: из него берутся <b>только значения для полей шаблона маркетплейса</b>'
+        + ' (себестоимость, остаток, штрихкод, применимость, ТН ВЭД, кратность, сертификат).'
+        + ' Собственные поля каталога и состав SKU не меняются, новые артикулы не добавляются.';
+    } else {
+      hint.innerHTML = 'Целевой файл: его строки остаются в каталоге, а данные из файлов-доноров'
+        + ' дополняют поля, которых требует шаблон загрузки маркетплейса.';
+    }
+    if (info) {
+      const t = stamp;
+      const gaps = (S.rows && S.rows.length) ? Import.templateGaps() : null;
+      const gapsHtml = gaps && gaps.gaps.length
+        ? '<div class="hint" style="margin-top:3px">Не хватает для шаблона: ' + gaps.gaps.map(g => esc(g.n) + ' — ' + fmt(g.empty) + ' SKU').join(' · ')
+          + '. Эти поля заполняет файл-донор.</div>'
+        : (gaps && gaps.total ? '<div class="hint" style="margin-top:3px">Ключевые поля шаблона заполнены у всех SKU.</div>' : '');
+      if (!t) {
+        info.style.display = gapsHtml ? '' : 'none';
+        info.innerHTML = gapsHtml;
+      }
+      else {
+        info.style.display = '';
+        const cols = Array.isArray(t.columns) ? t.columns : [];
+        info.innerHTML = '<i class="fa-solid fa-crosshairs" style="color:var(--teal)"></i> Первый файл: <b>' + esc(t.file || '—') + '</b>'
+          + (t.date ? ' · <span class="hint mono">' + esc(String(t.date).slice(0, 10)) + '</span>' : '')
+          + ' · строк <b class="mono">' + fmt(t.rows || 0) + '</b>'
+          + (cols.length ? ' · столбцы: <span class="mono">' + esc(cols.slice(0, 8).join(', ')) + (cols.length > 8 ? '…' : '') + '</span>' : '')
+          + '<div class="hint" style="margin-top:3px">Обогащаются только строки этого файла. Любой следующий файл считается донором — сменить роль можно переключателем выше.</div>';
+      }
+    }
+    const apply = $('#impApply');
+    if (apply) apply.innerHTML = role === 'donor'
+      ? '<i class="fa-solid fa-hand-holding-heart"></i> Применить донора к целевому файлу'
+      : '<i class="fa-solid fa-database"></i> Применить к каталогу';
+  },
+  /* Запоминаем первый (целевой) файл. Список столбцов нужен, чтобы отличать донора от целевого. */
+  rememberTarget() {
+    const p = S.pending; if (!p || p.role !== 'target') return;
+    const stamped = Import.targetState();
+    /* Файл дошёл сюда уже с ролью «целевой»: роль выдал resolveRole. Если прежний
+       первый файл другой, значит пользователь подтвердил замену (переключателем или
+       диалогом мультивыбора) — запоминаем новый файл. Прежний безусловный return
+       молча оставлял старый файл, хотя пользователь выбрал другой. */
+    if (stamped && String(stamped.file || '') !== String(p.file || '') && !Import._swappingTarget) return;
+    Import._swappingTarget = false;
+    S.settings.importTarget = {
+      file: String(p.file || ''),
+      date: nowISO(),
+      rows: Array.isArray(p.body) ? p.body.length : num(stamped && stamped.rows),
+      columns: (Array.isArray(p.headers) ? p.headers : []).slice(0, 40).map(h => String(h || ''))
+    };
+    UI2.saveSettings().catch(e => console.warn('[UC] importTarget save:', e));
+    Import.refreshRoleUI();
+  },
+  /* Поля, которыми донор заполняет карточку целевого файла: ключ импорта -> отметка «заполнено донором». */
+  DONOR_FIELDS: ['cost', 'stock', 'multiplicity', 'barcode', 'tnved', 'applicability', 'currency', 'warranty'],
+  DONOR_CUSTOM: [/сертификат/i, /^тн[\s_-]*вэд$/i],
+  isDonorField(field, customKey) {
+    if (field) return Import.DONOR_FIELDS.includes(field);
+    return Import.DONOR_CUSTOM.some(re => re.test(String(customKey || '').trim()));
+  },
+  /* Набор столбцов прайса поставщика, из которого берутся данные для шаблона маркетплейса.
+     Для него маппинг задан явно: «Описание» — это применимость/номенклатура поставщика,
+     «Цена» — закупка, «Требуется сертификат» и «Ссылка на сертификат» — справочные данные,
+     а не признак обязательной маркировки Честного знака. */
+  DONOR_HEADERS: ['артикул', 'каталожныйномер', 'описание', 'остаток', 'кратностьотгрузки', 'валюта', 'цена', 'штрихкод', 'тнвэд', 'требуетсясертификат', 'ссылканасертификат'],
+  donorKey(h) { return String(h == null ? '' : h).toLowerCase().replace(/[^a-zа-яё0-9]/gi, ''); },
+  isDonorHeaderSet(headers) {
+    const have = new Set((headers || []).map(h => Import.donorKey(h)));
+    const need = Import.DONOR_HEADERS;
+    const hits = need.filter(k => have.has(k)).length;
+    /* Прайс поставщика узнаём по характерному набору: артикул + цена + остаток и не менее пяти полей. */
+    return hits >= 5 && (have.has('артикул') || have.has('каталожныйномер')) && have.has('цена');
+  },
+  /* Явный маппинг прайса поставщика: без него «Описание» уходило в «Название»,
+     «Цена» — в цену продажи, а «Кратность отгрузки» терялась. */
+  donorMap(headers) {
+    const cfg = {
+      'каталожныйномер': 'article', 'артикул': 'article',
+      'бренд': 'brand', 'производитель': 'brand',
+      'описание': 'applicability', 'наименование': 'applicability',
+      'остаток': 'stock', 'количество': 'stock',
+      'кратностьотгрузки': 'multiplicity', 'кратность': 'multiplicity',
+      'валюта': 'currency',
+      'цена': 'cost', 'ценапоставщика': 'cost', 'закупка': 'cost',
+      'штрихкод': 'barcode', 'ean': 'barcode',
+      'тнвэд': 'tnved', 'тнвэдкодыеаэс': 'tnved', 'кодтнвэд': 'tnved',
+      'требуетсясертификат': '', 'ссылканасертификат': ''
+    };
+    return (headers || []).map(h => {
+      const k = Import.donorKey(h);
+      const field = cfg[k] || '';
+      const isRef = k === 'требуетсясертификат' || k === 'ссылканасертификат';
+      const std = field ? STD.find(s => s.k === field) : null;
+      return {
+        src: h, field, enabled: true,
+        target: std ? std.n : String(h || '').trim(),
+        type: std && std.t === 'num' ? 'num' : 'text', def: '', isNew: !field,
+        donorRef: isRef || undefined
+      };
+    });
+  },
+  /* Чего не хватает шаблону загрузки маркетплейса: поля, которые МОЖЕТ заполнить донор,
+     и сколько SKU каталога (то есть строк первого файла) остаются без них. */
+  templateGaps() {
+    const fields = [['cost', 'Себестоимость'], ['barcode', 'Штрихкод'], ['tnved', 'ТН ВЭД'], ['stock', 'Остаток']];
+    const total = S.rows.length;
+    const gaps = fields.map(([k, n]) => ({ k, n, empty: 0 }));
+    for (const p of S.rows) {
+      for (const g of gaps) {
+        const v = g.k === 'tnved'
+          ? (typeof CategoryTnved !== 'undefined' ? CategoryTnved.code(p) : p.tnved)
+          : p[g.k];
+        if (g.k === 'stock' ? !(num(v) > 0) : !String(v == null ? '' : v).trim()) g.empty++;
+      }
+      /* v12.9.44: считать надо по всем строкам. Прежний break выходил из цикла при
+         первой же полностью заполненной строке и занижал счётчик. */
+    }
+    return { total, gaps: gaps.filter(g => g.empty > 0) };
+  },
+  /* Сводка для окна импорта: какие поля донор заполнит, какие останутся у целевого файла. */
+  donorSummary() {
+    const p = S.pending; if (!p || p.role !== 'donor') return null;
+    const enabled = (p.map || []).filter(m => m.enabled);
+    const used = enabled.filter(m => Import.isDonorField(m.field, m.target || m.src));
+    const ignored = enabled.filter(m => !Import.isDonorField(m.field, m.target || m.src));
+    return { used, ignored };
   },
   guessProfile(name, headers) {
     return (S.mprof || []).find(p => {
@@ -25105,7 +25374,9 @@ const Import = {
   normalize() {
     const { body, map, headers } = S.pending;
     for (const m of map) if (isRemovedDbsName(m.src) || isRemovedDbsName(m.field) || isRemovedDbsName(m.target)) m.enabled = false;
-    const iArt = map.findIndex(m => m.enabled && m.field === 'article');
+    /* Донору ключ (Артикул + Бренд) нужен для сопоставления, но не для записи в каталог:
+       эти две колонки не считаются «данными донора» и не создают новых SKU. */
+    const iArt = map.findIndex(m => m.field === 'article' && (m.enabled || S.pending.role === 'donor'));
     S.pending.artCol = iArt;
     S.pending.rows = body.slice(0, 5).map(r => map.map((m, i) => {
       const raw = r[headers.indexOf(m.src)];
@@ -25121,6 +25392,9 @@ const Import = {
   },
   render() {
     const { headers, map, body } = S.pending;
+    Import.refreshRoleUI();
+    const donor = S.pending.role === 'donor';
+    const dsum = Import.donorSummary();
     $('#mapRows').innerHTML = map.map((m, i) => {
       const sample = body.slice(0, 3).map(r => String(r[headers.indexOf(m.src)] ?? '')).join(' · ');
       return `<div class="maprow" data-i="${i}">
@@ -25135,6 +25409,14 @@ const Import = {
     $$('#mapRows .maprow').forEach(row => {
       const i = +row.dataset.i, m = map[i];
       row.querySelector('[data-t=en]').onclick = e => { if (isRemovedDbsName(m.src) || isRemovedDbsName(m.field) || isRemovedDbsName(m.target)) { Toast.warn('Колонка DBS отключена', 'Для realFBS используйте отдельные поля.'); return; } m.enabled = !m.enabled; e.target.classList.toggle('on'); e.target.textContent = m.enabled ? '✓' : ''; Import.stats(); };
+      /* Донор: подсвечиваем, какие колонки действительно пойдут в карточку целевого файла. */
+      if (donor) {
+        const used = Import.isDonorField(m.field, m.target || m.src);
+        row.style.background = used ? 'rgba(47,214,163,.06)' : 'transparent';
+        row.title = used ? 'Данные донора: заполнит поле карточки целевого файла'
+          : (m.field === 'article' || m.field === 'brand' ? 'Ключ сопоставления донора (в каталог не пишется)'
+            : 'Колонка донора не переносится в карточку — собственные поля не меняются');
+      }
       row.querySelector('[data-t=field]').onchange = e => { m.field = e.target.value; if (m.field) { m.isNew = false; m.target = STD.find(s => s.k === m.field)?.n || m.target; } Import.normalize(); Import.render(); };
       row.querySelector('[data-t=target]').oninput = e => { m.target = e.target.value; Import.stats(); };
       row.querySelector('[data-t=type]').onchange = e => m.type = e.target.value;
@@ -25145,9 +25427,18 @@ const Import = {
     pre.innerHTML = '<thead><tr>' + map.map(m => `<th>${esc(m.target || m.src)}${m.field ? '' : ' <span class="hint">(user)</span>'}</th>`).join('') + '</tr></thead><tbody>' +
       S.pending.rows.map(r => '<tr>' + r.map(c => `<td class="mono" style="font-size:10.5px">${esc(c)}</td>`).join('') + '</tr>').join('') + '</tbody>';
     Import.stats();
-    $('#impMeta').innerHTML = `ключ: <b class="mono">${$('#impKey').value}</b> · режим: <b class="mono">${$('#impMode').value}</b> · всего строк: <b class="mono">${fmt(body.length)}</b>`;
+    const roleNow = S.pending.role === 'donor' ? 'донор' : 'целевой';
+    $('#impMeta').innerHTML = `роль: <b class="mono">${roleNow}</b> · ключ: <b class="mono">${$('#impKey').value}</b> · режим: <b class="mono">${S.pending.role === 'donor' ? 'только обогащение целевого' : $('#impMode').value}</b> · всего строк: <b class="mono">${fmt(body.length)}</b>`;
     $('#impWarn').innerHTML = S.pending.artCol === -1 ? '<div class="warnbox"><i class="fa-solid fa-triangle-exclamation"></i><div>Не выбрана колонка <b>Артикул</b> — импорт невозможен. Назначьте её в списке «Стандартное поле».</div></div>'
-      : '<div class="infobox"><i class="fa-solid fa-circle-check"></i><div>Ключ «' + (esc(map[S.pending.artCol].target || 'Артикул')) + '» найден. Артикулы будут нормализованы (UPPERCASE, без спецсимволов). ' + ($('#impOe').classList.contains('on') ? 'Включено транзитивное объединение по OE-номерам.' : 'Объединение по OE выключено.') + (S.pending.advisorTemplate ? ' Это файл помощника Ozon: сопоставление по артикулу и бренду, неоднозначные строки пропускаются. Проверьте переключатель автоскрытия: явная колонка видимости, политики и общее автоскрытие после запуска могут её изменить. Непустые ячейки обновят товар.' : '') + '</div></div>';
+      : (S.pending.role === 'donor' ? (() => {
+          const d = Import.donorSummary() || { used: [], ignored: [] };
+          const names = list => list.length ? list.map(m => (STD.find(s => s.k === m.field) || {}).n || m.target || m.src).join(', ') : '—';
+          return '<div class="infobox"><i class="fa-solid fa-hand-holding-heart"></i><div><b>Файл-донор.</b> В карточку целевого файла перенесётся: <b>'
+            + esc(names(d.used)) + '</b>. Останется без изменений: <span class="hint">' + esc(names(d.ignored)) + '</span>. '
+            + 'Каталожный номер и бренд используются только как ключ сопоставления. «Цена» переносится в «Себестоимость» (закупка), '
+            + '«Описание» — в «Применимость», «Требуется сертификат» и «Ссылка на сертификат» — в справочную колонку шаблона, а не в признак маркировки.</div></div>';
+        })()
+      : '<div class="infobox"><i class="fa-solid fa-circle-check"></i><div>Ключ «' + (esc(map[S.pending.artCol].target || 'Артикул')) + '» найден. Артикулы будут нормализованы (UPPERCASE, без спецсимволов). ' + ($('#impOe').classList.contains('on') ? 'Включено транзитивное объединение по OE-номерам.' : 'Объединение по OE выключено.') + (S.pending.advisorTemplate ? ' Это файл помощника Ozon: сопоставление по артикулу и бренду, неоднозначные строки пропускаются. Проверьте переключатель автоскрытия: явная колонка видимости, политики и общее автоскрытие после запуска могут её изменить. Непустые ячейки обновят товар.' : '') + '</div></div>');
   },
   stats() {
     const on = S.pending.map.filter(m => m.enabled).length;
@@ -25163,7 +25454,7 @@ const Import = {
   },
   /* v10.4: явный API программного импорта (почта) — вместо скрытой сборки S.pending снаружи модуля. */
   applyRows({ file, headers, body, map, keyMode, mode, keepVisibility }) {
-    S.pending = { file, headers, body, map: map.map(m => Object.assign({}, m)) };
+    S.pending = { file, headers, body, map: map.map(m => Object.assign({}, m)), role: 'target', fromMail: true };
     if (keyMode) { S.settings.keyMode = keyMode; const ks = $('#impKey'); if (ks) ks.value = keyMode; }
     const ms=$('#impMode'); if (ms) ms.value=['upsert','replace','newonly'].includes(mode) ? mode : 'upsert';
     const kv=$('#impKeepVisibility'); if (kv) kv.checked=keepVisibility !== false;
@@ -25174,6 +25465,9 @@ const Import = {
     /* v11-аудит: artCol мог устареть после ручных правок маппинга — пересчитываем. */
     Import.normalize();
     if (S.pending.artCol === -1) { Toast.err('Не выбран артикул', 'В окне маппинга назначьте одну колонку как «Артикул» в списке «Стандартное поле»'); return; }
+    /* v12.9.20: донор не импортируется в каталог — он только заполняет поля карточки. */
+    if (S.pending.role === 'donor') return Import.applyDonor();
+    Import.rememberTarget();
     return withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
       const movedToCost = this.applyPriceIsCost();
       if (movedToCost) Prog.msg('«Цена» из файла записана в себестоимость (закупка поставщика): ' + movedToCost);
@@ -25592,6 +25886,125 @@ const Import = {
       if (!S.view.length && S.rows.length) {
         Toast.warn('Строки не видны в таблице', 'Все SKU отсеяны правилами-исключениями или фильтрами. Смотрите жёлтый баннер в разделе 2 и счётчик «исключено».');
       }
+    }).then(() => {
+      /* v12.9.44: файлы, выбранные вместе с целевым, ждут в очереди. Без этого
+         доноры из мультивыбора терялись после применения целевого файла. */
+      if (Import.queue && Import.queue.length) setTimeout(() => Import.nextQueued(), 60);
+    });
+  },
+  /* ===================== v12.9.20 · ДОНОР: ЗАПОЛНЕНИЕ КАРТОЧКИ =====================
+     Донор не создаёт и не переписывает SKU. Он только дополняет уже существующие строки
+     целевого файла теми данными, которых требует шаблон загрузки маркетплейса:
+     себестоимость (закупка), остаток, кратность, штрихкод, ТН ВЭД, применимость,
+     валюта и гарантия. Справочные данные сертификата идут только в шаблон и в каталог
+     не пишутся. Пустая ячейка донора ничего не стирает; заполненная заменяет прежнее
+     значение поля и отмечается в «Происхождении» как значение донора. */
+  async applyDonor() {
+    const target = Import.targetState();
+    const donor = S.pending;
+    if (!target || !target.file) {
+      Toast.warn('Сначала нужен целевой файл', 'Донор обогащает строки первого загруженного файла. Загрузите целевой файл или смените роль переключателем «Роль файла».');
+      return;
+    }
+    const enabled = donor.map.filter(m => m.enabled && !isRemovedDbsName(m.src) && !isRemovedDbsName(m.field) && !isRemovedDbsName(m.target));
+    const artM = enabled.find(m => m.field === 'article');
+    const brandM = enabled.find(m => m.field === 'brand');
+    if (!artM) { Toast.err('Донор без артикула', 'В доноре нужна колонка артикула (например, «Каталожный номер») — по ней данные сопоставляются с целевым файлом.'); return; }
+    const movedToCost = this.applyPriceIsCost();
+    if (movedToCost) this.normalize();
+    const enabled2 = donor.map.filter(m => m.enabled && !isRemovedDbsName(m.src) && !isRemovedDbsName(m.field) && !isRemovedDbsName(m.target));
+    const usable = enabled2.filter(m => Import.isDonorField(m.field, m.target || m.src) || !!m.donorRef);
+    if (!usable.length) { Toast.warn('Донору нечего переносить', 'Ни одна включённая колонка не относится к полям шаблона маркетплейса. Отметьте себестоимость, остаток, штрихкод, ТН ВЭД, применимость или кратность.'); return; }
+    const isRefCol = m => !!m.donorRef || (!m.field && Import.DONOR_CUSTOM.some(re => re.test(String(m.target || m.src))));
+    const namesOf = list => [...new Set(list.map(m => (STD.find(s => s.k === m.field) || {}).n || m.target || m.src))].join(', ');
+    const cardFields = usable.filter(m => !isRefCol(m)), refFields = usable.filter(m => isRefCol(m));
+    const ok = await askConfirm('Донор дополнит целевой файл?',
+      'Целевой файл: <b>' + esc(target.file) + '</b>.<br>'
+      + (cardFields.length ? 'Поля карточки: <b>' + esc(namesOf(cardFields)) + '</b>.<br>' : '')
+      + (refFields.length ? 'Справочно в шаблон (не поля каталога): <b>' + esc(namesOf(refFields)) + '</b>.<br>' : '')
+      + 'Пустые ячейки донора ничего не изменят; заполненные заменят прежнее значение поля. Новые артикулы не добавляются, собственные поля каталога не меняются.', 'Применить донора', true);
+    if (!ok) return;
+    await withProgress('Донор → целевой файл', 'сопоставление по артикулу и бренду', async prog => {
+      const { headers, body } = donor;
+      const colOf = m => (m.virtual ? -1 : headers.indexOf(m.src));
+      const aCol = colOf(artM), bCol = brandM ? colOf(brandM) : -1;
+      /* Поля каталога переносятся в карточку; справочные данные сертификата
+         (требуется/ссылка) хранятся отдельно от полей Ozon: «Требуется сертификат»
+         в прайсе поставщика — это НЕ признак обязательной маркировки Честного знака. */
+      const fields = usable.map(m => ({
+        m, col: colOf(m),
+        key: m.field || null,
+        customKey: m.field ? null : (m.target || m.src),
+        name: (STD.find(s => s.k === m.field) || {}).n || m.target || m.src,
+        isNum: (STD.find(s => s.k === m.field) || {}).t === 'num',
+        ref: !!m.donorRef || (!m.field && Import.DONOR_CUSTOM.some(re => re.test(String(m.target || m.src))))
+      }));
+      const refKey = f => (Import.donorKey(f.m.src).includes('ссылк') ? 'certUrl' : 'certRequired');
+      const idx = new Map(), idxArt = new Map(), dupPair = new Set();
+      S.rows.forEach(p => {
+        const a = normArticle(p.article); if (!a) return;
+        const k = a + '|' + normArticle(p.brand);
+        if (idx.has(k)) dupPair.add(k); else idx.set(k, p);
+        if (!idxArt.has(a)) idxArt.set(a, p);
+      });
+      const at = nowISO();
+      let matched = 0, unmatched = 0, cells = 0, conflicts = 0;
+      const changed = new WeakSet();
+      const CHUNK = 5000;
+      for (let start = 0; start < body.length; start += CHUNK) {
+        const end = Math.min(start + CHUNK, body.length);
+        if (prog) prog('донор: строки ' + fmt(start + 1) + '–' + fmt(end) + ' из ' + fmt(body.length));
+        for (let r = start; r < end; r++) {
+          const row = body[r] || [];
+          const rawArt = String(row[aCol] == null ? '' : row[aCol]).trim();
+          if (!rawArt) continue;
+          const a = normArticle(rawArt); if (!a) continue;
+          const b = bCol >= 0 ? normArticle(row[bCol]) : '';
+          const k = a + '|' + b;
+          let p = b ? idx.get(k) : null;
+          if (!p && !dupPair.has(k)) p = idxArt.get(a);
+          if (!p) { unmatched++; continue; }
+          matched++;
+          if (!p.custom) p.custom = {};
+          if (!p._sources) p._sources = {};
+          for (const f of fields) {
+            const raw = f.m.virtual ? f.m.def : row[f.col];
+            if (raw === '' || raw === undefined || raw === null) continue;
+            if (f.ref) {
+              /* Справочные данные поставщика: не поля каталога, только шаблон маркетплейса. */
+              const txt = String(raw).trim(); if (!txt) continue;
+              p._donor = p._donor && typeof p._donor === 'object' ? p._donor : {};
+              p._donor[refKey(f)] = txt.slice(0, 400);
+              p._donor.file = donor.file; p._donor.at = at;
+              cells++; changed.add(p);
+              continue;
+            }
+            const val = f.isNum || f.m.type === 'num' ? HVC.safeNum(raw) : String(raw).trim();
+            if (val === null || val === undefined || val === '') continue;
+            const prev = f.key ? p[f.key] : p.custom[f.customKey];
+            if (prev !== undefined && prev !== null && String(prev).trim() !== '' && String(prev) !== String(val)) conflicts++;
+            if (f.key) p[f.key] = val; else p.custom[f.customKey] = val;
+            p._sources[f.key ? f.name : f.customKey] = { file: donor.file, date: at, role: 'донор' };
+            cells++; changed.add(p);
+          }
+          codeFieldsToStr(p);
+        }
+        await Exp._yield();
+      }
+      donor.matchStats = { matched, unmatched, cells, conflicts };
+      try { body.length = 0; donor.body = []; donor.rows = []; } catch (e) {}
+      if (cells) {
+        bumpVersion();
+        try { await runPipeline(true, { changedRows: changed }); }
+        catch (e) { console.warn('[UC] pipeline после донора:', e); await persistNow(); }
+      }
+      $('#mImport').classList.remove('on');
+      UI.fillFilters(); Dash.render(); Table.paint();
+      Toast[cells ? 'ok' : 'warn']('Донор применён',
+        'сопоставлено ' + fmt(matched) + ' · нет в целевом файле ' + fmt(unmatched) + ' · заполнено ячеек ' + fmt(cells)
+        + (conflicts ? ' · заменено прежних значений: ' + fmt(conflicts) : '')
+        + '. Состав каталога и собственные поля целевого файла не менялись.');
+      await Import.nextQueued();
     });
   },
   async saveProfile() {
@@ -26105,7 +26518,7 @@ SUP-SHK-710;RoadTech;Амортизатор подвески передний г
 
 
 /* ==================== РАБОЧАЯ ВЫГРУЗКА OZON ====================
-   Историческая структура: 46 полей + справочная колонка ЧЗ и 4 строки заголовков. Её соответствие
+   Историческая структура: 46 полей + 2 справочные колонки (ЧЗ, сертификат донора) и 4 строки заголовков. Её соответствие
    актуальному шаблону категории Ozon необходимо проверить отдельно. */
 const OZON_TEMPLATE_HEADERS = [["", "", "Название", "Цены\nЗаполняйте только при создании нового товара. Изменить цену существующего товара можно в разделе «Цены и акции ? Обновить цены»", "", "", "Платное продвижение\nСамые популярные способы поднять конверсию", "", "", "", "Информация о товаре\nБлок можно не заполнять, если товар продается на Ozon и вы заполнили поле SKU", "", "Дополнительная информация о товаре\nБлок можно не заполнять, если товар продается на Ozon и вы заполнили либо поле SKU, либо блок \"Информация о товаре\"", "", "", "", "", "", "", "Одинаковые характеристики\nДля всех вариантов товара, которые вы хотите объединить на одной карточке, укажите одинаковые значения в этих полях", "", "Характеристики\nБлок можно не заполнять, если товар продается на Ozon и вы заполнили либо поле SKU, либо блок \"Информация о товаре\"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["№", "Артикул*", "Название товара", "Предельная цена без акций, руб.*", "Зачёркнутая цена, руб.", "НДС, %*", "Рассрочка", "Ускоренный сбор отзывов", "Сбор первых отзывов", "SKU", "Штрихкод (Серийный номер / EAN)", "ТН ВЭД коды ЕАЭС*", "Вес в упаковке, г*", "Ширина упаковки, мм*", "Высота упаковки, мм*", "Длина упаковки, мм*", "Ссылка на главное фото*", "Ссылки на дополнительные фото", "Артикул фото", "Бренд*", "Партномер (артикул производителя)", "Тип*", "Название модели (для объединения в одну карточку)*", "Нужен код маркировки*", "Количество в упаковке, шт", "Вес товара, г", "Класс опасности товара", "Количество товара в УЕИ", "Минимальное количество оптом", "#Хештеги", "Аннотация", "Rich-контент JSON", "Объединить в похожие товары", "OEM-номер", "Альтернативные артикулы товара", "Количество, штук", "Внутренний диаметр, мм", "Материал", "Вид техники", "Цвет товара", "Гарантия", "Страна-изготовитель", "Комплектация", "Количество заводских упаковок", "Ошибка", "Недочёты"], ["", "Обязательное поле", "", "Обязательное поле", "", "Обязательное поле", "", "", "", "", "", "Обязательное поле", "Обязательное поле", "Обязательное поле", "Обязательное поле", "Обязательное поле", "Обязательное поле", "", "", "Обязательное поле\n?  Влияет на продвижение", "Рекомендуем к заполнению", "Обязательное поле", "Обязательное поле", "Обязательное поле", "Рекомендуем к заполнению", "", "Влияет на хранение и перевозку", "", "", "", "", "", "", "", "", "", "", "?? Множественный выбор", "?? Множественный выбор", "?? Множественный выбор", "", "?? Множественный выбор", "", "", "", ""], ["", "Введите артикул товара или его номер в вашей базе. Артикул должен быть уникальным в рамках вашего ассортимента https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=offer_id&language=LANGUAGE_CODE_RU&marketplaceId=1", "Ознакомьтесь с Требованиями к названию, чтобы указать правильное название товара и пройти модерацию. Вы можете не заполнять это поле — тогда название составится автоматически из обязательных характеристик: тип + бренд + модель + важные характеристики для категории https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=name&language=LANGUAGE_CODE_RU&marketplaceId=1", "Цена, которую вы устанавливаете вручную https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=price&language=LANGUAGE_CODE_RU&marketplaceId=1", "Цена, которую покупатель видит зачёркнутой https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=old_price&language=LANGUAGE_CODE_RU&marketplaceId=1", "Укажите ставку НДС. Если товар не облагается НДС, или вы не платите НДС – укажите Не облагается https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=vat&language=LANGUAGE_CODE_RU&marketplaceId=1", "Добавим товару пометку «Рассрочка 0–0–6» и будем отображать в специальных подборках. Дисконт удерживается только за проданные товары вместе с другими комиссиями, а Ozon сразу переводит вам полную стоимость товара. Редактировать список добавленных товаров можно в разделе «Цены и акции ? Мои акции» ", "Подключим товару ускоренный сбор отзывов. Вы получите 10 отзывов с любым контентом: текст, фото, видео, или просто оценки. Стоимость за один отзыв или оценку — 250 ? ", "Подключим сбор видеообзоров от топ-авторов — подойдёт для товаров, у которых мало продаж и отзывов. Каждое видео попадёт в «Ленту обзоров», а также будем по очереди закреплять отзывы в карточке товара. Вы платите 300 ? только за отзыв с оценкой 5 и возвращаете автору стоимость товара баллами ", "Заполните поле, если хотите скопировать чужой товар, размещённый на Ozon. Тогда блоки справа можно не заполнять. Артикул должен быть уникальным. https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=origin_sku&language=LANGUAGE_CODE_RU&marketplaceId=1", "Введите штрихкод товара от производителя и наклейте его на упаковку.\nЭто код, по которому товар принимают на складе. Поле обязательно для всех схем продаж. Без штрихкода не сможем выплатить компенсацию при утере https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=barcode_ot&language=LANGUAGE_CODE_RU&marketplaceId=1", "Выберите одно значение из списка. Если вы не знаете, какой код нужно указать, то вам необходимо обратиться к таможенной службе или таможенному представителю ", "Можем взять дополнительную плату, если ОВХ отличаются от реальных. Укажите вес единицы товара в граммах вместе с упаковкой, в которой будете отправлять товар. Введите только число https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=weight&language=LANGUAGE_CODE_RU&marketplaceId=1", "Можем взять дополнительную плату, если ОВХ отличаются от реальных. Измерьте в миллиметрах любую сторону товара в упаковке, в которой будете отправлять. Изделия неправильной формы — от одного края до другого. Комплект из нескольких товаров сложите стопкой. Одежду, текстиль и наборы для вышивания сложите пополам в упаковке https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=width&language=LANGUAGE_CODE_RU&marketplaceId=1", "Можем взять дополнительную плату, если ОВХ отличаются от реальных. Измерьте в миллиметрах любую сторону товара в упаковке, в которой будете отправлять. Изделия неправильной формы — от одного края до другого. Комплект из нескольких товаров сложите стопкой. Одежду, текстиль и наборы для вышивания сложите пополам в упаковке https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=height&language=LANGUAGE_CODE_RU&marketplaceId=1", "Можем взять дополнительную плату, если ОВХ отличаются от реальных. Измерьте в миллиметрах любую сторону товара в упаковке, в которой будете отправлять. Изделия неправильной формы — от одного края до другого. Комплект из нескольких товаров сложите стопкой. Одежду, текстиль и наборы для вышивания сложите пополам в упаковке https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=depth&language=LANGUAGE_CODE_RU&marketplaceId=1", "Вы можете загрузить товары в xls-шаблоне и API без фото, а потом загрузить фото через карточку товара или раздел «Обновить изображения»\n\nТребования к изображениям\n\n- формат: jpeg, jpg, png;\n- разрешение: от 200px на 200px до 4320px на 7680px;\n- размер: не привышает 10МБ;\n- фон: белый или светлый. Для белых или прозрачных товаров допустим черный фон. Для категории товаров Одежда, обувь и аксессуары фон серый (#f2f3f5);\nназвание: не может содержать символы «/» и «_».Нельзя использовать\n- изображения алкоголя;\n- эскизы товара (например, 3D-модели);\n- любые надписи (цены, логотипы, водяные знаки, контакты и пр);\n- чёрно-белые фото, фото с рамками и полосками;\n- размытые, нерезкие, некачественные фото;\n- фотографии сделанные в «домашних условиях»: на фоне ковра, мебели с тенями от других предметов.\n\nТребования к фото 18+\nНа изображениях должны быть размыты или скрыты другим образом интимные части тела.\n\nЕсли найдём в карточке запрещённую информацию, возьмём плату за обработку каждого нарушения.\nПодробнее https://seller-edu.ozon.ru/work-with-goods/zagruzka-tovarov/creating-goods/oshibki-pri-rabote-s-kartochkami#%D0%BA%D0%B0%D0%BA%D0%B8%D0%B5-%D0%BE%D1%88%D0%B8%D0%B1%D0%BA%D0%B8-%D1%81%D1%87%D0%B8%D1%82%D0%B0%D0%B5%D0%BC-%D0%BA%D1%80%D0%B8%D1%82%D0%B8%D1%87%D0%BD%D1%8B%D0%BC%D0%B8\n\nКраткое требование к ссылкам\n\nДля загрузки главного фото можно добавить только одну ссылку, лишние ссылки не будут использованы.\n\nПрямая ссылка на изображение\n\nПо ссылкам должны открываться и скачиваться только сами изображения. Обычно такие ссылки заканчиваются символами: *.jpeg, *.jpg, *.png, но есть исключение – ссылки на Яндекс.Диск. Они доступны в формате https://yadi.sk/i/qUXcCwzmryWINw или https://disk.yandex.ru/i/qUXcCwzmryWINw\n\nПравильная ссылка:\n- не содержит дополнительных портов;\n- не ведет на HTML-страницу с изображением. Например, нельзя указывать ссылку на обзор товара, в котором есть фотографии;\n- не требует авторизации для доступа к изображению.\n\nПодробнее о требованиях можно узнать в https://seller-edu.ozon.ru/work-with-goods/trebovaniya-k-kartochkam-tovarov/media/foto-i-video-tovara", "Вы можете загрузить товары в xls-шаблоне и API без фото, а потом загрузить фото через карточку товара или раздел «Обновить изображения»\n\nТребования к изображениям\n\n- формат: jpeg, jpg, png;\n- разрешение: от 200px на 200px до 4320px на 7680px;\n- размер: не превышает 10МБ;\n- фон: белый или светлый. Для белых или прозрачных товаров допустим черный фон. Для категории товаров Одежда, обувь и аксессуары фон серый (#f2f3f5).\n- название: не может содержать символ «/».Нельзя использовать\n- изображения алкоголя;\n- эскизы товара (например, 3D-модели);\n- любые надписи (цены, логотипы, водяные знаки, контакты и пр);\n- чёрно-белые фото, фото с рамками и полосками;\n- размытые, нерезкие, некачественные фото;\n- фотографии сделанные в «домашних условиях»: на фоне ковра, мебели с тенями от других предметов.\n\nТребования к фото 18+\nНа изображениях должны быть размыты или скрыты другим образом интимные части тела.\n\nЕсли найдём в карточке запрещённую информацию, возьмём плату за обработку каждого нарушения.\nПодробнее https://seller-edu.ozon.ru/work-with-goods/zagruzka-tovarov/creating-goods/oshibki-pri-rabote-s-kartochkami#%D0%BA%D0%B0%D0%BA%D0%B8%D0%B5-%D0%BE%D1%88%D0%B8%D0%B1%D0%BA%D0%B8-%D1%81%D1%87%D0%B8%D1%82%D0%B0%D0%B5%D0%BC-%D0%BA%D1%80%D0%B8%D1%82%D0%B8%D1%87%D0%BD%D1%8B%D0%BC%D0%B8\n\nКраткое требование к ссылкам\n\nПрямая ссылка на изображение\nЕсли загружаете дополнительные фотографии по отдельности, поочерёдно прикрепите ссылки для каждого изображения. Ограничение по количеству – 14 штук. По ссылкам должны открываться и скачиваться только сами изображения. Обычно такие ссылки заканчиваются символами: *.jpeg, *.jpg, *.png, но есть исключение – ссылки на Яндекс.Диск. Они доступны в формате https://yadi.sk/i/qUXcCwzmryWINw или https://disk.yandex.ru/i/qUXcCwzmryWINw. Разделите ссылки пробелом или знаком переноса строки.\n\nПравильная ссылка:\n- не содержит дополнительных портов;\n- не ведет на HTML-страницу с изображением. Например, нельзя указывать ссылку на обзор товара, в котором есть фотографии;\n- не требует авторизации для доступа к изображению.\n\nСсылка на папку с изображениями\nМожно использовать ссылку на папку с изображениями на Я.Диске. Например, https://yadi.sk/d/qUXcCwzmryWINw или https://disk.yandex.ru/d/qUXcCwzmryWINw\n\nВ качестве дополнительных фото будут использованы 14 изображений из папки.  Если вы хотите, чтобы картинки загрузились в нужном порядке, пронумеруйте их названия. Например, «1», «2», «3» или «фото1», «фото2», «фото3».\n\nПодробнее о требованиях можно узнать в https://seller-edu.ozon.ru/work-with-goods/trebovaniya-k-kartochkam-tovarov/media/foto-i-video-tovara", "Название файла с изображением товара.\n Запрещенные символы: /\" и \"_\".\" https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=group_id&language=LANGUAGE_CODE_RU&marketplaceId=1", "Среди брендов есть\nпродвигаемые — в вашем личном кабинете отмечаем их значком молнии. Товары таких брендов заметнее для покупателей, чем похожие товары конкурентов.\n\nПродвижение платное —\nуправляйте им в разделе «Товары и цены -> Бренды --> Мои бренды».", "Уникальный код, однозначно идентифицирующий деталь автомобиля. Можно добавить номер детали по каталогу фирмы-производителя для неоригинальных запчастей. Если у товара нет партномера, укажите код продавца ", "Выберите из списка наиболее подходящий тип товара. Типы участвуют в распределении товаров по категориям на сайте Ozon. Чтобы правильно указать тип, найдите на сайте Ozon товары, похожие на ваш, и укажите в этом поле такой же тип. ", "Заполните данное поле любым одинаковым значением на товарах, которые хотите объединить. И по разному, если товары нужно разъединить. Объединение произойдет при условии, что товары имеют одинаковый Тип и Бренд, и хотя бы одна вариативная характеристика заполнена по разному на всех товарах в объединении ", "Выберите «Да», если товар имеет код маркировки (КИЗ). Будем проверять его у каждой отгрузки или поставки. При интеграции через Seller API передавайте параметр как \"true\"  ", "Можно указать только целое число. ", "Вес товара без упаковки (нетто) в граммах в расчете на 1 SKU. Можно указать только целое число или десятичную дробь. Разделитель — точка ", "Если загрузите паспорт безопасности — проверим и исправим класс, если он указан неверно. Это поможет избежать проблем при хранении или перевозке товара. После прохождения модерации изменить класс опасности самостоятельно не получится. Как загрузить паспорт: https://s.ozon.ru/1ExCIi5 ", "УЕИ – унифицированная единица измерения. Необходимо указывать для продажи товаров на территории Республики Беларусь согласно локальному законодательству. Указывается количество ШТУК в одной SKU. Можно указать только целое число. ", "Заполните поле (укажите целое число), чтобы продавать товар оптом покупателям-юрлицам. Подробнее: https://seller-edu.ozon.ru/libra/work-with-goods/additional-materials/prodazha-optom ", "Хештеги работают так же, как в соцсетях: покупатели могут нажать на них в карточке или написать в поиске. Укажите тут тренд, стиль или тематику. Например, для одежды #oldmoney #kpop #бохо, для мебели #скандинавский_стиль #минимализм #лофт. Не добавляйте бренды, параметры или название товара.  Хештег должен начинаться со знака # и содержать только буквы и цифры. Если хештег состоит из 2+ слов, соедините их нижним подчеркиванием. Длина — не более 30 символов. Укажите не больше 30 хештегов, разделяйте пробелом ", "Описание товара, маркетинговый текст ", "Добавьте расширенное описание товара с фото и видео по шаблону в формате JSON. Подробнее о заполнении этой характеристики можно узнать в статье \"Rich-контент\" в \"Базе знаний\". ", "Введите одинаковое значение в этом атрибуте для объединения товаров в группу \"Похожие\". Обратите внимание, что товары в группе собираются в рамках одной категории второго уровня в личном кабинете. Если у товаров будет указано одно Название группы, но они находятся в разных категориях — вы получите несколько объединений товаров. Подробнее об объединении в Похожие можно прочитать в статье \"Похожие товары\" в \"Базе знаний\" ", "Оригинальный номер запчасти, присвоенный производителем автомобиля или автозапчастей, аналогом которой является ваш товар. Не заполняйте это поле, если у запчасти нет OEM-номера. Если номеров несколько, перечислите их через точку с запятой и пробел. ", "Заполните, если у товара есть альтернативный артикул, который используется в другом каталоге. Если артикулов несколько, перечислите их через точку с запятой через пробел. Артикул не должен совпадать со значением в полях «Партномер» и «OEM-номер» ", "Выберите из списка. Можно указать только одно значение. ", "Можно указать только целое число или десятичную дробь. Разделитель — точка. ", "Выберите из списка или укажите вручную. Можно добавить несколько значений через точку с запятой. Если точка с запятой есть в значении атрибута, поместите знак в кавычки \";\". ", "Выберите из списка или укажите вручную. Можно добавить несколько значений через точку с запятой. Если точка с запятой есть в значении атрибута, поместите знак в кавычки \";\". ", "Основной или доминирующий цвет товара. Если точного соответствия нет, используйте ближайшие цвета. Сложные цвета нужно описывать перечислением простых цветов. Например, если в товаре преобладают черный, желтый и белый цвета, то укажите их все простым перечислением. Атрибут \"Цвет товара\" — это основной цвет. Все остальные цвета можно перечислить в атрибуте \"Название цвета\", если он доступен в категории ", "Период, в течение которого производитель отвечает за качество товара. А покупатель может оформить заявку на возврат по гарантийному случаю. Выберите одно значение из выпадающего списка. ", "Страна, в которой изготовлен/собран товар и которая указана на упаковке. Может отличаться от страны бренда. Выберите из списка или укажите вручную. Можно добавить несколько значений через точку с запятой. ", "Перечислите, что входит в комплект вместе с товаром: инструкция, чехол, комплект проводов и т.п. Не дублируйте сюда значения других характеристик (аннотацию, тип или количество в упаковке). Если вы поставляете товар без дополнительной комплектации, не заполняйте эту характеристику.  ", "Сколько заводских упаковок продаёте под этим SKU. Пример: 24 банки детского пюре запаяны в 1 упаковку на заводе и в таком же виде продаются в других магазинах — укажите значение 1. \nДругой пример: завод выпускает лампочки в упаковках по 1 или 10 штук, а вы решили продавать по 3 лампочки и запаяли их в одну упаковку — значение атрибута будет 3 ", "Критичная ошибка в характеристиках товара. Товар с ошибками не будет продаваться. ", "Устаревшее или незаполненное значение в характеристиках товара. Возникает при изменениях в атрибутной модели и не влияет на продажу товара. "]];
 
@@ -29618,7 +30031,10 @@ function syncSharedExclusionControl() {
 }
 
 const OZON_WORKING_HEADERS = OZON_TEMPLATE_HEADERS.map((row,i)=>row.concat([
-  ['Справочная колонка UNIT·CONTROL','ЧЗ по списку ТН ВЭД','Не поле Ozon','Совпадение с пользовательским списком; не определяет юридическую обязанность маркировки.'][i]
+  ['Справочная колонка UNIT·CONTROL','ЧЗ по списку ТН ВЭД','Не поле Ozon','Совпадение с пользовательским списком; не определяет юридическую обязанность маркировки.'][i],
+  /* v12.9.20: данные донора — поставщика. Это не поля шаблона Ozon, а справка для
+     заполнения и проверки сертификатов. Колонка не участвует в загрузке в кабинет. */
+  ['Справочная колонка UNIT·CONTROL · донор','Сертификат поставщика (донор)','Не поле Ozon','Данные из файла-донора: требуется ли сертификат и ссылка на него. Не признак маркировки.'][i]
 ]));
 const OzonExport = {
   HEADERS: OZON_WORKING_HEADERS,
@@ -29791,7 +30207,7 @@ const OzonExport = {
             <th>Тип OZON</th>
             <th>Категория / Подкатегория</th>
             <th>Код ТН ВЭД</th>
-            <th>Маркировка</th><th>ЧЗ по списку (справочно)</th>
+            <th>Маркировка</th><th>ЧЗ по списку (справочно)</th><th>Сертификат (донор)</th>
           </tr>
         </thead>
       `;
@@ -29812,6 +30228,7 @@ const OzonExport = {
           <td class="mono hint">${r[11]}</td>
           <td><span class="tag" style="background:${r[23] === 'Да' ? '#133a24' : 'transparent'};color:${r[23] === 'Да' ? '#4ade80' : 'var(--mut)'}">${r[23]}</span></td>
           <td>${esc(r[46])}</td>
+          <td class="hint" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r[47] || '')}">${esc(r[47] || '—')}</td>
         </tr>
       `).join('');
       t.innerHTML = headHtml + '<tbody>' + (bodyHtml || '<tr><td colspan="15" class="t-c hint">Нет подходящих товаров для выгрузки</td></tr>') + '</tbody>';
@@ -29883,7 +30300,7 @@ const OzonExport = {
     };
   },
 
-  /* Преобразование карточки товара S.rows в массив 46 полей + справочная колонка ЧЗ Ozon */
+  /* Преобразование карточки товара S.rows в массив 46 полей + 2 справочные колонки (ЧЗ, сертификат донора) Ozon */
   rowToOzon(p, idx, opts) {
     opts = opts || {};
     const n = idx + 1;
@@ -30062,8 +30479,11 @@ const OzonExport = {
     if (priceModelError) errorCol = [errorCol, priceModelError].filter(Boolean).join('; ');
     if (priceModelNote) notesCol = [notesCol, priceModelNote].filter(Boolean).join('; ');
     if (CategoryTnved.isCurrentAuto(p)) notesCol = [notesCol, 'ТН ВЭД подставлен из пользовательского справочника; проверьте код по конкретному товару'].filter(Boolean).join('; ');
-    /* Та же строка, что была проверена выше: порядок 46 полей + справочная колонка ЧЗ не меняем. */
-    const out = this._pendingRow.concat([errorCol, notesCol, ChzTnved.result(p, opts._chzRules).label]);
+    /* Та же строка, что была проверена выше: порядок 46 полей + 2 справочные колонки (ЧЗ, сертификат донора) не меняем. */
+    /* v12.9.20: данные донора из прайса поставщика — только справочная колонка шаблона. */
+    const donor = (p && p._donor && typeof p._donor === 'object') ? p._donor : null;
+    const donorCert = donor ? [donor.certRequired ? 'Сертификат: ' + donor.certRequired : '', donor.certUrl || ''].filter(Boolean).join(' · ') : '';
+    const out = this._pendingRow.concat([errorCol, notesCol, ChzTnved.result(p, opts._chzRules).label, donorCert]);
     /* v12.2: страховочный проход — любой текст длиннее лимита Excel обрезаем,
        иначе XLSX не соберётся вообще (ошибка «Text length must not exceed 32767»). */
     for (let i = 0; i < out.length; i++) {
@@ -30122,12 +30542,12 @@ const OzonExport = {
     const scope = $('#ozViewScope')?.value || 'filter';
     const opts = this.getViewOptions('csv_utf8');
     const rows = this.getRows(scope);
-    const out = [['Артикул', 'Бренд', 'Название', 'Категория Ozon', 'Подкатегория Ozon', 'Тип Ozon', 'Цена', 'Вес, г', 'Ошибка', 'Недочёты']];
+    const out = [['Артикул', 'Бренд', 'Название', 'Категория Ozon', 'Подкатегория Ozon', 'Тип Ozon', 'Цена', 'Вес, г', 'Ошибка', 'Недочёты', 'Сертификат (донор)']];
     rows.forEach((p, i) => {
       const r = this.rowToOzon(p, i, opts);
       const pair = OzonReference.exportPair(p);
       const sub = pair.status === 'valid' ? (pair.path || []).slice(0,-1).join(' › ') : '';
-      out.push([r[1], r[19], r[2], pair.category, sub, pair.type, r[3], r[12], r[44], r[45]]);
+      out.push([r[1], r[19], r[2], pair.category, sub, pair.type, r[3], r[12], r[44], r[45], r[47]]);
     });
     const csv = out.map(line => line.map(v => {
       const t = safeCsvText(v);
@@ -30334,7 +30754,8 @@ const OzonExport = {
       { wch: 15 }, // Заводские упаковки
       { wch: 12 }, // Ошибка
       { wch: 12 }, // Недочёты
-      { wch: 24 }  // ЧЗ по пользовательскому списку; не поле шаблона Ozon
+      { wch: 24 }, // ЧЗ по пользовательскому списку; не поле шаблона Ozon
+      { wch: 34 }  // Сертификат поставщика (донор); не поле шаблона Ozon
     ];
 
     const wb = XLSX.utils.book_new();
@@ -30786,7 +31207,7 @@ const OzonExport = {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_рабочая_выгрузка_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.csv`;
-      await withProgress('Экспорт в OZON CSV', `${fmt(rows.length)} SKU · 46 полей + справочная колонка ЧЗ…`, async prog => {
+      await withProgress('Экспорт в OZON CSV', `${fmt(rows.length)} SKU · 46 полей + 2 справочные колонки (ЧЗ, сертификат донора)…`, async prog => {
         const blob = await OzonExport.generateCsv(rows, opts, prog);
         Exp.download(blob, fn);
         const note = OzonExport._truncatedNote();
@@ -30804,7 +31225,7 @@ const OzonExport = {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_рабочая_выгрузка_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.xlsx`;
-      await withProgress('Экспорт в OZON XLSX', `${fmt(rows.length)} SKU · 46 полей + справочная колонка ЧЗ…`, async prog => {
+      await withProgress('Экспорт в OZON XLSX', `${fmt(rows.length)} SKU · 46 полей + 2 справочные колонки (ЧЗ, сертификат донора)…`, async prog => {
         const blob = await OzonExport.generateXlsx(rows, opts, prog);
         Exp.download(blob, fn);
         const note = OzonExport._truncatedNote();
@@ -42036,6 +42457,42 @@ function bindAll() {
   $('#impNewCol').onclick = () => Import.addColumn();
   // (impApply уже привязан в верхнем критическом блоке)
   $('#impKey').onchange = $('#impMode').onchange = () => { Import.render(); };
+  /* v12.9.20 · роль файла: первый файл — целевой, остальные — доноры */
+  $$('#impRole button').forEach(b => b.onclick = async () => {
+    const want = b.dataset.role === 'donor' ? 'donor' : 'target';
+    if (want === 'target') {
+      const st = Import.targetState();
+      if (st && st.file && S.pending && String(st.file) !== String(S.pending.file)) {
+        const ok = await askConfirm('Заменить первый файл?',
+          'Сейчас целевой файл — <b>' + esc(st.file) + '</b>.<br>Сделать целевым <b>' + esc(S.pending.file) + '</b>?'
+          + ' Тогда данные этого файла попадут в каталог, а прежний целевой файл перестанет быть точкой обогащения.',
+          'Сделать целевым', true);
+        if (!ok) return;
+        Import._forceTarget = true;
+        Import._swappingTarget = true;
+      }
+    }
+    Import.setRole(want);
+    if (want === 'donor') {
+      const pic = $('#impPriceIsCost'); if (pic) pic.classList.add('on');
+      Toast.info('Роль файла: донор', 'Данные файла дополнят строки целевого файла и не изменят собственные поля каталога.');
+    } else {
+      Toast.info('Роль файла: целевой', 'Строки этого файла попадут в каталог и будут обогащаться данными доноров.');
+    }
+  });
+  const impCancel = $('#impCancel');
+  if (impCancel) impCancel.onclick = () => {
+    modal('#mImport', false);
+    if (Import.queue && Import.queue.length) setTimeout(() => Import.nextQueued(), 60);
+  };
+  const impForget = $('#impRoleForget');
+  if (impForget) impForget.onclick = async () => {
+    const st = Import.targetState();
+    if (!st) return Toast.info('Первый файл не задан', 'Следующая загрузка станет целевой автоматически.');
+    const ok = await askConfirm('Сбросить первый файл?',
+      'Забыть, что целевой файл — <b>' + esc(st.file || '') + '</b>? Следующая загруженная файлом загрузка снова станет целевой.', 'Сбросить', true);
+    if (ok) Import.forgetTarget();
+  };
   /* --- v10.5 · Транзит-конфиг под заказ --- */
   const applyFbsCfg = async () => {
     /* Сохраняем только реально изменённые поля Ozon, включая нули; не затираем
