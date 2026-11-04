@@ -19360,7 +19360,8 @@ const MemGuard = {
     if (level >= 2) {
       try { FWorker.release(); freed.push('воркер'); } catch (e) { }
       try { S.view = []; S.viewVer = -1; freed.push('срез таблицы'); } catch (e) { }
-      try { if (S.pending && S.pending.body) { S.pending.body.length = 0; freed.push('файл импорта'); } } catch (e) { }
+      /* S.pending.body содержит данные пользователя до подтверждения импорта;
+         это не кэш, и очищать его ради освобождения памяти нельзя. */
       try {
         if (typeof HVC !== 'undefined') {
           for (const m of ['_agg', '_graph']) if (HVC[m] && HVC[m].size > 2000) { HVC[m].clear(); freed.push('OE-кэш'); }
@@ -23089,12 +23090,15 @@ const HVC = {
        Индекс OE строки строится один раз на пакет в rebuildIndex, не здесь на каждую строку. */
     const H = HVC._oeSetOf(p);
     const ag = H.agg;
-    if (HVC.enCol('analog_list')) p.analog_list = H.analog_list;
+    let changed = false;
+    /* Обогащение только добавляет отсутствующее: не затираем ручные значения. */
+    if (HVC.enCol('analog_list') && !String(p.analog_list || '').trim() && H.analog_list) { p.analog_list = H.analog_list; changed = true; }
     /* Группа артикулов строится ОТ нормализованного OE строки (все артикулы с любым
        из её OE), с защитой от OE-хабов и кэшем по набору OE. */
-    if (HVC.enCol('group_articles')) {
+    if (HVC.enCol('group_articles') && !String(p.group_articles || '').trim() && H.group) {
       p.group_articles = H.group; /* артикулы через выбранный разделитель — поиск от нормализованных OE строки (1 уровень) "/" по Level1+Level2 */
       p.groupSize = H.groupSize || 1;
+      changed = true;
     }
     /* Название/Применимость/Категория — ТОЧНЫЙ ПЕРЕНОС SELECT CTE:
      * COALESCE(r.representative_name, r.analog_representative_name)
@@ -23108,9 +23112,9 @@ const HVC = {
     const wasName = !!String(p.name || '').trim(), wasAppl = !!String(p.applicability || '').trim();
     const wasCat = !!String(p.category || '').trim() && !['Без категории','Разное','Прочее','Не определено'].includes(String(p.category).trim());
     const t = HVC.textFor(p, mode);
-    if (HVC.enCol('name') && !wasName && t.name) { p.name = t.name; (p._sources = p._sources || {}).name = { file: srcTag + t.nameSource, date: nowISO() }; }
-    if (HVC.enCol('applicability') && !wasAppl && t.applicability) { p.applicability = t.applicability; (p._sources = p._sources || {}).applicability = { file: srcTag + t.applicabilitySource, date: nowISO() }; }
-    if (HVC.enCol('category') && !wasCat && t.category) { p.category = t.category; (p._sources = p._sources || {}).category = { file: srcTag + t.categorySource, date: nowISO() }; }
+    if (HVC.enCol('name') && !wasName && t.name) { p.name = t.name; (p._sources = p._sources || {}).name = { file: srcTag + t.nameSource, date: nowISO() }; changed = true; }
+    if (HVC.enCol('applicability') && !wasAppl && t.applicability) { p.applicability = t.applicability; (p._sources = p._sources || {}).applicability = { file: srcTag + t.applicabilitySource, date: nowISO() }; changed = true; }
+    if (HVC.enCol('category') && !wasCat && t.category) { p.category = t.category; (p._sources = p._sources || {}).category = { file: srcTag + t.categorySource, date: nowISO() }; changed = true; }
     const anyDim = HVC.enCol('length') || HVC.enCol('width') || HVC.enCol('height') || HVC.enCol('weight');
     const pt = HVC.parts.get(key);
     if (anyDim) {
@@ -23125,14 +23129,19 @@ const HVC = {
         const before=Object.fromEntries(dimKeys.map(k=>[k,p[k]])),at=nowISO();
         for(const col of dimKeys) if(HVC.enCol(col) && !(num(p[col])>0)) {
           p[col]=num(evidence[col]);(p._sources=p._sources || {})[col]={file:'Каталог V: один снимок артикула+бренда · нужна проверка',date:at};
+          changed=true;
         }
         p._dimensionOeReview={oe:'',source:'Каталог V: снимок того же артикула и бренда · сверьте упаковку',at,before,
           after:Object.fromEntries(dimKeys.map(k=>[k,p[k]]))};
         delete p.dimensionAnomalyAck;
       }
     }
-    if (pt) { if (!p.multiplicity) p.multiplicity = pt.multiplicity; if (!p.image_url && pt.image_url) p.image_url = pt.image_url; if (HVC.enCol('barcode') && !p.barcode && pt.barcode) p.barcode = pt.barcode; }
-    return true;
+    if (pt) {
+      if (!p.multiplicity && pt.multiplicity) { p.multiplicity = pt.multiplicity; changed = true; }
+      if (!p.image_url && pt.image_url) { p.image_url = pt.image_url; changed = true; }
+      if (HVC.enCol('barcode') && !p.barcode && pt.barcode) { p.barcode = pt.barcode; changed = true; }
+    }
+    return changed;
   },
   enrich(list,mode) { const rows=list || S.rows, scope=HVC.identityScope(rows); let n = 0; rows.forEach(p => { if (HVC.enrichOne(p,scope,mode)) n++; }); return n; },
   async enrichAsync(list, prog, mode) {
@@ -25052,11 +25061,16 @@ const Import = {
     try {
     await withProgress('Чтение файла', file.name, async () => {
       Prog.step(35);
-      const buf = await file.arrayBuffer();
+      /* Не начинаем крупное чтение, если браузер уже сообщает критическое давление
+         на heap. Это лучше, чем завершить импорт аварийным закрытием вкладки. */
+      if (typeof MemGuard !== 'undefined' && MemGuard.check('перед чтением файла') >= 2)
+        throw new Error('Недостаточно свободной памяти для безопасного импорта. Закройте лишние вкладки или загрузите файл меньшими частями.');
+      let buf = await file.arrayBuffer();
       let table = [];
       if (/\.csv$/i.test(file.name)) {
         let txt = new TextDecoder('utf-8', { fatal: false }).decode(buf);
         if (/[\uFFFD]/.test(txt.slice(0, 400))) txt = new TextDecoder('windows-1251').decode(buf);
+        buf = null; // исходные байты больше не нужны: не держим их вместе с текстом и строками
         txt = txt.replace(/^\uFEFF/, '');
         const line1 = txt.slice(0, txt.search(/[\r\n]/) < 0 ? txt.length : txt.search(/[\r\n]/));
         const d = (line1.match(/;/g) || []).length * 2 > (line1.match(/,/g) || []).length ? ';' : (line1.includes('\t') ? '\t' : ',');
@@ -25081,9 +25095,11 @@ const Import = {
         }
         if (quoted) throw new Error('CSV: незакрытая кавычка');
         if (start < txt.length || row.length || cur) { cur += txt.slice(start); row.push(cur); if (row.some(c => c.trim() !== '')) table.push(row); }
+        txt = ''; // освобождаем большую строку после разбора CSV
 
       } else {
         const wb = XLSX.read(buf, { type: 'array', dense: false, cellDates: true });
+        buf = null; // SheetJS уже прочитал книгу
         const ws = wb.Sheets[wb.SheetNames[0]];
         table = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false });
       }
@@ -25092,6 +25108,8 @@ const Import = {
       for (let i = 0; i < Math.min(9, table.length); i++) { const filled = table[i].filter(c => String(c).trim() !== '').length; const alpha = table[i].filter(c => /[а-яa-z]/i.test(String(c))).length; if (filled >= 2 && alpha >= filled * .4) { hi = i; break; } }
       const headers = table[hi].map((h, i) => String(h || '').trim() || ('Колонка_' + (i + 1)));
       const body = table.slice(hi + 1).filter(r => r.some(c => String(c).trim() !== ''));
+      table.length = 0; // строки принадлежат body; освобождаем исходный внешний массив
+      table = null;
       Prog.step(70);
       const advisorTemplate = (headers.length === 17 || headers.length === 18) && headers[0] === 'Артикул' && headers[1] === 'Бренд' &&
         headers.includes('Вознаграждение Ozon, %') && headers.includes('Логистика Ozon, ₽/ед') &&
@@ -25101,6 +25119,9 @@ const Import = {
       const keepVis = $('#impKeepVisibility'); if (keepVis) keepVis.checked = true;
       if ($('#impMode')) $('#impMode').value = 'upsert';
       if (role === 'donor' && $('#impMode')) $('#impMode').value = 'upsert';
+      const isDimensionCostFile = /весогабарит/i.test(file.name) && headers.some(h => /^цена$/i.test(h.trim())) &&
+        ['Вес (кг)','Длина (см)','Ширина (см)','Высота (см)'].every(label => headers.some(h => h.trim().toLowerCase() === label.toLowerCase()));
+      if (isDimensionCostFile && $('#impKey')) $('#impKey').value = 'article+brand';
       if (advisorTemplate) {
         /* The helper's sale-price column is never a supplier-cost column. */
         $('#impPriceIsCost')?.classList.remove('on');
@@ -25114,8 +25135,8 @@ const Import = {
       /* Прайс поставщика: «Цена» — это закупка. Для донора переключатель включается сам,
          иначе закупочная цена попала бы в цену продажи целевого файла. */
       const pic = $('#impPriceIsCost');
-      if (pic) pic.classList.toggle('on', supplierPrice || role === 'donor' || (role === 'target' && false));
-      if (supplierPrice || role === 'donor') { if ($('#impKey')) $('#impKey').value = 'article+brand'; }
+      if (pic) pic.classList.toggle('on', supplierPrice || role === 'donor' || isDimensionCostFile);
+      if (supplierPrice || role === 'donor' || isDimensionCostFile) { if ($('#impKey')) $('#impKey').value = 'article+brand'; }
       Import.normalize();
       Import.render();
       $('#impFileName').innerHTML = `<i class="fa-solid fa-file-lines" style="color:var(--teal)"></i> ${esc(file.name)} · ${fmt(body.length)} строк · ${headers.length} колон${headers.length % 10 === 1 && headers.length % 100 !== 11 ? 'ка' : headers.length % 10 >= 2 && headers.length % 10 <= 4 && (headers.length % 100 < 10 || headers.length % 100 > 20) ? 'ки' : 'ок'}`;
@@ -25450,7 +25471,8 @@ const Import = {
     return withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
       const movedToCost = this.applyPriceIsCost();
       if (movedToCost) Prog.msg('«Цена» из файла записана в себестоимость (закупка поставщика): ' + movedToCost);
-      const { map, headers, body } = S.pending;
+      const { map, headers } = S.pending;
+      let body = S.pending.body;
       const retiredColumns = map.filter(m => isRemovedDbsName(m.src) || isRemovedDbsName(m.field) || isRemovedDbsName(m.target));
       const enabled = map.filter(m => m.enabled && !isRemovedDbsName(m.src) && !isRemovedDbsName(m.field) && !isRemovedDbsName(m.target));
       if (retiredColumns.length) Toast.warn('Колонки DBS пропущены', 'Они не импортируются и не используются в расчётах. Для realFBS используйте новые отдельные поля.');
@@ -25500,29 +25522,49 @@ const Import = {
       const volumeExplicitCol = headers.findIndex(h => /^(?:объ[её]м\s+задан\s+вручную|volume\s+explicit)$/i.test(String(h || '').trim()));
       const visibilityTrigger = mapped.some(x => x.target === 'price' || x.target === 'stock');
       const keyMode = S.settings.keyMode;
-      // Detect collisions in the whole file first: do not import the first variant
-      // before discovering another literal with the same normalized key.
+      // Group identical keys before importing. For conflicting rows of one SKU,
+      // keep only the row with the smallest complete package dimensions; distinct
+      // SKUs are never combined. Ties or incomplete candidates require review.
       const sourceVariants=new Map(), sourceConflicts=new Set();
+      let duplicateDimensionResolved=0;
       const importDataSignature=r=>JSON.stringify(mapped.map(cm=>{
         if(cm.target==='article'||cm.target==='brand')return '';
         const raw=cm.m.virtual?(cm.m.def||''):r[cm.col];return raw==null?'':String(raw).trim();
       }));
+      const dimensionMaps=['length','width','height'].map(k=>mapped.find(cm=>cm.target===k));
+      const weightMap=mapped.find(cm=>cm.target==='weight');
+      const dimRank=r=>{
+        if(dimensionMaps.some(cm=>!cm))return null;
+        const ds=dimensionMaps.map(cm=>parseDimensionCm(r[cm.col],cm.m.src));
+        if(ds.some(x=>!x || !Number.isFinite(x.value) || x.value<=0))return null;
+        const dims=ds.map(x=>x.value), weight=weightMap?parseWeightKg(r[weightMap.col],weightMap.m.src):{value:0};
+        if(weightMap && (!weight || !Number.isFinite(weight.value) || weight.value<=0))return null;
+        return [dims[0]*dims[1]*dims[2],Math.max(...dims),weight.value||0];
+      };
+      const compareRank=(a,b)=>{for(let i=0;i<a.length;i++)if(Math.abs(a[i]-b[i])>1e-9)return a[i]-b[i];return 0;};
       for(const r of body) {
         const raw=artMap && r[artMap.col], a=normArticle(raw);if(!a)continue;
         const rawBrand=brandMap ? r[brandMap.col] : '', b=normArticle(rawBrand);
         const k=keyMode==='article+brand' ? a+'|'+b : a;
-        const prior=sourceVariants.get(k);
-        if(!prior) sourceVariants.set(k,{brand:b,row:r});
-        else {
-          /* В режиме «только артикул» разные нормализованные бренды остаются
-             неоднозначными; разное написание того же SKU/бренда — нет.
-             Повтор с другими данными также блокируется, но сигнатура
-             вычисляется только для реального повтора ключа. */
-          if(prior.brand && b && prior.brand!==b)sourceConflicts.add(k);
-          if(!sourceConflicts.has(k) && importDataSignature(prior.row)!==importDataSignature(r))sourceConflicts.add(k);
-          if(!prior.brand && b)prior.brand=b;
-        }
+        let group=sourceVariants.get(k);
+        if(!group)sourceVariants.set(k,group={brand:b,rows:[r]}); else {group.rows.push(r);if(!group.brand&&b)group.brand=b;}
       }
+      const selectedSourceRows=new Set();
+      for(const [k,group] of sourceVariants) {
+        const rows=group.rows;
+        if(rows.length===1){selectedSourceRows.add(rows[0]);continue;}
+        const brands=new Set(rows.map(r=>normArticle(brandMap?r[brandMap.col]:'')).filter(Boolean));
+        if(brands.size>1){sourceConflicts.add(k);rows.forEach(r=>selectedSourceRows.add(r));continue;}
+        const signatures=rows.map(importDataSignature);
+        if(signatures.every(x=>x===signatures[0])){selectedSourceRows.add(rows[0]);continue;}
+        const ranks=rows.map(dimRank);
+        if(ranks.some(x=>!x)){sourceConflicts.add(k);rows.forEach(r=>selectedSourceRows.add(r));continue;}
+        let best=0,ties=0;
+        for(let i=1;i<ranks.length;i++){const c=compareRank(ranks[i],ranks[best]);if(c<0){best=i;ties=0;}else if(c===0)ties++;}
+        if(ties){sourceConflicts.add(k);rows.forEach(r=>selectedSourceRows.add(r));continue;}
+        selectedSourceRows.add(rows[best]);duplicateDimensionResolved++;
+      }
+      body=body.filter(r=>!normArticle(artMap && r[artMap.col]) || selectedSourceRows.has(r));
       let sourceCollision=0; const sourceCollisionExamples=[];
       const CHUNK = 4000; // чанк построчной обработки — не блокирует вкладку на больших файлах
       const changedRows = new WeakSet();   /* membership for the partial pipeline */
@@ -25754,6 +25796,7 @@ const Import = {
       S.lastDimensionImportErrors={file:String(S.pending.file || ''),total:rejectedDimensionCells,items:rejectedDimensionExamples};
       if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.renderImportErrors();
       if (rejectedDimensionCells) Toast.warn('Некорректные весогабариты пропущены', fmt(rejectedDimensionCells) + ' ячеек: прежние значения при наличии сохранены; затронутые SKU требуют проверки. Артикулы и причины — в разделе аномалий.');
+      if (duplicateDimensionResolved) Toast.info('Дубли весогабаритов разрешены', `${fmt(duplicateDimensionResolved)} ключей: выбрана запись с меньшим полным объёмом упаковки (при равном объёме — меньшей стороной/весом). После импорта значения сверяются с лимитами аномалий категории.`);
       /* Схлопывание дублей, накопленных прошлыми загрузками (артикул+бренд) */
       if (prog) prog('проверка дублей по артикулу…');
       const changedList = Array.from(new Set([...touched, ...visibilityUpdates, ...ambiguousProtected]));
@@ -36725,6 +36768,8 @@ function exportCatalog() {
     { g: 'calc', k: 'tgtYM', n: 'Реком. цена ЯМ, ₽', w: 16, f: '#,##0', src: p => p.noBuyInconsistent || num(p.tgtYM) >= 10000000 ? '' : p.tgtYM },
     { g: 'calc', k: 'profitMM', n: 'ЧП Мегамаркет, ₽', w: 16, f: '#,##0', src: p => p.profitMM },
     { g: 'calc', k: 'marginMM', n: 'Маржа ММ, %', w: 12, f: '0.0', src: p => p.marginMM },
+    { g: 'calc', k: 'beMM', n: 'Безубыток Мегамаркет, ₽', w: 18, f: '#,##0', src: p => p.noBuyInconsistent || num(p.beMM) >= 10000000 ? '' : p.beMM },
+    { g: 'calc', k: 'tgtMM', n: 'Реком. цена Мегамаркет, ₽', w: 20, f: '#,##0', src: p => p.noBuyInconsistent || num(p.tgtMM) >= 10000000 ? '' : p.tgtMM },
     { g: 'calc', k: 'profitAvito', n: 'ЧП Авито, ₽', w: 16, f: '#,##0', src: p => p.profitAvito },
     { g: 'calc', k: 'marginAvito', n: 'Маржа Авито, %', w: 12, f: '0.0', src: p => p.marginAvito },
     { g: 'calc', k: 'beAvito', n: 'Безубыток Авито, ₽', w: 14, f: '#,##0', src: p => p.noBuyInconsistent || num(p.beAvito) >= 10000000 ? '' : p.beAvito },
