@@ -13315,7 +13315,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.43-client+donor.1';
+const APP_VERSION = '12.9.44-client+donor.2';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -25003,7 +25003,11 @@ const Import = {
       if (!files.length) return;
       let q = files;
       if (files.length > 1) {
+        const prev = Import.targetState();
+        const replaceNote = (prev && prev.file && String(prev.file) !== String(files[0].name))
+          ? 'Сейчас целевой файл — <b>' + esc(prev.file) + '</b>; новый заменит его.<br>' : '';
         const ok = await askConfirm('Загружено файлов: ' + files.length,
+          replaceNote +
           '<b>' + esc(files[0].name) + '</b> — целевой файл: его строки обогащаются данными из остальных файлов.<br>' +
           'Доноры: ' + files.slice(1).map(f => '<b>' + esc(f.name) + '</b>').join(', ') + '.<br>' +
           'Донор не меняет собственные поля каталога — он только заполняет данные для шаблона маркетплейса. ' +
@@ -25011,11 +25015,13 @@ const Import = {
         if (!ok) q = [files[0]];
       }
       for (let i = 0; i < q.length; i++) {
-        const role = i === 0 ? 'auto' : 'donor';
+        const role = i === 0 ? 'target' : 'donor';
+        if (role === 'target') { Import._forceTarget = true; Import._swappingTarget = true; }   /* явный выбор пользователя */
         const opened = await Import.read(q[i], { role });
-        if (!opened) break;               /* роль выбрана неверно или файл не прочитан */
-        if (i < q.length - 1) {           /* очередь: следующий файл подхватывается после «Применить» */
-          Import.queue = q.slice(i + 1);
+        if (!opened) break;               /* файл не прочитан — очередь дальше не идём */
+        const rest = q.slice(i + 1);
+        if (rest.length) {                /* очередь: следующий файл подхватывается после «Применить» */
+          Import.queue = rest;
           break;
         }
       }
@@ -25040,6 +25046,10 @@ const Import = {
     /* Роль определяется ДО разбора: по решению пользователя, по сохранённому первому файлу
        или по простому правилу «первый загруженный файл = целевой». */
     const role = Import.resolveRole(file, opts.role);
+    /* v12.9.44: возвращаем признак успеха — очередь файлов в pick()/nextQueued()
+       иначе не узнаёт, что файл открыт, и молча теряла все файлы после первого. */
+    let opened = false;
+    try {
     await withProgress('Чтение файла', file.name, async () => {
       Prog.step(35);
       const buf = await file.arrayBuffer();
@@ -25119,7 +25129,15 @@ const Import = {
         Toast.info('Целевой файл', 'Его строки обогащаются данными для шаблона маркетплейса; следующие файлы можно загружать как доноры.');
       }
       Import.refreshRoleUI();
+      opened = true;
     });
+    } catch (e) {
+      /* Файл не прочитан (битый CSV, чужой формат): очередь не должна крутиться дальше
+         по тому же сломанному файлу, но и молча глотать ошибку нельзя. */
+      console.warn('[UC] import read:', e);
+      return false;
+    }
+    return opened;
   },
   /* ===================== v12.9.20 · РОЛЬ ФАЙЛА: ЦЕЛЕВОЙ / ДОНОР =====================
      Правило пользователя: приложение обогащает только ПЕРВЫЙ загруженный файл данными,
@@ -25153,10 +25171,15 @@ const Import = {
       role = (!stamp || sameName) ? 'target' : 'donor';
     }
     /* Второй целевой файл допустим только как осознанная замена: спрашиваем. */
-    if (role === 'target' && stamp && !Import._forceTarget) {
+    const forced = !!Import._forceTarget;
+    if (role === 'target' && stamp && !forced) {
       const same = String(stamp.file || '') === String(file.name || '');
       if (!same) role = 'donor';
     }
+    /* Флаг снимаем только здесь — в момент, когда роль уже выдана. Раньше он гасился
+       в resolveRole, из-за чего явный выбор пользователя («этот файл — целевой»)
+       обесценивался на следующем шаге, и файл снова становился донором. */
+    Import._forceTarget = false;
     return role;
   },
   setRole(role, opts) {
@@ -25164,10 +25187,8 @@ const Import = {
     if (!S.pending) return;
     role = role === 'donor' ? 'donor' : 'target';
     S.pending.role = role; Import._role = role;
-    if (role === 'donor' && opts.check !== false) {
-      const known = (S.pending.map || []).some(m => m.field === 'article' || m.field === 'brand');
-      if (!known) S.pending.role = Import._role = role;
-    }
+    /* v12.9.44: роль сохраняется как выбрана. Прежняя «проверка» переприсваивала
+       то же значение — она ничего не запрещала и только путала чтение. */
     Import.fillProfiles();
     Import.normalize(); Import.render();
   },
@@ -25217,8 +25238,12 @@ const Import = {
   rememberTarget() {
     const p = S.pending; if (!p || p.role !== 'target') return;
     const stamped = Import.targetState();
-    if (stamped && String(stamped.file || '') !== String(p.file || '') && !Import._forceTarget) return;
-    Import._forceTarget = false;
+    /* Файл дошёл сюда уже с ролью «целевой»: роль выдал resolveRole. Если прежний
+       первый файл другой, значит пользователь подтвердил замену (переключателем или
+       диалогом мультивыбора) — запоминаем новый файл. Прежний безусловный return
+       молча оставлял старый файл, хотя пользователь выбрал другой. */
+    if (stamped && String(stamped.file || '') !== String(p.file || '') && !Import._swappingTarget) return;
+    Import._swappingTarget = false;
     S.settings.importTarget = {
       file: String(p.file || ''),
       date: nowISO(),
@@ -25289,7 +25314,8 @@ const Import = {
           : p[g.k];
         if (g.k === 'stock' ? !(num(v) > 0) : !String(v == null ? '' : v).trim()) g.empty++;
       }
-      if (gaps.every(g => !g.empty)) break;   /* всё заполнено — дальше считать незачем */
+      /* v12.9.44: считать надо по всем строкам. Прежний break выходил из цикла при
+         первой же полностью заполненной строке и занижал счётчик. */
     }
     return { total, gaps: gaps.filter(g => g.empty > 0) };
   },
@@ -25817,6 +25843,10 @@ const Import = {
       if (!S.view.length && S.rows.length) {
         Toast.warn('Строки не видны в таблице', 'Все SKU отсеяны правилами-исключениями или фильтрами. Смотрите жёлтый баннер в разделе 2 и счётчик «исключено».');
       }
+    }).then(() => {
+      /* v12.9.44: файлы, выбранные вместе с целевым, ждут в очереди. Без этого
+         доноры из мультивыбора терялись после применения целевого файла. */
+      if (Import.queue && Import.queue.length) setTimeout(() => Import.nextQueued(), 60);
     });
   },
   /* ===================== v12.9.20 · ДОНОР: ЗАПОЛНЕНИЕ КАРТОЧКИ =====================
@@ -42394,6 +42424,7 @@ function bindAll() {
           'Сделать целевым', true);
         if (!ok) return;
         Import._forceTarget = true;
+        Import._swappingTarget = true;
       }
     }
     Import.setRole(want);
