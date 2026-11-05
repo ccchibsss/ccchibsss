@@ -26,6 +26,12 @@
   нечего переносить (нет OE и донора в реестре) — на каталоге без OE это
   снимает десятки секунд; сообщения о сбросе памяти больше не повторяются на
   каждой порции.
+  v12.9.48 — если браузер не открывает IndexedDB (UnknownError Internal error),
+  открытие повторяется трижды, а в «Хранилище и квота» появилась кнопка
+  «Пересоздать базу»: удаляет повреждённую базу и создаёт пустую, иначе вкладка
+  навсегда остаётся в режиме памяти; при старте в этом режиме выводится
+  предупреждение. Обогащение считает флаги колонок один раз и кэширует ключ
+  «артикул+бренд» на прогон, а в консоль печатает стоимость проверки по образцу.
   Single-file application. The initial catalog is intentionally empty: records enter
   through user imports, IndexedDB persistence, or the authenticated GAS API.
   The gas-backend block is deployable Apps Script source and must be copied to the
@@ -8845,7 +8851,8 @@ try {
       <div id="cacheNativeRescue" style="display:none;padding:9px 10px;border:1px solid #4a566d;border-radius:8px">
         <div id="cacheNativeInfo" class="hint" style="margin-bottom:7px"></div>
         <button type="button" class="btn sm gh" id="cacheExportSaved">Скачать сохранённые товары JSONL</button>
-        <div class="hint" style="margin-top:5px">Только товары из старой базы, без настроек и реестров. Файл предназначен для ручного восстановления и автоматически не импортируется.</div>
+        <button type="button" class="btn sm gh" id="cacheRecreate">Пересоздать базу</button>
+        <div class="hint" style="margin-top:5px">Только товары из старой базы, без настроек и реестров. Файл предназначен для ручного восстановления и автоматически не импортируется. «Пересоздать базу» удаляет повреждённую базу источника и создаёт пустую: без этого вкладка остаётся в режиме памяти и ничего не сохраняет.</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button type="button" class="btn sm gh" id="cacheRefresh">Обновить состояние</button>
@@ -13345,7 +13352,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.47-client+audit.1';
+const APP_VERSION = '12.9.48-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13598,18 +13605,52 @@ async function checkAppDatabase(timeoutMs = 30000) {
     const idb = window.indexedDB;
     if (!idb || typeof idb.open !== 'function') return { ok:false, name:'IndexedDBUnavailable', message:'Браузер не предоставил IndexedDB в этом окне.' };
   } catch (e) { return idbOpenError(e); }
-  let timer;
-  try {
-    const result = await Promise.race([
-      Promise.resolve().then(() => mainDb.open()).then(() => mainDb.products.count()),
-      new Promise((_, reject) => { timer = setTimeout(() => { const e = new Error('База не открылась за ' + Math.round(timeoutMs/1000) + ' сек. Другая вкладка или браузер могут блокировать доступ.'); e.name = 'TimeoutError'; reject(e); }, timeoutMs); })
-    ]);
-    return { ok:true, count:result };
-  } catch (e) { return idbOpenError(e); }
-  finally { if (timer) clearTimeout(timer); }
+  /* v12.9.48: Chrome иногда отвечает на open() ошибкой UnknownError Internal
+     error, когда предыдущее соединение закрылось некорректно (например, после
+     оборванной огромной транзакции). Повторное открытие с закрытием базы
+     помогает в большинстве таких случаев, поэтому пробуем трижды. */
+  let last = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let timer;
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(() => mainDb.open()).then(() => mainDb.products.count()),
+        new Promise((_, reject) => { timer = setTimeout(() => { const e = new Error('База не открылась за ' + Math.round(timeoutMs/1000) + ' сек. Другая вкладка или браузер могут блокировать доступ.'); e.name = 'TimeoutError'; reject(e); }, timeoutMs); })
+      ]);
+      return { ok:true, count:result, attempt };
+    } catch (e) {
+      last = idbOpenError(e);
+      console.warn('[UC] IndexedDB: попытка ' + attempt + ' из 3 не удалась — ' + last.name + ': ' + last.message);
+      try { mainDb.close(); } catch (e2) { }
+      if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
+    }
+    finally { if (timer) clearTimeout(timer); }
+  }
+  return last || { ok:false, name:'UnknownError', message:'База не открылась.' };
 }
 let db = new Dexie('UC_YM_UnitEconomics');
 const mainDb = db; // сохраняем ссылку для диагностики, даже если включился режим памяти
+/* v12.9.48 · ПЕРЕСОЗДАНИЕ БАЗЫ.
+   Если Chrome не может открыть базу источника (UnknownError Internal error),
+   вкладка навсегда остаётся в режиме памяти и ничего не сохраняет. Единственный
+   выход — удалить повреждённую базу и начать чистую. Вызывается только вручную
+   из раздела «Хранилище и квота», после подтверждения; перед удалением
+   предлагается скачать товары из памяти. */
+async function recreateAppDatabase(onBlocked) {
+  try { mainDb.close(); } catch (e) { }
+  try { if (typeof db !== 'undefined' && db !== mainDb) db.close(); } catch (e) { }
+  await new Promise(resolve => {
+    let done = false, blocked = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    let req;
+    try { req = window.indexedDB.deleteDatabase('UC_YM_UnitEconomics'); }
+    catch (e) { finish(); return; }
+    req.onsuccess = finish;
+    req.onerror = () => { console.warn('[UC] удаление базы:', req.error); finish(); };
+    req.onblocked = () => { blocked = true; if (typeof onBlocked === 'function') onBlocked(); };
+    setTimeout(() => { if (blocked) return; finish(); }, 12000);
+  });
+}
 /* Открываем прежнюю версию БД без запроса повышения схемы. Если БД по текущему
    origin отсутствует, создание пустой БД отменяется через abort(), без удаления. */
 function openExistingNativeDatabase(timeoutMs = 10000) {
@@ -17977,6 +18018,7 @@ const StorageCtl = {
     if (rescue) rescue.style.display = (S._volatileStorage || S._bootError) && native && native.ok ? '' : 'none';
     if (rescueInfo && native && native.ok) rescueInfo.textContent = 'Чтение без обновления схемы обнаружило ' + fmt(native.count) + ' записей в сохранённой базе этого источника. Это не подтверждает сохранение последних изменений.';
     if (rescueBtn) rescueBtn.disabled = !native || !native.ok || !native.count || !!this._exportingSaved;
+    const recreate = $('#cacheRecreate'); if (recreate) recreate.disabled = !(S._volatileStorage || S._bootError);
     const draftInfo = $('#cacheDraftInfo'); if (draftInfo) draftInfo.textContent = draft === null ? 'Состояние черновика: недоступно.' : 'Незавершённый черновик: ' + fmt(draft) + ' строк' + (stageOwner ? '; есть маркер незавершённой записи' : '') + '. Он не очищается автоматически; может содержать частичные несохранённые данные.';
     const persist = $('#cachePersist'); if (persist) persist.disabled = S._volatileStorage || !S._dbReady || !st || typeof st.persist !== 'function';
     const retry = $('#cacheRetry'); if (retry) retry.disabled = S._volatileStorage || !S._dbReady || S._bootReady !== true || !!S._bootError;
@@ -18005,6 +18047,20 @@ const StorageCtl = {
         }
         if (S._volatileStorage || S._bootError) await this.probeNative();
       } finally { this._checkingDb = false; this.refresh(); }
+    };
+    /* v12.9.48: единственный способ выйти из режима памяти, если браузер не
+       открывает базу источника. Удаляет базу только после подтверждения. */
+    $('#cacheRecreate').onclick = async () => {
+      const info = S._dbOpenInfo || {}, reason = info.name ? info.name + ': ' + info.message : 'база не открывается';
+      const ok = await askConfirm('Пересоздать базу IndexedDB?',
+        'Браузер не открывает сохранённую базу этого сайта (' + reason + '). Пока это так, вкладка работает в режиме памяти и ничего не сохраняет.\n\n' +
+        '«Пересоздать» удалит сохранённую базу этого профиля и создаст новую пустую. Каталог в памяти (' + fmt(S.rows.length) + ' SKU) сам не сохраняется: сначала нажмите «Скачать товары из памяти», сохраните файл и проверьте его.\n\nПродолжить?',
+        'Удалить базу и пересоздать', false);
+      if (!ok) return;
+      Toast.info('Пересоздание базы', 'Удаляем базу IndexedDB этого сайта…');
+      await recreateAppDatabase(() => Toast.warn('База занята', 'Закройте другие вкладки приложения в этом профиле и повторите.'));
+      Toast.ok('База удалена', 'Приложение откроется заново с чистого хранилища. Данные из памяти не сохраняются.');
+      setTimeout(() => location.reload(), 800);
     };
     $('#cacheWriteMode').onchange = e => this.setMode(e.target.value);
     $('#cachePersist').onclick = async () => {
@@ -22576,7 +22632,13 @@ const HVC = {
     if (!p.oe_norm) p.oe_norm = codeList(p.oe_numbers).map(t => normArticle(t)).filter(Boolean).join(OE_DELIMITERS[oeMode()].join);
     return p;
   },
-  keyOf(p) { return HVC.normalizeKey(p.article) + '|' + HVC.normalizeKey(p.brand || ''); },
+  keyOf(p) {
+    const c = HVC._kCache;
+    if (c) { const hit = c.get(p); if (hit !== undefined) return hit; }
+    const v = HVC.normalizeKey(p.article) + '|' + HVC.normalizeKey(p.brand || '');
+    if (c) { try { c.set(p, v); } catch (e) { } }
+    return v;
+  },
   /* A lossy registry key is not proof that two manufacturer SKUs are the same.
      Conflicting literals are kept out of OE merging and automatic enrichment. */
   _buildIdentityIndex(lists) {
@@ -23422,58 +23484,97 @@ const HVC = {
   enrich(list,mode) { const rows=list || S.rows, scope=HVC.identityScope(rows); let n = 0; rows.forEach(p => { if (HVC.enrichOne(p,scope,mode)) n++; }); return n; },
   async enrichAsync(list, prog, mode) {
     const rows = list || S.rows, scope=HVC.identityScope(rows), CH = 1200; let n = 0;
-    const _t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const _t0 = HVC._now();
     let fast = 0, oeRows = 0, abRows = 0;
     const autoMode = !mode || mode === 'auto';
-    for (let i=0;i<rows.length;i+=CH) {
-      const end = Math.min(i+CH, rows.length);
-      for (let j=i;j<end;j++) {
-        try {
-          const p = rows[j];
-          /* v12.9.47: строки, которым нечего переносить (нет OE, нет донора в
-             реестре, все поля уже заполнены), проходят мимо тяжёлой ветки.
-             Результат тот же — эта ветка ничего бы не записала. */
-          if (autoMode && HVC._nothingToEnrich(p, scope)) { fast++; continue; }
-          if (autoMode) { if (HVC._oeKnown(p)) oeRows++; else abRows++; }
-          if (HVC.enrichOne(p,scope,mode)) n++;
-        } catch(e) { console.warn('[UC] enrichOne:', e, rows[j]?.article); }
+    /* v12.9.48: флаги колонок считаются ОДИН раз, а ключ «артикул+бренд» —
+       один раз на строку (WeakMap). Раньше на строку приходилось до семи
+       обращений к настройкам и по четыре нормализации артикула. */
+    const _flags = autoMode ? HVC._enrichFlags() : null;
+    HVC._kCache = new WeakMap();
+    const _prof = autoMode ? { n: 0, total: 0, identity: 0 } : null;
+    HVC._prof = _prof;
+    try {
+      for (let i=0;i<rows.length;i+=CH) {
+        const end = Math.min(i+CH, rows.length);
+        for (let j=i;j<end;j++) {
+          try {
+            const p = rows[j];
+            /* v12.9.47: строки, которым нечего переносить (нет OE, нет донора в
+               реестре, все поля уже заполнены), проходят мимо тяжёлой ветки.
+               Результат тот же — эта ветка ничего бы не записала. */
+            if (autoMode && HVC._nothingToEnrich(p, scope, _flags)) { fast++; continue; }
+            if (autoMode) { if (HVC._oeKnown(p)) oeRows++; else abRows++; }
+            if (HVC.enrichOne(p,scope,mode)) n++;
+          } catch(e) { console.warn('[UC] enrichOne:', e, rows[j]?.article); }
+        }
+        if (prog) prog(`обогащение по SKU/OE: ${fmt(end)} из ${fmt(rows.length)}`);
+        await Exp._yield();
       }
-      if (prog) prog(`обогащение по SKU/OE: ${fmt(end)} из ${fmt(rows.length)}`);
-      await Exp._yield();
+    } finally {
+      HVC._kCache = null;
+      HVC._prof = null;
     }
     try {
-      const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _t0);
+      const ms = Math.round(HVC._now() - _t0);
       console.info('[UC] обогащение: ' + fmt(rows.length) + ' строк · ' + fmt(ms) + ' мс · заполнено ' + fmt(n) +
         ' · без работы ' + fmt(fast) + ' · по OE ' + fmt(oeRows) + ' · по паре ' + fmt(abRows) +
         ' · ' + (rows.length ? Math.round(ms * 1000 / rows.length) : 0) + ' мкс/строка');
+      if (_prof && _prof.n) console.info('[UC] обогащение · проверка (образец ' + fmt(_prof.n) + '): ' +
+        (_prof.total / _prof.n).toFixed(1).replace('.', ',') + ' мкс/строка, из них identity ' +
+        (_prof.identity / _prof.n).toFixed(1).replace('.', ',') + ' мкс');
     } catch (e) { }
     return n;
+  },
+  _now() { try { return typeof performance !== 'undefined' ? performance.now() : Date.now(); } catch (e) { return Date.now(); } },
+  /* Флаги колонок обогащения на один прогон. */
+  _enrichFlags() {
+    return {
+      name: HVC.enCol('name'), applicability: HVC.enCol('applicability'), category: HVC.enCol('category'),
+      dims: ['weight', 'length', 'width', 'height'].filter(k => HVC.enCol(k))
+    };
+  },
+  _nothingToEnrich(p, scope, flags) {
+    const pr = HVC._prof;
+    if (!pr || pr.n >= 2000) return HVC._nothingToEnrichCore(p, scope, flags);
+    const t = HVC._now(), r = HVC._nothingToEnrichCore(p, scope, flags);
+    pr.total += HVC._now() - t; pr.n++;
+    return r;
   },
   /* v12.9.47 · БЫСТРАЯ ПРОВЕРКА «нечего переносить».
      Обогащение пишет только ПУСТЫЕ поля, а донором для строки без OE может быть
      лишь её собственная запись в реестре частей. Если все поля этой записи уже
      заполнены в строке — вызов бесполезен, но стоил 0,4 мс на 94 000 строках
      (40 секунд «обогащения» на каталоге без OE). */
-  _nothingToEnrich(p, scope) {
+  _nothingToEnrichCore(p, scope, flags) {
     if (!p || typeof p !== 'object') return true;
-    if (HVC.identityUnsafe(p, scope)) return true;                 /* строка всё равно пропускается */
+    const pr = HVC._prof, tA = pr ? HVC._now() : 0;
+    const unsafe = HVC.identityUnsafe(p, scope);
+    if (pr) pr.identity += HVC._now() - tA;
+    if (unsafe) return true;                                       /* строка всё равно пропускается */
     const rawOe = String(p.oe_norm || '').trim();
     if (rawOe) return false;                                       /* есть OE — решает OE-ветка */
-    const sku = HVC.normalizeKey(p.article), brand = HVC.normalizeKey(p.brand);
-    if (!sku || !brand) return true;                               /* гейт пары не пропустит */
     const key = HVC.keyOf(p);
+    if (key === '|' || key.charAt(0) === '|' || key.charAt(key.length - 1) === '|') return true; /* нет артикула или бренда */
     const myOes = HVC.byArt.get(key);
     if (myOes && myOes.size) return false;                         /* у связки есть OE — доноры возможны */
     const pt = HVC.parts.get(key);
     if (!pt) return true;                                          /* записи реестра нет — переносить нечего */
-    const badCat = v => !v || ['без категории', 'разное', 'прочее', 'не определено'].includes(String(v).trim().toLowerCase());
-    if (HVC.enCol('name') && !String(p.name || '').trim() && pt.name) return false;
-    if (HVC.enCol('applicability') && !String(p.applicability || '').trim() && pt.applicability) return false;
-    if (HVC.enCol('category') && badCat(p.category) && pt.category && !badCat(pt.category)) return false;
-    for (const k of ['weight', 'length', 'width', 'height']) {
-      if (!HVC.enCol(k)) continue;
+    const f = flags || HVC._enrichFlags();
+    if (f.name && !String(p.name || '').trim() && pt.name) return false;
+    if (f.applicability && !String(p.applicability || '').trim() && pt.applicability) return false;
+    if (f.category && pt.category) {
+      const badCat = v => !v || ['без категории', 'разное', 'прочее', 'не определено'].includes(String(v).trim().toLowerCase());
+      if (badCat(p.category) && !badCat(pt.category)) return false;
+    }
+    for (let i = 0; i < f.dims.length; i++) {
+      const k = f.dims[i];
       if (!(num(p[k]) > 0) && num(pt[k]) > 0) return false;
     }
+    /* Тот же перенос, что делает ветка: кратность, картинка, штрихкод. */
+    if (!num(p.multiplicity) && num(pt.multiplicity)) return false;
+    if (!p.image_url && pt.image_url) return false;
+    if (HVC.enCol('barcode') && !p.barcode && pt.barcode) return false;
     return true;
   },
   enrichAll() { return HVC.enrich(S.rows); },
@@ -24911,6 +25012,10 @@ const UI = {
         db = createVolatileDB();
         S._volatileStorage = true;
         console.warn('[UC] База не открылась — временный режим в памяти:', dbStatus.name, dbStatus.message);
+        /* v12.9.48: молчать нельзя — в этом режиме импорт не сохраняется вообще. */
+        Toast.push('warn', 'База не открылась — работа только в памяти',
+          'Сохранённый каталог не читается, импорт не запишется (' + String(dbStatus.name || 'ошибка') + '). ' +
+          'Экспортируйте данные и откройте «Хранилище и квота» → «Пересоздать базу».', 12000);
       }
       /* Это не ограничение SKU: перед потенциально тяжёлым пересчётом дать шанс
          сохранить уже записанные товары, не загружая весь каталог в память. */
