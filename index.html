@@ -12,6 +12,9 @@
   «Объёмный вес» не считается объёмом); типовые стандартные ОВХ применяются при импорте
   для пустых полей и помечаются справочной колонкой «ОВХ из стандартных весогабаритов»;
   артикул никогда не выводится датой — Date из Excel превращается в текст и подсвечивается.
+  v12.9.45 — кнопка «Проверить весь каталог»: сухой прогон по всем SKU считает пустые
+  поля и сколько из них реально заполнится (OE / пара SKU+бренд / стандартные ОВХ),
+  затем «Заполнить всё найденное» одним прогоном заполняет только пустые значения.
   Single-file application. The initial catalog is intentionally empty: records enter
   through user imports, IndexedDB persistence, or the authenticated GAS API.
   The gas-backend block is deployable Apps Script source and must be copied to the
@@ -7406,8 +7409,9 @@ html { -webkit-text-size-adjust: 100%; }
       <div class="hint" style="margin-top:5px">«Подтвердить» закрепляет показанные черновые значения. Для исправления откройте карточку; список ограничен 100 строками — используйте поиск.</div>
     </div>
   </div>
-  <div class="card" style="margin-bottom:13px" id="enCard"><div class="cardtop"><i class="fa-solid fa-wand-magic-sparkles" style="color:var(--teal)"></i><h3>Обогащение: автоматически OE → SKU+бренд</h3><div class="sp"></div>
+  <div class="card" style="margin-bottom:13px" id="enCard"><div class="cardtop" style="flex-wrap:wrap"><i class="fa-solid fa-wand-magic-sparkles" style="color:var(--teal)"></i><h3>Обогащение: автоматически OE → SKU+бренд</h3><div class="sp"></div>
     <span class="hint" id="enSourceHint">порядок: прямой OE-номер, затем точная пара SKU+бренд</span>
+    <button type="button" class="btn sm ok" id="enAuditAll" title="Проверить весь каталог: сколько полей пусто и сколько из них можно заполнить по OE, паре SKU+бренд и стандартным весогабаритам"><i class="fa-solid fa-stethoscope"></i> Проверить весь каталог</button>
     <button type="button" class="btn sm tl" id="enRunNow"><i class="fa-solid fa-bolt"></i> Обогатить сейчас</button></div>
     <div class="pad" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--line)">
       <span class="hint" style="letter-spacing:.08em;text-transform:uppercase">Обогащать по:</span>
@@ -7439,6 +7443,17 @@ html { -webkit-text-size-adjust: 100%; }
       </label>
       <div class="hint" style="margin-bottom:6px">Правило ОВХ: только тот же артикул+бренд или схожий OE-номер; из допустимых полных записей выбирается меньший комплект вес+три стороны, который проходит лимиты аномалий категории. Между разными артикулами без схожего OE данные не переносятся. Заполняются только пустые значения, источник пишется в «Происхождение».</div>
       <div id="enCoverage" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      <div id="enAuditReport" style="display:none;margin-top:10px;padding:10px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <i class="fa-solid fa-stethoscope" style="color:var(--teal)"></i><b style="font-size:12.5px">Проверка каталога</b>
+          <span class="hint mono" id="enAuditSummary"></span>
+          <div class="sp" style="flex:1"></div>
+          <button type="button" class="btn sm pri" id="enAuditFill"><i class="fa-solid fa-wand-magic-sparkles"></i> Заполнить всё найденное</button>
+          <button type="button" class="btn sm gh" id="enAuditClose">Скрыть</button>
+        </div>
+        <div id="enAuditTable" style="max-height:280px;overflow:auto;margin-top:8px"></div>
+        <div class="hint" id="enAuditNote" style="margin-top:7px;line-height:1.55"></div>
+      </div>
     </div></div>
   <div class="card" id="categoryFillCard" style="margin-bottom:13px;border-color:#365571">
     <div class="cardtop"><i class="fa-solid fa-file-import" style="color:var(--blue)"></i><h3>Заполнить пустые категории и ТН ВЭД из файла</h3><div class="sp"></div><button type="button" class="btn sm gh" id="categoryFillTemplate">Скачать шаблон CSV</button><button type="button" class="btn sm pri" id="categoryFillChoose">Выбрать XLSX / CSV</button><input type="file" id="categoryFillFile" accept=".xlsx,.xls,.csv" hidden></div>
@@ -13319,7 +13334,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.44-client+audit.1';
+const APP_VERSION = '12.9.45-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26279,6 +26294,80 @@ SUP-SHK-710;RoadTech;Амортизатор подвески передний г
 };
 
 
+
+/* ==================== ПРОВЕРКА КАТАЛОГА ПЕРЕД ОБОГАЩЕНИЕМ ====================
+   Сухой прогон: для каждой строки считается, какие поля пусты и какие из них
+   реально заполнятся тем же движком, который работает в «Обогатить сейчас» и
+   при импорте (OE → SKU+бренд → стандартные весогабариты). Работа идёт на
+   копиях строк, поэтому каталог не меняется: отчёт можно смотреть безопасно. */
+const EnrichAudit = {
+  LABELS: { length:'Длина, см', width:'Ширина, см', height:'Высота, см', weight:'Вес, кг',
+    name:'Наименование', applicability:'Применимость', category:'Категория',
+    oe_numbers:'OE-номера', analog_list:'Аналоги', group_articles:'Группа артикулов', barcode:'Штрихкод' },
+  OTHER: { ozon_category:'Категория OZON', tnved:'ТН ВЭД', image_url:'Ссылка на фото', cost:'Себестоимость' },
+  _otherEmpty(p, k) {
+    if (k === 'cost') return !(num(p.cost) > 0);
+    if (k === 'ozon_category') return !String(p.ozon_category == null ? '' : p.ozon_category).trim();
+    return !String(p[k] == null ? '' : p[k]).trim();
+  },
+  scan() {
+    const rows = (typeof S !== 'undefined' && S.rows) ? S.rows : [];
+    const mode = HVC.enrichMode();
+    const cols = HVC.EN_COLS;
+    const res = { total: rows.length, mode, autoStd: !(S.settings && S.settings.autoStdDims === false),
+      at: nowISO(), fields: cols.map(k => ({ k, label: this.LABELS[k] || k, empty: 0, fill: 0, std: 0 })),
+      other: Object.keys(this.OTHER).map(k => ({ k, label: this.OTHER[k], empty: 0 })) };
+    if (!rows.length) return res;
+    const by = new Map(res.fields.map(f => [f.k, f]));
+    const otherBy = new Map(res.other.map(o => [o.k, o]));
+    const scope = HVC.identityScope(rows);
+    const dimKeys = ['length', 'width', 'height', 'weight'];
+    /* Отчёт показывает результат «Заполнить всё найденное», то есть прогона со
+       всеми колонками обогащения: временно включаем их только в памяти. */
+    const keepCols = S.settings.enrichCols;
+    const allCols = {};
+    HVC.EN_COLS.forEach(k => { allCols[k] = true; });
+    S.settings.enrichCols = allCols;
+    const CH = 2000;
+    try {
+      for (let i = 0; i < rows.length; i += CH) {
+        const end = Math.min(i + CH, rows.length);
+        for (let j = i; j < end; j++) {
+          const p = rows[j];
+          for (const o of res.other) if (this._otherEmpty(p, o.k)) otherBy.get(o.k).empty++;
+          const missing = cols.filter(k => HVC.colEmpty(p, k));
+          if (!missing.length) continue;
+          missing.forEach(k => { by.get(k).empty++; });
+          let probe = null;
+          try {
+            probe = Object.assign({}, p, { _sources: Object.assign({}, p._sources || {}) });
+            HVC.enrichOne(probe, scope, mode);
+          } catch (e) { probe = null; }
+          if (probe) for (const k of missing) if (!HVC.colEmpty(probe, k)) by.get(k).fill++;
+          const target = probe || p;
+          if (!res.autoStd) continue;
+          if (probe && (probe.dimensionAnomalyBlocked || probe._dimensionOeReview)) continue;
+          if (!dimKeys.some(k => HVC.colEmpty(target, k))) continue;
+          try {
+            const a = StdDims.assess(target, true), f = a.found;
+            if (a.missing.length && f.status === 'match' && f.match === 'exact')
+              for (const k of a.missing) if (by.has(k)) by.get(k).std++;
+          } catch (e) { }
+        }
+      }
+    } finally {
+      if (keepCols === undefined) delete S.settings.enrichCols;
+      else S.settings.enrichCols = keepCols;
+    }
+    return res;
+  },
+  totals(res) {
+    let empty = 0, fill = 0, std = 0, other = 0;
+    for (const f of res.fields) { empty += f.empty; fill += f.fill; std += f.std; }
+    for (const o of res.other) other += o.empty;
+    return { empty, fill, std, other, left: Math.max(0, empty - fill - std) };
+  }
+};
 
 /* ==================== РАБОЧАЯ ВЫГРУЗКА OZON ====================
    Историческая структура: 46 полей + 2 справочные колонки и 4 строки заголовков. Её соответствие
@@ -42693,6 +42782,89 @@ function bindAll() {
   };
   syncEnSw();
   renderEnrichCoverage();
+  /* --- v12.9.45 · «Проверить весь каталог»: сухой прогон и заполнение всех пустых полей --- */
+  const auditBox = $('#enAuditReport');
+  const renderAudit = res => {
+    if (!auditBox || !res) return;
+    const t = EnrichAudit.totals(res);
+    const sum = $('#enAuditSummary');
+    if (sum) sum.textContent = `SKU ${fmt(res.total)} · пустых полей ${fmt(t.empty)} · заполнится ${fmt(t.fill + t.std)} · останется ${fmt(t.left)}` +
+      ` · режим: ${res.mode === 'oe' ? 'только OE' : res.mode === 'artbrand' ? 'SKU+бренд' : 'OE → SKU+бренд'}${res.autoStd ? ' + стандартные ОВХ' : ''}`;
+    const table = $('#enAuditTable');
+    if (table) {
+      const body = res.fields.map(f => {
+        const left = Math.max(0, f.empty - f.fill - f.std);
+        const color = !f.empty ? '#2fd6a3' : (left === 0 ? '#60a5fa' : '#f7b32b');
+        return `<tr><td>${esc(f.label)}</td><td class="t-r mono">${fmt(f.empty)}</td>` +
+          `<td class="t-r mono" style="color:#60a5fa">${f.fill ? fmt(f.fill) : '—'}</td>` +
+          `<td class="t-r mono" style="color:#c084fc">${f.std ? fmt(f.std) : '—'}</td>` +
+          `<td class="t-r mono" style="color:${color}">${left ? fmt(left) : '—'}</td></tr>`;
+      }).join('');
+      const other = res.other.filter(o => o.empty)
+        .map(o => `<span class="hint" style="margin-right:12px">${esc(o.label)}: <b style="color:#f7b32b">${fmt(o.empty)}</b></span>`).join('');
+      table.innerHTML = `<table class="plain" style="width:100%;font-size:11.5px"><thead><tr><th>Поле</th>` +
+        `<th class="t-r">Пусто</th><th class="t-r">OE / пара</th><th class="t-r">Стандарт</th><th class="t-r">Останется</th></tr></thead>` +
+        `<tbody>${body}</tbody></table>` + (other ? `<div style="margin-top:9px;line-height:1.8">${other}</div>` : '');
+    }
+    const note = $('#enAuditNote');
+    if (note) note.innerHTML = 'Заполняются только пустые значения: существующие данные не перезаписываются. «OE / пара» — донор по правилу ОВХ (тот же артикул+бренд или схожий OE), «Стандарт» — точное совпадение справочника стандартных весогабаритов.' +
+      (t.other ? ' Категория OZON, ТН ВЭД, ссылка на фото и себестоимость обогащением не заполняются — они приходят из импорта, дерева Ozon или вручную.' : '');
+    auditBox.style.display = 'block';
+  };
+  const runAudit = silent => {
+    if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала импортируйте товары'); return null; }
+    if (S.rows.length > 20000 && !silent && !window.confirm(`Проверить весь каталог: ${fmt(S.rows.length)} SKU. Сухой прогон займёт время — продолжить?`)) return null;
+    HVC.rebuildIndex(S.rows);
+    const res = EnrichAudit.scan();
+    renderAudit(res);
+    if (!silent) {
+      const t = EnrichAudit.totals(res);
+      Toast.info('Каталог проверен', `пусто: ${fmt(t.empty)} · можно заполнить: ${fmt(t.fill + t.std)} · останется: ${fmt(t.left)}`);
+    }
+    return res;
+  };
+  const auditBtn = $('#enAuditAll');
+  if (auditBtn) auditBtn.onclick = () => { try { runAudit(false); } catch (e) { console.error('[UC] audit:', e); Toast.err('Проверка не выполнена', String(e && e.message || e)); } };
+  const auditClose = $('#enAuditClose');
+  if (auditClose) auditClose.onclick = () => { if (auditBox) auditBox.style.display = 'none'; };
+  const auditFill = $('#enAuditFill');
+  if (auditFill) auditFill.onclick = async () => {
+    if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала импортируйте товары'); return; }
+    const mode = HVC.enrichMode();
+    const keepCols = S.settings.enrichCols;
+    const allCols = {};
+    HVC.EN_COLS.forEach(k => { allCols[k] = true; });
+    S.settings.enrichCols = allCols;
+    let rowsChanged = 0, stdRows = 0;
+    auditFill.disabled = true;
+    try {
+      await withProgress('Заполнение пустых данных', 'OE → SKU+бренд → стандартные весогабариты, только пустые поля', async prog => {
+        HVC.rebuildIndex(S.rows);
+        rowsChanged = await HVC.enrichAsync(S.rows, prog, mode);
+        if (S.settings.autoStdDims !== false) {
+          if (prog) prog('стандартные весогабариты по категории/виду…');
+          for (const p of S.rows) {
+            try {
+              if (p.dimensionAnomalyBlocked || p._dimensionOeReview) continue;
+              const a = StdDims.assess(p, true), f = a.found;
+              if (a.missing.length && f.status === 'match' && f.match === 'exact' && StdDims.fill(p, f, false).length) stdRows++;
+            } catch (e) { console.warn('[UC] StdDims:', p && p.article, e); }
+          }
+        }
+        await runPipeline(true, { onProgress: prog });
+      });
+      Toast.ok('Заполнение выполнено', `строк изменено: ${fmt(rowsChanged)}${stdRows ? ' · стандартные ОВХ: ' + fmt(stdRows) : ''}`);
+    } catch (e) {
+      console.error('[UC] audit fill:', e);
+      Toast.err('Заполнение не выполнено', String(e && e.message || e));
+    } finally {
+      if (keepCols === undefined) delete S.settings.enrichCols;
+      else S.settings.enrichCols = keepCols;
+      auditFill.disabled = false;
+      try { syncEnSw(); renderEnrichCoverage(); Table.paint(); Dash.render(); } catch (e) { }
+    }
+    try { runAudit(true); } catch (e) { }
+  };
   HVC.EN_COLS.forEach(k => {
     const el = $('#enCol_' + k); if (!el) return;
     el.onclick = async () => {
