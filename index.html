@@ -7,6 +7,11 @@
   unrelated articles; the rule is applied to both the anomaly quarantine and the
   «Обогатить сейчас» pass (OE mode takes the smallest complete donor tuple);
   «Цена» в файле поставщика по умолчанию пишется в себестоимость).
+  v12.9.44 — цена в выгрузке Ozon = себестоимость, «Зачёркнутая» по умолчанию +30 %;
+  «Весогабариты» и «Д*Ш*В» разбираются как габариты (вес больше не перехватывается,
+  «Объёмный вес» не считается объёмом); типовые стандартные ОВХ применяются при импорте
+  для пустых полей и помечаются справочной колонкой «ОВХ из стандартных весогабаритов»;
+  артикул никогда не выводится датой — Date из Excel превращается в текст и подсвечивается.
   Single-file application. The initial catalog is intentionally empty: records enter
   through user imports, IndexedDB persistence, or the authenticated GAS API.
   The gas-backend block is deployable Apps Script source and must be copied to the
@@ -7428,6 +7433,10 @@ html { -webkit-text-size-adjust: 100%; }
       <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enCol_barcode"></div><span class="hint">Штрихкод</span></div>
     </div>
     <div class="pad" style="border-top:1px solid var(--line)">
+      <label style="display:flex;gap:7px;align-items:center;cursor:pointer;font-size:11.5px;margin-bottom:6px">
+        <input type="checkbox" id="enAutoStdDims" style="accent-color:var(--teal)" checked>
+        <span>Если после OE весогабаритов всё ещё нет — типовые стандартные по категории/виду (только пустые поля)</span>
+      </label>
       <div class="hint" style="margin-bottom:6px">Правило ОВХ: только тот же артикул+бренд или схожий OE-номер; из допустимых полных записей выбирается меньший комплект вес+три стороны, который проходит лимиты аномалий категории. Между разными артикулами без схожего OE данные не переносятся. Заполняются только пустые значения, источник пишется в «Происхождение».</div>
       <div id="enCoverage" style="display:flex;gap:6px;flex-wrap:wrap"></div>
     </div></div>
@@ -8094,10 +8103,10 @@ html { -webkit-text-size-adjust: 100%; }
   <div class="vhead" style="flex-wrap:wrap;gap:10px">
     <div>
       <h2><i class="fa-solid fa-file-export" style="color:var(--teal)"></i> Экспорт данных и шаблоны маркетплейсов</h2>
-      <p>Рабочая выгрузка для Ozon (46 полей + справочная колонка ЧЗ), общий XLSX/CSV, снапшоты и профили. Перед загрузкой перенесите данные в актуальный шаблон выбранной категории из кабинета Ozon.</p>
+      <p>Рабочая выгрузка для Ozon (46 полей + 2 справочные колонки), общий XLSX/CSV, снапшоты и профили. Перед загрузкой перенесите данные в актуальный шаблон выбранной категории из кабинета Ozon.</p>
     </div>
     <div class="sp"></div>
-    <button type="button" class="btn ok" id="btnExportOzonTop" style="font-weight:700" title="Рабочая выгрузка Ozon (46 полей + справочная колонка ЧЗ; сверить с актуальным шаблоном)"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON (рабочий файл)</button>
+    <button type="button" class="btn ok" id="btnExportOzonTop" style="font-weight:700" title="Рабочая выгрузка Ozon (46 полей + 2 справочные колонки; сверить с актуальным шаблоном)"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON (рабочий файл)</button>
     <button type="button" class="btn pri" id="btnExportOpen" title="Открыть окно выбора произвольных колонок"><i class="fa-solid fa-file-export"></i> Экспорт каталога XLSX…</button>
   </div>
 
@@ -8146,7 +8155,7 @@ try {
           <i class="fa-solid fa-cloud-arrow-down" style="color:#2fd6a3;font-size:22px"></i>
           <div>
             <h3 style="font-size:16px;color:#fff;margin:0">Рабочая выгрузка товаров для Ozon</h3>
-            <div class="hint" style="color:#93c5fd;font-size:11.5px;margin-top:2px">46 полей + справочная колонка ЧЗ · текущий шаблон и обязательные поля проверьте в кабинете Ozon</div>
+            <div class="hint" style="color:#93c5fd;font-size:11.5px;margin-top:2px">46 полей + 2 справочные колонки · текущий шаблон и обязательные поля проверьте в кабинете Ozon</div>
           </div>
         </div>
         <div class="sp" style="flex:1"></div>
@@ -8181,17 +8190,18 @@ try {
           <div>
             <label class="f"><b style="color:var(--text)">2. Цена продажи (без акций)</b></label>
             <select id="ozViewPriceMode" style="width:100%;background:#1b223c;color:#fff">
-              <option value="eff" selected>Текущая цена продажи (price / effPrice)</option>
+              <option value="cost" selected>Себестоимость (= цена без акций)</option>
+              <option value="eff">Текущая цена продажи (price / effPrice)</option>
               <option value="ozon_calc">Рекомендованная цена OZON (под целевую маржу)</option>
             </select>
           </div>
           <div>
             <label class="f"><b style="color:var(--text)">3. Зачёркнутая цена (скидка)</b></label>
             <select id="ozViewDiscount" style="width:100%;background:#1b223c;color:#fff">
-              <option value="0" selected>Не заполнять (пусто — цена без скидки)</option>
+              <option value="0">Не заполнять (пусто — цена без скидки)</option>
               <option value="25">+25% к цене продажи (скидка ~20%)</option>
               <option value="20">+20% к цене продажи (скидка ~17%)</option>
-              <option value="30">+30% к цене продажи (скидка ~23%)</option>
+              <option value="30" selected>+30% к цене продажи (скидка ~23%)</option>
               <option value="15">+15% к цене продажи (скидка ~13%)</option>
             </select>
           </div>
@@ -8255,7 +8265,7 @@ try {
         <div><i class="fa-solid fa-barcode" style="color:var(--amber)"></i> OEM-номера: <b>разделитель «; » для поиска Ozon</b></div>
         <div><i class="fa-solid fa-qrcode" style="color:var(--teal)"></i> Маркировка: <b>Да / Нет</b></div>
         <div class="sp" style="flex:1"></div>
-        <span class="hint mono">46 полей + справочная колонка ЧЗ рабочего файла</span>
+        <span class="hint mono">46 полей + 2 справочные колонки рабочего файла</span>
       </div>
     </div>
 
@@ -8328,7 +8338,7 @@ try {
         <div class="hint">Фильтры: <span class="mono">default</span>, <span class="mono">upcase</span>, <span class="mono">downcase</span>, <span class="mono">trim</span>, <span class="mono">join: " / "</span>, <span class="mono">split: ","</span>, <span class="mono">replace: "a","b"</span>, <span class="mono">truncate: 30</span>, <span class="mono">pad: 13</span>, <span class="mono">delimit: " "</span>, <span class="mono">money</span>, <span class="mono">round: 2</span>, <span class="mono">plus</span>, <span class="mono">times</span></div>
         <div id="tplPreview" style="margin-top:9px"></div>
         <div style="margin-top:13px;padding:11px 12px;border:1px solid rgba(47,214,163,.25);border-radius:10px;background:rgba(47,214,163,.04)">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><i class="fa-solid fa-link" style="color:var(--teal)"></i><b style="font-size:12px">Применить этот Liquid-шаблон к полю Ozon</b><span class="hint">46 полей + справочная колонка ЧЗ рабочего файла сохраняются без изменений</span></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><i class="fa-solid fa-link" style="color:var(--teal)"></i><b style="font-size:12px">Применить этот Liquid-шаблон к полю Ozon</b><span class="hint">46 полей + 2 справочные колонки рабочего файла сохраняются без изменений</span></div>
           <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
             <div style="flex:1 1 230px"><label class="f" for="tplOzonField">Поле в файле Ozon</label><select id="tplOzonField" style="width:100%">
               <option value="2">Название товара</option><option value="20">Партномер</option><option value="22">Название модели</option><option value="29">#Хештеги</option><option value="30">Аннотация</option><option value="32">Объединить в похожие товары</option><option value="33">OEM-номер</option><option value="34">Альтернативные артикулы</option><option value="42">Комплектация</option>
@@ -8933,7 +8943,7 @@ try {
     <div style="background:rgba(47,214,163,0.1);border:1px solid rgba(47,214,163,0.3);border-radius:8px;padding:9px 13px;margin:10px 0 12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
       <div>
         <b style="color:var(--teal)"><i class="fa-solid fa-cloud-arrow-down"></i> Рабочая выгрузка для Ozon?</b>
-        <span class="hint" style="margin-left:8px">46 полей + справочная колонка ЧЗ для сверки с актуальным шаблоном выбранной категории</span>
+        <span class="hint" style="margin-left:8px">46 полей + 2 справочные колонки для сверки с актуальным шаблоном выбранной категории</span>
       </div>
       <button type="button" class="btn sm ok" id="btnExportOzonFromModal" style="font-weight:700"><i class="fa-solid fa-file-export"></i> Экспорт OZON (рабочий файл)</button>
     </div>
@@ -9123,7 +9133,7 @@ try {
   <div class="mbox" style="width:1160px;max-width:96vw">
     <div class="mhead">
       <i class="fa-solid fa-cloud-arrow-down" style="color:var(--teal)"></i>
-      <h3>Рабочая выгрузка Ozon <span class="tag" style="background:#13274f;color:#60a5fa;margin-left:8px;font-size:11px">46 полей + справочная колонка ЧЗ · не официальный шаблон</span></h3>
+      <h3>Рабочая выгрузка Ozon <span class="tag" style="background:#13274f;color:#60a5fa;margin-left:8px;font-size:11px">46 полей + 2 справочные колонки · не официальный шаблон</span></h3>
       <div class="sp" style="flex:1"></div>
       <span class="hint mono" id="ozCountInfo">Подготовка...</span>
       <button type="button" class="btn sm gh" data-close><i class="fa-solid fa-xmark"></i></button>
@@ -9158,17 +9168,18 @@ try {
           <div>
             <label class="f">Режим цен продажи</label>
             <select id="ozPriceMode" style="width:100%">
-              <option value="eff" selected>Текущая цена каталога (price / effPrice)</option>
+              <option value="cost" selected>Себестоимость (= цена без акций)</option>
+              <option value="eff">Текущая цена каталога (price / effPrice)</option>
               <option value="ozon_calc">Рекомендованная цена OZON (под целевую маржу)</option>
             </select>
           </div>
           <div>
             <label class="f">Зачёркнутая цена (скидка)</label>
             <select id="ozDiscountPct" style="width:100%">
-              <option value="0" selected>Не заполнять (пусто)</option>
+              <option value="0">Не заполнять (пусто)</option>
               <option value="25">+25% к цене продажи</option>
               <option value="20">+20% к цене продажи</option>
-              <option value="30">+30% к цене продажи</option>
+              <option value="30" selected>+30% к цене продажи</option>
               <option value="15">+15% к цене продажи</option>
             </select>
           </div>
@@ -9258,7 +9269,7 @@ try {
       </div>
     </div>
     <div class="mfoot" style="display:flex;gap:10px;align-items:center;padding:12px 16px;border-top:1px solid var(--line)">
-      <span class="hint mono">Рабочая выгрузка: 46 полей + справочная колонка ЧЗ · проверьте текущий шаблон категории</span>
+      <span class="hint mono">Рабочая выгрузка: 46 полей + 2 справочные колонки · проверьте текущий шаблон категории</span>
       <div class="sp" style="flex:1"></div>
       <button type="button" class="btn gh" data-close>Отмена</button>
       <div class="sep" style="margin:11px 0 9px"></div>
@@ -13308,7 +13319,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.43-client+audit.7';
+const APP_VERSION = '12.9.44-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13348,6 +13359,27 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const uid = p => (p || 'x') + '_' + Math.random().toString(36).slice(2, 10);
 const nowISO = () => new Date().toISOString();
 const normArticle = s => String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9А-ЯЁ]/g, '');
+/* Артикул — всегда текст. Если Excel отдал ячейку объектом Date (в файле у
+   колонки стоял формат даты), не печатаем локальную дату браузера: получаем
+   стабильную строку ДД.ММ.ГГГГ и отдельно предупреждаем о риске. */
+function articleText(v) {
+  if (v instanceof Date) {
+    if (!Number.isFinite(v.getTime())) return '';
+    const pad = n => String(n).padStart(2, '0');
+    return pad(v.getDate()) + '.' + pad(v.getMonth() + 1) + '.' + v.getFullYear();
+  }
+  return String(v == null ? '' : v).trim();
+}
+/* Похоже ли значение артикула на дату: «янв. 97», 01.1997, 1997-01-01, 1/2/97. */
+function articleLooksLikeDate(v) {
+  const s = articleText(v).toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!s || s.length > 24) return false;
+  if (/^\d{4}-\d{2}-\d{2}(?:[t ].*)?$/.test(s)) return true;
+  if (/^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}$/.test(s)) return true;
+  if (/^\d{1,2}[./-]\d{4}$/.test(s)) return true;
+  if (/^(?:янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)[а-яё]*\.?\s*\d{2,4}(?:\s*г\.?)?$/.test(s)) return true;
+  return false;
+}
 /* Source SKU identity is literal: do not fold case, Unicode or punctuation.
    Brand spelling is case-insensitive but punctuation remains significant. */
 const sourceSkuKey = s => String(s == null ? '' : s).trim();
@@ -17550,6 +17582,8 @@ const S = {
     /* Цена поставщика = закупка. По умолчанию «Цена» из файла попадает в
        «Себестоимость», а цена продажи рассчитывается. Настройка запоминается. */
     priceIsCost: true,
+    autoStdDims: true,          // типовые весогабариты по категории/виду при импорте (только пустые поля)
+    ozonDiscountPct: 30,        // «Зачёркнутая цена» по умолчанию: +30% к цене без акций
     autoCategoryByName: true, // внутренняя категория и черновик Ozon при импорте/пересчёте
     markValidStatuses: '',         // v10.8.6 (К#5): доп. валидные статусы Честного знака через «;»
     markInvalidStatuses: '',       // v10.8.6: доп. ЗАПРЕЩЁННЫЕ статусы Честного знака через «;»
@@ -18088,9 +18122,23 @@ const ENRICH_TARGETS = {
   category:'Категория', price:'Цена', minStock:'Мин. остаток', fixed:'Фиксированные расходы',
   markRequired:'Требуется Честный знак', markStatus:'Статус Честного знака', visible:'Видимость'
 };
+/* Колонки, которые нельзя привязывать к полю товара: «Объёмный вес» — это
+   логистическая плотность, а не объём упаковки и не физический вес. */
+function skipFieldHeader(header) {
+  const h = String(header || '').trim().toLowerCase();
+  return /объ[её]мн[а-яё]*\s+вес|volumetric\s+weight/.test(h);
+}
 function guessField(header) {
   const h = String(header || '').trim().toLowerCase();
   if (!h) return '';
+  /* «Объёмный вес» — логистический объёмный вес, а не объём товара в литрах.
+     Раньше он попадал в volume и подменял реальный объём упаковки. */
+  if (/объ[её]мн[а-яё]*\s+вес|volumetric\s+weight/.test(h)) return '';
+  /* «Весогабариты» и сводные «Д*Ш*В (мм)» — строка габаритов, а не вес.
+     Раньше «Весогабариты» забирала поле weight, и настоящая колонка «Вес (кг)»
+     оставалась без стандартного поля — вес не импортировался вообще. */
+  if (/весогабарит|габаритн/.test(h)) return 'dimensions_str';
+  if (/^(?:д|длина)\s*[*x×х/]\s*(?:ш|ширина)\s*[*x×х/]\s*(?:в|высота)(?=$|[^а-яё])/.test(h)) return 'dimensions_str';
   /* v12.9.13: «Цена закупки», «Закупочная цена», «Цена поставщика» — это закупка,
      а не цена продажи. Проверяем ДО общего правила «цена…», иначе такие колонки
      попадали в price и затирали цену продажи закупочной. */
@@ -18109,7 +18157,8 @@ function autoMap(headers) {
   const stdExact = {};
   STD.forEach(x => { stdExact[x.n.toLowerCase()] = x.k; });
   Object.assign(stdExact, { 'себестоимость': 'cost', 'цена': 'price', 'остаток': 'stock', 'продажи': 'sales',
-    'вес': 'weight', 'длина': 'length', 'ширина': 'width', 'высота': 'height', 'объём': 'volume', 'объем': 'volume' });
+    'вес': 'weight', 'длина': 'length', 'ширина': 'width', 'высота': 'height', 'объём': 'volume', 'объем': 'volume',
+    'весогабариты': 'dimensions_str', 'д*ш*в': 'dimensions_str', 'дшв': 'dimensions_str', 'д/ш/в': 'dimensions_str' });
   return headers.map(h => {
     const exact = { 'каталожный номер':'article', 'штрихкод':'barcode', 'ссылка на сертификат':'__custom',
       'description_category_id':'ozon_description_category_id', 'ozon_description_category_id':'ozon_description_category_id',
@@ -18122,7 +18171,10 @@ function autoMap(headers) {
     /* Отдельный рекомендованный прайс никогда не распознаём как обычную цену. */
     const isRecommended = /(?:рекоменд|ррц|\brrp\b|\bmsrp\b|recommended|suggested)/i.test(eh) && /(?:цен|price|ррц|rrp|msrp)/i.test(eh);
     let f = isRecommended || exact[eh] === '__custom' || isBuyoutPct || isOrderCount ? ''
-      : (isNetWeight ? 'net_weight' : (exact[eh] || stdExact[eh] || stdExact[ehNoUnit] || guessField(h) || det[h]));
+      /* Явные правила идут раньше нечёткого скоринга: иначе «Весогабариты»
+         перехватывала weight у «Вес (кг)», а «Объёмный вес» — volume. */
+      : (isNetWeight ? 'net_weight'
+        : (exact[eh] || stdExact[eh] || stdExact[ehNoUnit] || (skipFieldHeader(h) ? '' : (guessField(h) || det[h]))));
     if (f && used.has(f) && f !== 'name') f = '';
     if (f) used.add(f);
     return { src: h, field: f, enabled: f ? true : true, target: f ? STD.find(s => s.k === f)?.n || h : String(h || '').trim(), type: 'text', def: '', isNew: !f };
@@ -21381,6 +21433,11 @@ const Table = {
           if (c.r) st += 'text-align:right;justify-content:flex-end;font-family:JetBrains Mono';
           if (c.k === 'sel') return `<div class="${cls}" style="${st}"><span data-sel="${esc(selKey(p))}" style="width:13px;height:13px;border-radius:4px;display:inline-grid;place-items:center;font-size:9px;border:1.5px solid ${S.sel.has(selKey(p)) ? '#2fd6a3' : '#39456f'};background:${S.sel.has(selKey(p)) ? '#2fd6a3' : 'transparent'};color:#04150f;cursor:pointer">${S.sel.has(selKey(p)) ? '✓' : ''}</span></div>`;
           if (c.k === 'status') v = skuStatus(p);
+          if (c.k === 'article') {
+            /* Артикул — только текст: Date из Excel не должен выглядеть датой. */
+            v = articleText(p.article);
+            if (articleLooksLikeDate(v)) return `<div class="${cls}" style="${st}" title="Похоже на дату: Excel мог преобразовать артикул в дату. Проверьте формат колонки в исходном файле."><span style="color:#ffd98a">${esc(v)}</span> <i class="fa-solid fa-triangle-exclamation" style="font-size:9px;color:#f7b32b"></i></div>`;
+          }
           if (p.priceInputsIncomplete && ['priceForApi','priceToSet','breakEvenPrice','tgtPrice'].includes(c.k)) return `<div class="${cls}" style="${st}" title="${esc(p.priceInputsReason || 'Проверьте входные данные')}">нет расчёта</div>`;
           if (p.missingTariffBlocked && !MARKET_ECON_FIELD_MP[c.k] && INVALID_ECON_EXPORT_FIELDS.has(c.k)) return `<div class="${cls}" style="${st}" title="${esc(p.missingTariffBlocked)}">нет расчёта</div>`;
           if (marketplaceResultUnavailable(p, c.k)) return `<div class="${cls}" style="${st}" title="Расчёт недоступен: проверьте тариф или невыкуп">нет расчёта</div>`;
@@ -22027,6 +22084,9 @@ function codeFieldsToStr(p) {
   if (!p) return;
   for (const k of CODE_FIELDS) {
     let v = p[k];
+    /* Кодовое поле, пришедшее из Excel датой: храним и печатаем текстом
+       (ДД.ММ.ГГГГ), иначе артикул выглядел как «янв. 97». */
+    if (v instanceof Date) v = articleText(v);
     if (typeof v === 'number') v = String(v);
     if (typeof v === 'string') {
       const t = v.trim();
@@ -22211,6 +22271,22 @@ function parseDimensionOrVolume(raw, header, kind) {
 }
 function parseDimensionCm(raw,header) { return parseDimensionOrVolume(raw,header,'length'); }
 function parseVolumeLiters(raw,header) { return parseDimensionOrVolume(raw,header,'volume'); }
+/* Сводная ячейка габаритов: «22,7/17/8,2», «230*170*80», «23 x 17 x 8 см».
+   Единица берётся из заголовка колонки (мм → см); без единицы — сантиметры. */
+function parseDimsTriple(raw, header) {
+  const s = String(raw == null ? '' : raw).trim().replace(/,/g, '.').replace(/\s+/g, ' ');
+  if (!s || s.length > 64) return null;
+  /* Без единицы в заголовке действует та же настройка, что и для одиночных
+     колонок Д/Ш/В (по умолчанию сантиметры). */
+  const unit = dimensionUnitInHeader(header) || (typeof currentDimUnit === 'function' ? currentDimUnit() : 'cm');
+  if (unit === 'unsupported') return null;
+  const parts = s.split(/\s*(?:[*x×х]|\/|\||;)\s*/).filter(Boolean);
+  if (parts.length < 3) return null;
+  const nums = parts.slice(0, 3).map(x => parseFloat(String(x).replace(/[^0-9.\-]/g, '')));
+  if (!nums.every(n => Number.isFinite(n) && n > 0)) return null;
+  const k = unit === 'mm' ? 0.1 : unit === 'm' ? 100 : 1;
+  return { length: round(nums[0] * k, 4), width: round(nums[1] * k, 4), height: round(nums[2] * k, 4) };
+}
 function validCanonicalOvhNumber(v) {
   if (v===null || v===undefined || v==='') return true; // отсутствие — отдельный статус отгрузки
   if (v instanceof Date || typeof v==='boolean') return false;
@@ -22581,6 +22657,9 @@ const HVC = {
       const dimensionTrusted = !p._dimensionOeReview && !p.dimensionAnomalyBlocked;
       const dimInput=Object.fromEntries(dimKeys.map(k=>[k,HVC.safeNum(p[k],true)]));
       let evidence=prev._dimensionEvidence || null;
+      /* Типовые габариты из справочника — не измерение упаковки: они не должны
+         становиться донором для других артикулов через OE. */
+      if (p._stdDimsApplied) evidence=null;
       if (!dimensionTrusted) evidence=null; // never promote a provisional/borrowed tuple to registry evidence
       else if (dimKeys.every(k=>dimInput[k]!==null && dimInput[k]>0)) {
         const src=p._sources && typeof p._sources==='object' ? p._sources : {};
@@ -23663,7 +23742,7 @@ const CompetitorIntel = {
 
     prods.forEach(p => {
       const basePrice = num(p.effPrice || p.price);
-      const art = String(p.article || p.originalArticle || '').trim();
+      const art = articleText(p.article || p.originalArticle || '');
       const pName = String(p.name || 'Автозапчасть');
       const brand = String(p.brand || 'OEM');
 
@@ -24641,6 +24720,7 @@ const UI = {
       if (typeof OzonCat !== 'undefined' && OzonCat.registerTypes) OzonCat.registerTypes(S.settings.ozonRefExtra || []);
       if (typeof OzonSubcat !== 'undefined') OzonSubcat.setCustom(S.settings.ozonRefExtra || []);
       syncCatalogFormatControls();
+      syncOzonDiscountPct();
       S.settings.autoPartsFallbackPct = 47; // временный безопасный baseline; ниже синхронизируется с активным FBS parent
       try {
         if (ensureOfficialFbsAutoTariffs()) await metaSet('tariffs', S.tariffs);
@@ -25243,6 +25323,8 @@ const Import = {
         if (!idxArt.has(a)) idxArt.set(a, p); else duplicateArt.add(a);
       });
       let added = 0, updated = 0, skipped = 0, mergedByArticle = 0, ambiguousImport = 0, rejectedEconomicCells = 0, rejectedDimensionCells = 0, rejectedOzonIds = 0;
+      let articleDateCells = 0;   // артикул пришёл датой/как дата — предупреждаем, но не теряем строку
+      const articleDateExamples = [];
       const rejectedDimensionExamples = []; // bounded report, not a copy of a large input file
       const keepVisibility = !!$('#impKeepVisibility')?.checked;
       // новые пользовательские колонки
@@ -25304,6 +25386,31 @@ const Import = {
           if (duplicatePair.has(pair) && !p._ozonPreserveKey) { p._ozonPreserveKey = true; ambiguousProtected.push(p); }
         });
       }
+      /* «Цена» из файла уже перенесена в себестоимость: цену продажи
+         приравниваем к закупке только когда своей цены у строки нет. */
+      const priceFromCost = this.priceIsCostOn() &&
+        !enabled.some(m => m.field === 'price') && enabled.some(m => m.field === 'cost');
+      /* «Цена» в файле весогабаритов — это нумерация строк (1, 2, 3 …). Такая
+         колонка не должна попасть в себестоимость: иначе цена в выгрузке и вся
+         экономика построятся на номерах строк. */
+      const seqPriceCols = new Set();
+      for (const m of enabled) {
+        if (m.field !== 'price' && m.field !== 'cost') continue;
+        const col = headers.indexOf(m.src);
+        if (col < 0) continue;
+        const vals = [];
+        for (let i = 0; i < body.length && vals.length < 200; i++) {
+          const v = body[i] ? body[i][col] : '';
+          if (v === '' || v === undefined || v === null) continue;
+          const n = num(v);
+          if (!(n > 0) || !Number.isInteger(n)) { vals.length = 0; break; }
+          vals.push(n);
+        }
+        if (vals.length < 20) continue;
+        let consec = 0;
+        for (let i = 1; i < vals.length; i++) { const d = vals[i] - vals[i - 1]; if (d >= 0 && d <= 2) consec++; }
+        if (consec / (vals.length - 1) >= 0.95 && (vals[vals.length - 1] - vals[0]) <= vals.length * 2) seqPriceCols.add(col);
+      }
       const datesBefore = HVC.datesFixed;
       const importSource = { file: S.pending.file, date: nowISO() };
       for (let start = 0; start < body.length; start += CHUNK) {
@@ -25312,7 +25419,12 @@ const Import = {
         Prog.step(15 + (start / Math.max(body.length, 1)) * 45);
         for (let ri = start; ri < end; ri++) {
           const r = body[ri];
-          const rawArt = String(artMap && r[artMap.col] != null ? r[artMap.col] : '').trim();
+          const rawArtCell = artMap && r[artMap.col] != null ? r[artMap.col] : '';
+          const rawArt = articleText(rawArtCell);
+          if (rawArtCell instanceof Date || articleLooksLikeDate(rawArt)) {
+            articleDateCells++;
+            if (articleDateExamples.length < 100) articleDateExamples.push({ row: ri + 1, value: rawArt });
+          }
           const art = normArticle(rawArt);
           if (!art) { skipped++; continue; }
           const brandInFile = brandMap ? normArticle(r[brandMap.col]) : '';
@@ -25353,6 +25465,7 @@ const Import = {
           const rowOzonIds=Object.create(null);
           const rowRejectedDims=new Set(), rawTuple={}, rawOeInputs=[];
           for (const cm of mapped) {
+            if (seqPriceCols.has(cm.col)) continue; // нумерация строк вместо цены — см. предупреждение ниже
             const raw = cm.m.virtual ? (cm.m.def || '') : r[cm.col];
             if (!cm.m.virtual && (raw === '' || raw === undefined || raw === null)) continue;
             if (cm.target === 'ozon_description_category_id' || cm.target === 'ozon_type_id') {
@@ -25372,6 +25485,12 @@ const Import = {
             else val = (cm.stDef && cm.stDef.t === 'num') || cm.m.type === 'num' ? HVC.safeNum(raw, isDim)
               : cm.stDef && cm.stDef.t === 'bool' ? ['1', 'true', 'да', 'yes', 'обязательно', 'требуется'].includes(String(raw).trim().toLowerCase())
               : (cm.target === 'ozon_category' || cm.target === 'ozon_type') ? String(raw) : String(raw).trim();
+            /* Сводная ячейка «23/17/8» в колонке одной стороны (Д*Ш*В, «габариты»):
+               берём из неё только свою составляющую. */
+            if (['length','width','height'].includes(cm.target) && (val === null || !Number.isFinite(val) || val <= 0)) {
+              const triple = parseDimsTriple(raw, cm.m.src);
+              if (triple && triple[cm.target] > 0) { val = triple[cm.target]; parsedOvh = { value: val, error: '' }; }
+            }
             /* Некорректная ячейка не стирает прежнее измерение; нулевое значение
                новой записи остаётся отсутствующим, а не доказанной величиной. */
             if (cm.target === 'markRequired') { val=optionalMarkBool(raw); if(val===undefined) continue; }
@@ -25425,6 +25544,16 @@ const Import = {
                 delete p._categoryTnvedAuto; delete p._tnvedNoAutofill;
                 p._sources.tnved = importSource;
               }
+              if (cm.target === 'dimensions_str') {
+                /* Сводная строка «22,7/17/8,2» дополняет только ПУСТЫЕ стороны;
+                   отдельные колонки Д/Ш/В всегда главнее. */
+                const triple = parseDimsTriple(val, cm.m.src);
+                if (triple) for (const dk of ['length','width','height']) {
+                  if (!(num(p[dk]) > 0) && triple[dk] > 0) {
+                    p[dk] = triple[dk]; (p._sources = p._sources || {})[dk] = importSource; rowChanged = true;
+                  }
+                }
+              }
               if (cm.target === 'volume') p._volumeExplicit = num(val) > 0;
               if (cm.target === 'category') {
                 const rawCategoryPath = String(val || '').trim();
@@ -25455,6 +25584,13 @@ const Import = {
             if (previousCell !== currentCell || !p._sources[cm.srcName]) {
               p._sources[cm.srcName] = importSource; rowChanged = true;
             }
+          }
+          /* Цена продажи = себестоимость (решение владельца): пустую цену
+             заполняем закупкой, чтобы выгрузка и экономика не были нулевыми. */
+          if (priceFromCost && !(num(p.price) > 0) && num(p.cost) > 0) {
+            p.price = num(p.cost);
+            (p._sources = p._sources || {}).price = importSource;
+            rowChanged = true;
           }
           /* Даже неизменившийся комплект в новой полной строке может впервые
              дать доказательство происхождения; его необходимо сохранить. */
@@ -25519,6 +25655,12 @@ const Import = {
       if (rejectedEconomicCells) Toast.warn('Некорректные экономические поля пропущены', fmt(rejectedEconomicCells) + ' ячеек: проверьте тарифы, невыкуп и расходы; прежние значения сохранены.');
       if (rejectedOzonIds) Toast.warn('Неполные или некорректные пары ID Ozon пропущены', fmt(rejectedOzonIds) + ' строк: укажите оба ID как текст, без потери разрядов. При изменении названия прежние ID сняты.');
       S.lastDimensionImportErrors={file:String(S.pending.file || ''),total:rejectedDimensionCells,items:rejectedDimensionExamples};
+      S.lastArticleDateCheck={file:String(S.pending.file || ''),total:articleDateCells,items:articleDateExamples};
+      if (seqPriceCols.size && typeof seqPriceCols !== 'undefined') Toast.warn('Колонка «Цена» похожа на нумерацию строк',
+        'Значения идут подряд (1, 2, 3 …), поэтому в себестоимость они не записаны. Если это действительно цена, назначьте колонку вручную и проверьте единицы.');
+      if (articleDateCells) Toast.warn('Артикул похож на дату',
+        `${fmt(articleDateCells)} строк: Excel мог преобразовать код в дату (например, «янв. 97» вместо «01.1997»). ` +
+        'Проверьте колонку «Артикул» в исходном файле — формат ячейки должен быть текстовым. Значения сохранены как текст.');
       if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.renderImportErrors();
       if (rejectedDimensionCells) Toast.warn('Некорректные весогабариты пропущены', fmt(rejectedDimensionCells) + ' ячеек: прежние значения при наличии сохранены; затронутые SKU требуют проверки. Артикулы и причины — в разделе аномалий.');
       /* Схлопывание дублей, накопленных прошлыми загрузками (артикул+бренд) */
@@ -25547,6 +25689,20 @@ const Import = {
         if (prog) prog('Каталог V: OE-индекс и группировка артикулов…');
         HVC.rebuildIndex(S.rows);
         await HVC.enrichAsync(touchedUnique, prog);
+        /* Третий шаг правила ОВХ: типовые габариты по категории/виду. Только
+           точное совпадение справочника, только пустые поля и только строки,
+           которые не ждут проверки после подбора по OE. */
+        if (S.settings.autoStdDims !== false && typeof StdDims !== 'undefined') {
+          let stdFilled = 0;
+          for (const row of touchedUnique) {
+            try {
+              if (row.dimensionAnomalyBlocked || row._dimensionOeReview) continue;
+              const a = StdDims.assess(row, true), f = a.found;
+              if (a.missing.length && f.status === 'match' && f.match === 'exact' && StdDims.fill(row, f, false).length) stdFilled++;
+            } catch (e) { console.warn('[UC] StdDims import:', row && row.article, e); }
+          }
+          if (stdFilled) Prog.msg('стандартные весогабариты по категории: ' + fmt(stdFilled));
+        }
         touchedUnique.length = 0;
         const ftype = HVC.fileTypeOf(targets);
         const dfix = HVC.datesFixed - datesBefore;
@@ -26123,7 +26279,7 @@ SUP-SHK-710;RoadTech;Амортизатор подвески передний г
 
 
 /* ==================== РАБОЧАЯ ВЫГРУЗКА OZON ====================
-   Историческая структура: 46 полей + справочная колонка ЧЗ и 4 строки заголовков. Её соответствие
+   Историческая структура: 46 полей + 2 справочные колонки и 4 строки заголовков. Её соответствие
    актуальному шаблону категории Ozon необходимо проверить отдельно. */
 const OZON_TEMPLATE_HEADERS = [["", "", "Название", "Цены\nЗаполняйте только при создании нового товара. Изменить цену существующего товара можно в разделе «Цены и акции ? Обновить цены»", "", "", "Платное продвижение\nСамые популярные способы поднять конверсию", "", "", "", "Информация о товаре\nБлок можно не заполнять, если товар продается на Ozon и вы заполнили поле SKU", "", "Дополнительная информация о товаре\nБлок можно не заполнять, если товар продается на Ozon и вы заполнили либо поле SKU, либо блок \"Информация о товаре\"", "", "", "", "", "", "", "Одинаковые характеристики\nДля всех вариантов товара, которые вы хотите объединить на одной карточке, укажите одинаковые значения в этих полях", "", "Характеристики\nБлок можно не заполнять, если товар продается на Ozon и вы заполнили либо поле SKU, либо блок \"Информация о товаре\"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["№", "Артикул*", "Название товара", "Предельная цена без акций, руб.*", "Зачёркнутая цена, руб.", "НДС, %*", "Рассрочка", "Ускоренный сбор отзывов", "Сбор первых отзывов", "SKU", "Штрихкод (Серийный номер / EAN)", "ТН ВЭД коды ЕАЭС*", "Вес в упаковке, г*", "Ширина упаковки, мм*", "Высота упаковки, мм*", "Длина упаковки, мм*", "Ссылка на главное фото*", "Ссылки на дополнительные фото", "Артикул фото", "Бренд*", "Партномер (артикул производителя)", "Тип*", "Название модели (для объединения в одну карточку)*", "Нужен код маркировки*", "Количество в упаковке, шт", "Вес товара, г", "Класс опасности товара", "Количество товара в УЕИ", "Минимальное количество оптом", "#Хештеги", "Аннотация", "Rich-контент JSON", "Объединить в похожие товары", "OEM-номер", "Альтернативные артикулы товара", "Количество, штук", "Внутренний диаметр, мм", "Материал", "Вид техники", "Цвет товара", "Гарантия", "Страна-изготовитель", "Комплектация", "Количество заводских упаковок", "Ошибка", "Недочёты"], ["", "Обязательное поле", "", "Обязательное поле", "", "Обязательное поле", "", "", "", "", "", "Обязательное поле", "Обязательное поле", "Обязательное поле", "Обязательное поле", "Обязательное поле", "Обязательное поле", "", "", "Обязательное поле\n?  Влияет на продвижение", "Рекомендуем к заполнению", "Обязательное поле", "Обязательное поле", "Обязательное поле", "Рекомендуем к заполнению", "", "Влияет на хранение и перевозку", "", "", "", "", "", "", "", "", "", "", "?? Множественный выбор", "?? Множественный выбор", "?? Множественный выбор", "", "?? Множественный выбор", "", "", "", ""], ["", "Введите артикул товара или его номер в вашей базе. Артикул должен быть уникальным в рамках вашего ассортимента https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=offer_id&language=LANGUAGE_CODE_RU&marketplaceId=1", "Ознакомьтесь с Требованиями к названию, чтобы указать правильное название товара и пройти модерацию. Вы можете не заполнять это поле — тогда название составится автоматически из обязательных характеристик: тип + бренд + модель + важные характеристики для категории https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=name&language=LANGUAGE_CODE_RU&marketplaceId=1", "Цена, которую вы устанавливаете вручную https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=price&language=LANGUAGE_CODE_RU&marketplaceId=1", "Цена, которую покупатель видит зачёркнутой https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=old_price&language=LANGUAGE_CODE_RU&marketplaceId=1", "Укажите ставку НДС. Если товар не облагается НДС, или вы не платите НДС – укажите Не облагается https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=vat&language=LANGUAGE_CODE_RU&marketplaceId=1", "Добавим товару пометку «Рассрочка 0–0–6» и будем отображать в специальных подборках. Дисконт удерживается только за проданные товары вместе с другими комиссиями, а Ozon сразу переводит вам полную стоимость товара. Редактировать список добавленных товаров можно в разделе «Цены и акции ? Мои акции» ", "Подключим товару ускоренный сбор отзывов. Вы получите 10 отзывов с любым контентом: текст, фото, видео, или просто оценки. Стоимость за один отзыв или оценку — 250 ? ", "Подключим сбор видеообзоров от топ-авторов — подойдёт для товаров, у которых мало продаж и отзывов. Каждое видео попадёт в «Ленту обзоров», а также будем по очереди закреплять отзывы в карточке товара. Вы платите 300 ? только за отзыв с оценкой 5 и возвращаете автору стоимость товара баллами ", "Заполните поле, если хотите скопировать чужой товар, размещённый на Ozon. Тогда блоки справа можно не заполнять. Артикул должен быть уникальным. https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=origin_sku&language=LANGUAGE_CODE_RU&marketplaceId=1", "Введите штрихкод товара от производителя и наклейте его на упаковку.\nЭто код, по которому товар принимают на складе. Поле обязательно для всех схем продаж. Без штрихкода не сможем выплатить компенсацию при утере https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=barcode_ot&language=LANGUAGE_CODE_RU&marketplaceId=1", "Выберите одно значение из списка. Если вы не знаете, какой код нужно указать, то вам необходимо обратиться к таможенной службе или таможенному представителю ", "Можем взять дополнительную плату, если ОВХ отличаются от реальных. Укажите вес единицы товара в граммах вместе с упаковкой, в которой будете отправлять товар. Введите только число https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=weight&language=LANGUAGE_CODE_RU&marketplaceId=1", "Можем взять дополнительную плату, если ОВХ отличаются от реальных. Измерьте в миллиметрах любую сторону товара в упаковке, в которой будете отправлять. Изделия неправильной формы — от одного края до другого. Комплект из нескольких товаров сложите стопкой. Одежду, текстиль и наборы для вышивания сложите пополам в упаковке https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=width&language=LANGUAGE_CODE_RU&marketplaceId=1", "Можем взять дополнительную плату, если ОВХ отличаются от реальных. Измерьте в миллиметрах любую сторону товара в упаковке, в которой будете отправлять. Изделия неправильной формы — от одного края до другого. Комплект из нескольких товаров сложите стопкой. Одежду, текстиль и наборы для вышивания сложите пополам в упаковке https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=height&language=LANGUAGE_CODE_RU&marketplaceId=1", "Можем взять дополнительную плату, если ОВХ отличаются от реальных. Измерьте в миллиметрах любую сторону товара в упаковке, в которой будете отправлять. Изделия неправильной формы — от одного края до другого. Комплект из нескольких товаров сложите стопкой. Одежду, текстиль и наборы для вышивания сложите пополам в упаковке https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=depth&language=LANGUAGE_CODE_RU&marketplaceId=1", "Вы можете загрузить товары в xls-шаблоне и API без фото, а потом загрузить фото через карточку товара или раздел «Обновить изображения»\n\nТребования к изображениям\n\n- формат: jpeg, jpg, png;\n- разрешение: от 200px на 200px до 4320px на 7680px;\n- размер: не привышает 10МБ;\n- фон: белый или светлый. Для белых или прозрачных товаров допустим черный фон. Для категории товаров Одежда, обувь и аксессуары фон серый (#f2f3f5);\nназвание: не может содержать символы «/» и «_».Нельзя использовать\n- изображения алкоголя;\n- эскизы товара (например, 3D-модели);\n- любые надписи (цены, логотипы, водяные знаки, контакты и пр);\n- чёрно-белые фото, фото с рамками и полосками;\n- размытые, нерезкие, некачественные фото;\n- фотографии сделанные в «домашних условиях»: на фоне ковра, мебели с тенями от других предметов.\n\nТребования к фото 18+\nНа изображениях должны быть размыты или скрыты другим образом интимные части тела.\n\nЕсли найдём в карточке запрещённую информацию, возьмём плату за обработку каждого нарушения.\nПодробнее https://seller-edu.ozon.ru/work-with-goods/zagruzka-tovarov/creating-goods/oshibki-pri-rabote-s-kartochkami#%D0%BA%D0%B0%D0%BA%D0%B8%D0%B5-%D0%BE%D1%88%D0%B8%D0%B1%D0%BA%D0%B8-%D1%81%D1%87%D0%B8%D1%82%D0%B0%D0%B5%D0%BC-%D0%BA%D1%80%D0%B8%D1%82%D0%B8%D1%87%D0%BD%D1%8B%D0%BC%D0%B8\n\nКраткое требование к ссылкам\n\nДля загрузки главного фото можно добавить только одну ссылку, лишние ссылки не будут использованы.\n\nПрямая ссылка на изображение\n\nПо ссылкам должны открываться и скачиваться только сами изображения. Обычно такие ссылки заканчиваются символами: *.jpeg, *.jpg, *.png, но есть исключение – ссылки на Яндекс.Диск. Они доступны в формате https://yadi.sk/i/qUXcCwzmryWINw или https://disk.yandex.ru/i/qUXcCwzmryWINw\n\nПравильная ссылка:\n- не содержит дополнительных портов;\n- не ведет на HTML-страницу с изображением. Например, нельзя указывать ссылку на обзор товара, в котором есть фотографии;\n- не требует авторизации для доступа к изображению.\n\nПодробнее о требованиях можно узнать в https://seller-edu.ozon.ru/work-with-goods/trebovaniya-k-kartochkam-tovarov/media/foto-i-video-tovara", "Вы можете загрузить товары в xls-шаблоне и API без фото, а потом загрузить фото через карточку товара или раздел «Обновить изображения»\n\nТребования к изображениям\n\n- формат: jpeg, jpg, png;\n- разрешение: от 200px на 200px до 4320px на 7680px;\n- размер: не превышает 10МБ;\n- фон: белый или светлый. Для белых или прозрачных товаров допустим черный фон. Для категории товаров Одежда, обувь и аксессуары фон серый (#f2f3f5).\n- название: не может содержать символ «/».Нельзя использовать\n- изображения алкоголя;\n- эскизы товара (например, 3D-модели);\n- любые надписи (цены, логотипы, водяные знаки, контакты и пр);\n- чёрно-белые фото, фото с рамками и полосками;\n- размытые, нерезкие, некачественные фото;\n- фотографии сделанные в «домашних условиях»: на фоне ковра, мебели с тенями от других предметов.\n\nТребования к фото 18+\nНа изображениях должны быть размыты или скрыты другим образом интимные части тела.\n\nЕсли найдём в карточке запрещённую информацию, возьмём плату за обработку каждого нарушения.\nПодробнее https://seller-edu.ozon.ru/work-with-goods/zagruzka-tovarov/creating-goods/oshibki-pri-rabote-s-kartochkami#%D0%BA%D0%B0%D0%BA%D0%B8%D0%B5-%D0%BE%D1%88%D0%B8%D0%B1%D0%BA%D0%B8-%D1%81%D1%87%D0%B8%D1%82%D0%B0%D0%B5%D0%BC-%D0%BA%D1%80%D0%B8%D1%82%D0%B8%D1%87%D0%BD%D1%8B%D0%BC%D0%B8\n\nКраткое требование к ссылкам\n\nПрямая ссылка на изображение\nЕсли загружаете дополнительные фотографии по отдельности, поочерёдно прикрепите ссылки для каждого изображения. Ограничение по количеству – 14 штук. По ссылкам должны открываться и скачиваться только сами изображения. Обычно такие ссылки заканчиваются символами: *.jpeg, *.jpg, *.png, но есть исключение – ссылки на Яндекс.Диск. Они доступны в формате https://yadi.sk/i/qUXcCwzmryWINw или https://disk.yandex.ru/i/qUXcCwzmryWINw. Разделите ссылки пробелом или знаком переноса строки.\n\nПравильная ссылка:\n- не содержит дополнительных портов;\n- не ведет на HTML-страницу с изображением. Например, нельзя указывать ссылку на обзор товара, в котором есть фотографии;\n- не требует авторизации для доступа к изображению.\n\nСсылка на папку с изображениями\nМожно использовать ссылку на папку с изображениями на Я.Диске. Например, https://yadi.sk/d/qUXcCwzmryWINw или https://disk.yandex.ru/d/qUXcCwzmryWINw\n\nВ качестве дополнительных фото будут использованы 14 изображений из папки.  Если вы хотите, чтобы картинки загрузились в нужном порядке, пронумеруйте их названия. Например, «1», «2», «3» или «фото1», «фото2», «фото3».\n\nПодробнее о требованиях можно узнать в https://seller-edu.ozon.ru/work-with-goods/trebovaniya-k-kartochkam-tovarov/media/foto-i-video-tovara", "Название файла с изображением товара.\n Запрещенные символы: /\" и \"_\".\" https://libra-ccd.ozon.ru/redirect?country=COUNTRY_CODE_RU&key=group_id&language=LANGUAGE_CODE_RU&marketplaceId=1", "Среди брендов есть\nпродвигаемые — в вашем личном кабинете отмечаем их значком молнии. Товары таких брендов заметнее для покупателей, чем похожие товары конкурентов.\n\nПродвижение платное —\nуправляйте им в разделе «Товары и цены -> Бренды --> Мои бренды».", "Уникальный код, однозначно идентифицирующий деталь автомобиля. Можно добавить номер детали по каталогу фирмы-производителя для неоригинальных запчастей. Если у товара нет партномера, укажите код продавца ", "Выберите из списка наиболее подходящий тип товара. Типы участвуют в распределении товаров по категориям на сайте Ozon. Чтобы правильно указать тип, найдите на сайте Ozon товары, похожие на ваш, и укажите в этом поле такой же тип. ", "Заполните данное поле любым одинаковым значением на товарах, которые хотите объединить. И по разному, если товары нужно разъединить. Объединение произойдет при условии, что товары имеют одинаковый Тип и Бренд, и хотя бы одна вариативная характеристика заполнена по разному на всех товарах в объединении ", "Выберите «Да», если товар имеет код маркировки (КИЗ). Будем проверять его у каждой отгрузки или поставки. При интеграции через Seller API передавайте параметр как \"true\"  ", "Можно указать только целое число. ", "Вес товара без упаковки (нетто) в граммах в расчете на 1 SKU. Можно указать только целое число или десятичную дробь. Разделитель — точка ", "Если загрузите паспорт безопасности — проверим и исправим класс, если он указан неверно. Это поможет избежать проблем при хранении или перевозке товара. После прохождения модерации изменить класс опасности самостоятельно не получится. Как загрузить паспорт: https://s.ozon.ru/1ExCIi5 ", "УЕИ – унифицированная единица измерения. Необходимо указывать для продажи товаров на территории Республики Беларусь согласно локальному законодательству. Указывается количество ШТУК в одной SKU. Можно указать только целое число. ", "Заполните поле (укажите целое число), чтобы продавать товар оптом покупателям-юрлицам. Подробнее: https://seller-edu.ozon.ru/libra/work-with-goods/additional-materials/prodazha-optom ", "Хештеги работают так же, как в соцсетях: покупатели могут нажать на них в карточке или написать в поиске. Укажите тут тренд, стиль или тематику. Например, для одежды #oldmoney #kpop #бохо, для мебели #скандинавский_стиль #минимализм #лофт. Не добавляйте бренды, параметры или название товара.  Хештег должен начинаться со знака # и содержать только буквы и цифры. Если хештег состоит из 2+ слов, соедините их нижним подчеркиванием. Длина — не более 30 символов. Укажите не больше 30 хештегов, разделяйте пробелом ", "Описание товара, маркетинговый текст ", "Добавьте расширенное описание товара с фото и видео по шаблону в формате JSON. Подробнее о заполнении этой характеристики можно узнать в статье \"Rich-контент\" в \"Базе знаний\". ", "Введите одинаковое значение в этом атрибуте для объединения товаров в группу \"Похожие\". Обратите внимание, что товары в группе собираются в рамках одной категории второго уровня в личном кабинете. Если у товаров будет указано одно Название группы, но они находятся в разных категориях — вы получите несколько объединений товаров. Подробнее об объединении в Похожие можно прочитать в статье \"Похожие товары\" в \"Базе знаний\" ", "Оригинальный номер запчасти, присвоенный производителем автомобиля или автозапчастей, аналогом которой является ваш товар. Не заполняйте это поле, если у запчасти нет OEM-номера. Если номеров несколько, перечислите их через точку с запятой и пробел. ", "Заполните, если у товара есть альтернативный артикул, который используется в другом каталоге. Если артикулов несколько, перечислите их через точку с запятой через пробел. Артикул не должен совпадать со значением в полях «Партномер» и «OEM-номер» ", "Выберите из списка. Можно указать только одно значение. ", "Можно указать только целое число или десятичную дробь. Разделитель — точка. ", "Выберите из списка или укажите вручную. Можно добавить несколько значений через точку с запятой. Если точка с запятой есть в значении атрибута, поместите знак в кавычки \";\". ", "Выберите из списка или укажите вручную. Можно добавить несколько значений через точку с запятой. Если точка с запятой есть в значении атрибута, поместите знак в кавычки \";\". ", "Основной или доминирующий цвет товара. Если точного соответствия нет, используйте ближайшие цвета. Сложные цвета нужно описывать перечислением простых цветов. Например, если в товаре преобладают черный, желтый и белый цвета, то укажите их все простым перечислением. Атрибут \"Цвет товара\" — это основной цвет. Все остальные цвета можно перечислить в атрибуте \"Название цвета\", если он доступен в категории ", "Период, в течение которого производитель отвечает за качество товара. А покупатель может оформить заявку на возврат по гарантийному случаю. Выберите одно значение из выпадающего списка. ", "Страна, в которой изготовлен/собран товар и которая указана на упаковке. Может отличаться от страны бренда. Выберите из списка или укажите вручную. Можно добавить несколько значений через точку с запятой. ", "Перечислите, что входит в комплект вместе с товаром: инструкция, чехол, комплект проводов и т.п. Не дублируйте сюда значения других характеристик (аннотацию, тип или количество в упаковке). Если вы поставляете товар без дополнительной комплектации, не заполняйте эту характеристику.  ", "Сколько заводских упаковок продаёте под этим SKU. Пример: 24 банки детского пюре запаяны в 1 упаковку на заводе и в таком же виде продаются в других магазинах — укажите значение 1. \nДругой пример: завод выпускает лампочки в упаковках по 1 или 10 штук, а вы решили продавать по 3 лампочки и запаяли их в одну упаковку — значение атрибута будет 3 ", "Критичная ошибка в характеристиках товара. Товар с ошибками не будет продаваться. ", "Устаревшее или незаполненное значение в характеристиках товара. Возникает при изменениях в атрибутной модели и не влияет на продажу товара. "]];
 
@@ -28231,6 +28387,9 @@ const StdDims = {
     }
     if (changed.length) p._stdDimsApplied = {
       source:found.std.c, match:found.match, matchedBy:found.source, fields:changed,
+      /* Значения фиксируем: пометка в выгрузке действительна, только пока
+         поле не изменили вручную. */
+      values:Object.fromEntries(changed.map(k => [k, num(p[k])])),
       dictionary:this.version, dictionarySource:found.std.src || 'core', date:new Date().toISOString()
     };
     return changed;
@@ -29635,8 +29794,32 @@ function syncSharedExclusionControl() {
   const oz = document.getElementById('ozViewExclTxt'); if (oz) oz.checked = on;
 }
 
+/* «Зачёркнутая цена» — один выбор для панели и модального окна, сохраняется. */
+function ozonDiscountPct() {
+  const el = document.querySelector('#ozViewDiscount') || document.querySelector('#ozDiscountPct');
+  const v = el ? Number(el.value) : NaN;
+  if (Number.isFinite(v)) return Math.max(0, Math.min(90, v));
+  const s = Number(S.settings && S.settings.ozonDiscountPct);
+  return Number.isFinite(s) ? Math.max(0, Math.min(90, s)) : 30;
+}
+function syncOzonDiscountPct() {
+  const stored = Number(S.settings && S.settings.ozonDiscountPct);
+  const want = String(Math.max(0, Math.min(90, Number.isFinite(stored) ? stored : 30)));
+  ['#ozViewDiscount', '#ozDiscountPct'].forEach(sel => {
+    const el = document.querySelector(sel); if (!el) return;
+    if ([...el.options].some(o => o.value === want)) el.value = want;
+    if (el.dataset.discountBound) return;
+    el.dataset.discountBound = '1';
+    el.addEventListener('change', () => {
+      S.settings.ozonDiscountPct = Number(el.value) || 0;
+      try { if (typeof UI2 !== 'undefined' && UI2.saveSettings) UI2.saveSettings(); } catch (e) { }
+      syncOzonDiscountPct();
+    });
+  });
+}
 const OZON_WORKING_HEADERS = OZON_TEMPLATE_HEADERS.map((row,i)=>row.concat([
-  ['Справочная колонка UNIT·CONTROL','ЧЗ по списку ТН ВЭД','Не поле Ozon','Совпадение с пользовательским списком; не определяет юридическую обязанность маркировки.'][i]
+  ['Справочная колонка UNIT·CONTROL','ЧЗ по списку ТН ВЭД','Не поле Ozon','Совпадение с пользовательским списком; не определяет юридическую обязанность маркировки.'][i],
+  ['Справочная колонка UNIT·CONTROL','ОВХ из стандартных весогабаритов','Не поле Ozon','Пометка, что вес и габариты взяты из встроенного справочника по категории/виду. Проверьте упаковку.'][i]
 ]));
 const OzonExport = {
   HEADERS: OZON_WORKING_HEADERS,
@@ -29766,8 +29949,8 @@ const OzonExport = {
       scope: $('#ozViewScope')?.value || 'filter',
       _chzRules: ChzTnved.rules(),
       fmt: format || 'csv_utf8',
-      priceMode: $('#ozViewPriceMode')?.value || 'eff',
-      discountPct: num($('#ozViewDiscount')?.value) || 0,
+      priceMode: $('#ozViewPriceMode')?.value || 'cost',
+      discountPct: ozonDiscountPct(),
       vat: $('#ozViewVat')?.value || 'Не облагается',
       vehicleType: $('#ozViewVehicle')?.value || 'Легковые автомобили',
       tnved: String($('#ozViewTnved')?.value || '').trim(),
@@ -29809,7 +29992,7 @@ const OzonExport = {
             <th>Тип OZON</th>
             <th>Категория / Подкатегория</th>
             <th>Код ТН ВЭД</th>
-            <th>Маркировка</th><th>ЧЗ по списку (справочно)</th>
+            <th>Маркировка</th><th>ЧЗ по списку (справочно)</th><th>ОВХ из стандартных</th>
           </tr>
         </thead>
       `;
@@ -29830,9 +30013,10 @@ const OzonExport = {
           <td class="mono hint">${r[11]}</td>
           <td><span class="tag" style="background:${r[23] === 'Да' ? '#133a24' : 'transparent'};color:${r[23] === 'Да' ? '#4ade80' : 'var(--mut)'}">${r[23]}</span></td>
           <td>${esc(r[46])}</td>
+          <td class="hint" title="Пометка: весогабариты взяты из встроенного справочника по категории/виду">${esc(r[47] || '—')}</td>
         </tr>
       `).join('');
-      t.innerHTML = headHtml + '<tbody>' + (bodyHtml || '<tr><td colspan="15" class="t-c hint">Нет подходящих товаров для выгрузки</td></tr>') + '</tbody>';
+      t.innerHTML = headHtml + '<tbody>' + (bodyHtml || '<tr><td colspan="16" class="t-c hint">Нет подходящих товаров для выгрузки</td></tr>') + '</tbody>';
     }
   },
 
@@ -29888,8 +30072,8 @@ const OzonExport = {
       scope: $('#ozScope')?.value || 'filter',
       _chzRules: ChzTnved.rules(),
       fmt: $('#ozFmt')?.value || 'csv_utf8',
-      priceMode: $('#ozPriceMode')?.value || 'eff',
-      discountPct: num($('#ozDiscountPct')?.value) || 0,
+      priceMode: $('#ozPriceMode')?.value || 'cost',
+      discountPct: ozonDiscountPct(),
       vat: $('#ozVat')?.value || 'Не облагается',
       vehicleType: $('#ozVehicleType')?.value || 'Легковые автомобили',
       tnved: String($('#ozTnved')?.value || '').trim(),
@@ -29901,7 +30085,19 @@ const OzonExport = {
     };
   },
 
-  /* Преобразование карточки товара S.rows в массив 46 полей + справочная колонка ЧЗ Ozon */
+  /* Пометка справочной колонки: ОВХ пришли из типового стандарта категории. */
+  stdDimsNote(p) {
+    const a = p && p._stdDimsApplied;
+    if (!a || !Array.isArray(a.fields) || !a.fields.length) return '';
+    const labels = { length:'Д', width:'Ш', height:'В', weight:'вес' };
+    const kept = a.fields.filter(k => {
+      const applied = a.values ? Number(a.values[k]) : 0;
+      return num(p[k]) > 0 && (!(applied > 0) || Math.abs(num(p[k]) - applied) < 1e-9);
+    });
+    if (!kept.length) return '';
+    return 'Да · ' + String(a.source || 'стандарт') + ' · ' + kept.map(k => labels[k] || k).join(', ');
+  },
+  /* Преобразование карточки товара S.rows в массив 46 полей + справочные колонки Ozon */
   rowToOzon(p, idx, opts) {
     opts = opts || {};
     const n = idx + 1;
@@ -29914,7 +30110,9 @@ const OzonExport = {
     const name = String(p.name || '').trim();
 
     // 1. Цены
-    let price = num(p.effPrice || p.price || 0), priceModelError = '', priceModelNote = '';
+    /* Цена без акций = себестоимость (решение владельца), если выбран режим
+       «Себестоимость»; иначе прежняя цена продажи или расчёт Ozon. */
+    let price = opts.priceMode === 'cost' ? num(p.cost) : num(p.effPrice || p.price || 0), priceModelError = '', priceModelNote = '';
     if (opts.priceMode === 'ozon_calc') {
       // Never silently export the current price when the user requested the
       // Ozon target-margin calculation. A missing/invalid calculation is blank.
@@ -29940,6 +30138,8 @@ const OzonExport = {
         } catch (e) { priceModelError = 'Не удалось рассчитать цену Ozon: проверьте исходные данные'; }
       }
     }
+    else if (opts.priceMode === 'cost' && !(price > 0))
+      priceModelNote = 'Себестоимость не заполнена — цена без акций остаётся пустой';
     /* v12.9.13: цена не придумывается «≈ закупка × 1,35». Нет цены — пустая ячейка
        и ошибка в колонке 44; продавец должен решить цену сам (или включить расчёт). */
     if (price > 0) price = Math.round(price);
@@ -30080,8 +30280,8 @@ const OzonExport = {
     if (priceModelError) errorCol = [errorCol, priceModelError].filter(Boolean).join('; ');
     if (priceModelNote) notesCol = [notesCol, priceModelNote].filter(Boolean).join('; ');
     if (CategoryTnved.isCurrentAuto(p)) notesCol = [notesCol, 'ТН ВЭД подставлен из пользовательского справочника; проверьте код по конкретному товару'].filter(Boolean).join('; ');
-    /* Та же строка, что была проверена выше: порядок 46 полей + справочная колонка ЧЗ не меняем. */
-    const out = this._pendingRow.concat([errorCol, notesCol, ChzTnved.result(p, opts._chzRules).label]);
+    /* Та же строка, что была проверена выше: порядок 46 полей + 2 справочные колонки не меняем. */
+    const out = this._pendingRow.concat([errorCol, notesCol, ChzTnved.result(p, opts._chzRules).label, this.stdDimsNote(p)]);
     /* v12.2: страховочный проход — любой текст длиннее лимита Excel обрезаем,
        иначе XLSX не соберётся вообще (ошибка «Text length must not exceed 32767»). */
     for (let i = 0; i < out.length; i++) {
@@ -30352,7 +30552,8 @@ const OzonExport = {
       { wch: 15 }, // Заводские упаковки
       { wch: 12 }, // Ошибка
       { wch: 12 }, // Недочёты
-      { wch: 24 }  // ЧЗ по пользовательскому списку; не поле шаблона Ozon
+      { wch: 24 }, // ЧЗ по пользовательскому списку; не поле шаблона Ozon
+      { wch: 34 }  // ОВХ из стандартных весогабаритов; не поле шаблона Ozon
     ];
 
     const wb = XLSX.utils.book_new();
@@ -30804,7 +31005,7 @@ const OzonExport = {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_рабочая_выгрузка_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.csv`;
-      await withProgress('Экспорт в OZON CSV', `${fmt(rows.length)} SKU · 46 полей + справочная колонка ЧЗ…`, async prog => {
+      await withProgress('Экспорт в OZON CSV', `${fmt(rows.length)} SKU · 46 полей + 2 справочные колонки…`, async prog => {
         const blob = await OzonExport.generateCsv(rows, opts, prog);
         Exp.download(blob, fn);
         const note = OzonExport._truncatedNote();
@@ -30822,7 +31023,7 @@ const OzonExport = {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_рабочая_выгрузка_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.xlsx`;
-      await withProgress('Экспорт в OZON XLSX', `${fmt(rows.length)} SKU · 46 полей + справочная колонка ЧЗ…`, async prog => {
+      await withProgress('Экспорт в OZON XLSX', `${fmt(rows.length)} SKU · 46 полей + 2 справочные колонки…`, async prog => {
         const blob = await OzonExport.generateXlsx(rows, opts, prog);
         Exp.download(blob, fn);
         const note = OzonExport._truncatedNote();
@@ -42438,6 +42639,14 @@ function bindAll() {
   $('#impOe').onclick = e => e.target.classList.toggle('on');
   const priceIsCostSw = $('#impPriceIsCost');
   if (priceIsCostSw) priceIsCostSw.onclick = () => Import.setPriceIsCost(!Import.priceIsCostOn());
+  const autoStdSw = $('#enAutoStdDims');
+  if (autoStdSw) {
+    autoStdSw.checked = S.settings.autoStdDims !== false;
+    autoStdSw.onchange = async () => {
+      S.settings.autoStdDims = autoStdSw.checked;
+      try { await UI2.saveSettings(); } catch (e) { }
+    };
+  }
   Import.syncPriceIsCost();
   /* --- v12.9.9 · Обогащение: выбор способа (Артикул + Бренд / OE-номер) и колонок --- */
   const EN_LABEL = { length: 'Длина, см', width: 'Ширина, см', height: 'Высота, см', weight: 'Вес, кг',
@@ -42582,17 +42791,31 @@ function bindAll() {
   if (enRun) enRun.onclick = async () => {
     const mode = HVC.enrichMode();
     const cols = HVC.enabledColumns();
-    if (!cols.length) { Toast.warn('Обогащение не запущено', 'не выбрана ни одна колонка — включите переключатели в блоке «Обогащать колонки»'); return; }
+    const autoStd = S.settings.autoStdDims !== false;
+    if (!cols.length && !autoStd) { Toast.warn('Обогащение не запущено', 'не выбрана ни одна колонка — включите переключатели в блоке «Обогащать колонки» или разрешите стандартные весогабариты'); return; }
     await withProgress(mode === 'oe' ? 'Обогащение по OE' : mode === 'auto' ? 'Обогащение: OE → SKU+бренд' : 'Обогащение по Артикул + Бренд',
-      mode === 'oe' ? 'поиск доноров по нормализованному OE (oe_norm)' : mode === 'auto' ? 'сначала OE, затем недостающие поля по article_norm + brand_norm' : 'поиск доноров по article_norm + brand_norm', async prog => {
+      autoStd ? 'поиск доноров + типовые стандартные весогабариты по категории/виду' : (mode === 'oe' ? 'поиск доноров по нормализованному OE (oe_norm)' : mode === 'auto' ? 'сначала OE, затем недостающие поля по article_norm + brand_norm' : 'поиск доноров по article_norm + brand_norm'), async prog => {
       if (typeof HVC !== 'undefined') { HVC.rebuildIndex(S.rows); }
-      const n = await HVC.enrichAsync(S.rows, prog);
+      const n = cols.length ? await HVC.enrichAsync(S.rows, prog) : 0;
+      /* Третий шаг правила ОВХ: типовые габариты категории/вида — только точное
+         совпадение справочника, только пустые поля, только строки без карантина. */
+      let stdN = 0;
+      if (autoStd) {
+        if (prog) prog('стандартные весогабариты по категории/виду…');
+        for (const p of S.rows) {
+          try {
+            if (p.dimensionAnomalyBlocked || p._dimensionOeReview) continue;
+            const a = StdDims.assess(p, true), f = a.found;
+            if (a.missing.length && f.status === 'match' && f.match === 'exact' && StdDims.fill(p, f, false).length) stdN++;
+          } catch (e) { console.warn('[UC] StdDims:', p && p.article, e); }
+        }
+      }
       /* Единая граница: карантин аномалий, пересчёт экономики и запись.
          Раньше новые ОВХ сохранялись без проверки лимитов до следующего пересчёта. */
       await runPipeline(true, { onProgress: prog });
       Table.paint(); Dash.render();
       renderEnrichCoverage();
-      Toast.ok('Обогащение выполнено', `затронуто строк: ${fmt(n)} · способ: ${mode === 'oe' ? 'по OE-номеру' : mode === 'auto' ? 'OE → SKU+бренд' : 'Артикул + Бренд'} · колонки: ${cols.map(k => EN_LABEL[k] || k).join(', ')}`);
+      Toast.ok('Обогащение выполнено', `затронуто строк: ${fmt(n)}${stdN ? ' · стандартные ОВХ: ' + fmt(stdN) : ''} · способ: ${mode === 'oe' ? 'по OE-номеру' : mode === 'auto' ? 'OE → SKU+бренд' : 'Артикул + Бренд'}${cols.length ? ' · колонки: ' + cols.map(k => EN_LABEL[k] || k).join(', ') : ''}`);
     });
   };
   /* --- v12.9.11 · проверка шаблона Ozon (массовая загрузка) --- */
