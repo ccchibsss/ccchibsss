@@ -22661,7 +22661,9 @@ const HVC = {
          становиться донором для других артикулов через OE. */
       if (p._stdDimsApplied) evidence=null;
       if (!dimensionTrusted) evidence=null; // never promote a provisional/borrowed tuple to registry evidence
-      else if (dimKeys.every(k=>dimInput[k]!==null && dimInput[k]>0)) {
+      /* Стандартные габариты не пересобирают доказательство: иначе они стали бы
+         донором для других артикулов через OE. */
+      else if (!p._stdDimsApplied && dimKeys.every(k=>dimInput[k]!==null && dimInput[k]>0)) {
         const src=p._sources && typeof p._sources==='object' ? p._sources : {};
         const entries=dimKeys.map(k=>src[k] || src[(STD.find(x=>x.k===k)||{}).n] || (k==='weight' ? src['Вес, кг'] : null));
         const origin=entries.length===4 && entries.every(x=>x && x.file && x.file===entries[0].file && x.date===entries[0].date)
