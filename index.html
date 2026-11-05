@@ -42589,7 +42589,7 @@ function bindAll() {
       const n = await HVC.enrichAsync(S.rows, prog);
       /* Единая граница: карантин аномалий, пересчёт экономики и запись.
          Раньше новые ОВХ сохранялись без проверки лимитов до следующего пересчёта. */
-      await runPipeline(true);
+      await runPipeline(true, { onProgress: prog });
       Table.paint(); Dash.render();
       renderEnrichCoverage();
       Toast.ok('Обогащение выполнено', `затронуто строк: ${fmt(n)} · способ: ${mode === 'oe' ? 'по OE-номеру' : mode === 'auto' ? 'OE → SKU+бренд' : 'Артикул + Бренд'} · колонки: ${cols.map(k => EN_LABEL[k] || k).join(', ')}`);
