@@ -32,6 +32,11 @@
   навсегда остаётся в режиме памяти; при старте в этом режиме выводится
   предупреждение. Обогащение считает флаги колонок один раз и кэширует ключ
   «артикул+бренд» на прогон, а в консоль печатает стоимость проверки по образцу.
+  v12.9.49 — работа «источник → обогащаемые файлы»: справочник Каталога V
+  (артикул+бренд, OE, кроссы, цены) сохраняется даже если запись каталога
+  товаров не удалась; после импорта видно, сколько связок и OE добавилось,
+  а в мастере импорта описано, что первый файл — источник, следующие
+  обогащаются из него, включая стандартные весогабариты по категории.
   Single-file application. The initial catalog is intentionally empty: records enter
   through user imports, IndexedDB persistence, or the authenticated GAS API.
   The gas-backend block is deployable Apps Script source and must be copied to the
@@ -8888,6 +8893,7 @@ try {
     <div style="display:flex;gap:10px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:#131830;flex-wrap:wrap">
       <div><label class="f">Ключ сопоставления</label><select id="impKey"><option value="article">только article</option><option value="article+brand">article + brand</option></select></div>
       <div><label class="f">Режим</label><select id="impMode"><option value="upsert">Дозагрузка (обновить + добавить)</option><option value="replace">Замена ассортимента (отсутствующие SKU скрываются)</option><option value="newonly">Только новые SKU</option></select><div class="hint" style="max-width:330px">Дозагрузка сохраняет текущие SKU: непустые значения обновляют поля, пустые — пропускаются. Проверьте ключ и маппинг. Загружайте файлы по одному.</div></div>
+      <div class="hint" style="grid-column:1/-1;line-height:1.55;border-left:2px solid #4a566d;padding-left:8px"><b>Порядок работы:</b> сначала загрузите файл-источник — артикулы, бренды, OE-номера, весогабариты, категории. Он остаётся справочником, и следующие файлы обогащаются из него: пустые поля заполняются по OE-номеру или по паре «артикул + бренд», а недостающие весогабариты — типовыми по категории (стандартные ОВХ). Непустые значения из загружаемого файла всегда главнее справочника.</div>
       <div style="display:flex;gap:6px;align-items:center;height:28px" title="Включено по умолчанию: колонка «Цена» в файле — закупочная цена поставщика. Она попадёт в «Себестоимость», а цена продажи будет рассчитана. Если в файле есть отдельная колонка себестоимости, она главнее. Настройка запоминается."><div class="sw" id="impPriceIsCost"></div><span class="hint">«Цена» в файле = себестоимость (закупка)</span></div>
       <div style="display:flex;gap:6px;align-items:center;height:28px"><div class="sw on" id="impRenameStd"></div><span class="hint">разрешить переименование стандартных полей</span></div>
       <div style="display:flex;gap:6px;align-items:center;height:28px"><div class="sw on" id="impOe"></div><span class="hint">объединять группы по OE (транзитивно)</span></div>
@@ -13352,7 +13358,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.48-client+audit.1';
+const APP_VERSION = '12.9.49-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21755,6 +21761,30 @@ async function _persistNowImpl(changedList) {
        обрывается AbortError на больших каталогах. */
     const CH = 1000;
     const _tPersist = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  /* v12.9.49: категории/правила и реестры Каталога V сохраняются ОТДЕЛЬНО и
+     независимо от записи товаров. Раньше это происходило только после удачной
+     записи каталога: если запись обрывалась, загруженный справочник
+     (артикул+бренд, OE, кроссы, стандартные ОВХ) не сохранялся — и следующие
+     файлы было нечем обогащать. */
+  const _auxPersist = () => Promise.resolve().then(async () => {
+    try {
+      await db.transaction('rw', db.cats, db.rules, db.excs, db.meta, async () => {
+        await StorageCtl.assertCatalogFresh();
+        for (const [table, values] of [[db.cats, S.cats], [db.rules, S.rules], [db.excs, S.excs]]) {
+          // IDs are identities used by edit/delete. Stripping them here caused
+          // memory and IndexedDB to disagree after an unrelated catalogue save.
+          await table.clear(); if (values.length) await table.bulkAdd(values.map(x => ({...x})));
+        }
+      });
+      S._cacheAuxError = '';
+    } catch (e) {
+      S._cacheAuxError = String(e && (e.message || e.name) || e).slice(0, 160);
+      console.warn('[UC] categories/rules save:', e);
+      Toast.err('Категории или правила не сохранены', 'Предыдущая запись не заменена. Проверьте место и сделайте экспорт; изменения остаются в памяти.');
+    }
+    try { await HVC.save(); } catch (e) { console.warn('[UC] HVC save:', e); }
+    StorageCtl.refresh();
+  });
   /* v12.9.6-mem: строки каталога материализуются ПО ЧАНКАМ. Полный второй массив
      копий (S.rows.map) на 126k SKU — это +150…250 МБ пика и падение вкладки
      «Out of memory» именно при повторном сохранении после импорта. */
@@ -21896,25 +21926,7 @@ async function _persistNowImpl(changedList) {
       StorageCtl.refresh(); return false;
     }
     // Категории/правила и реестры имеют собственные транзакции и отдельный статус.
-    Promise.resolve().then(async () => {
-      try {
-        await db.transaction('rw', db.cats, db.rules, db.excs, db.meta, async () => {
-          await StorageCtl.assertCatalogFresh();
-          for (const [table, values] of [[db.cats, S.cats], [db.rules, S.rules], [db.excs, S.excs]]) {
-            // IDs are identities used by edit/delete. Stripping them here caused
-            // memory and IndexedDB to disagree after an unrelated catalogue save.
-            await table.clear(); if (values.length) await table.bulkAdd(values.map(x => ({...x})));
-          }
-        });
-        S._cacheAuxError = '';
-      } catch (e) {
-        S._cacheAuxError = String(e && (e.message || e.name) || e).slice(0, 160);
-        console.warn('[UC] categories/rules save:', e);
-        Toast.err('Категории или правила не сохранены', 'Предыдущая запись не заменена. Проверьте место и сделайте экспорт; изменения остаются в памяти.');
-      }
-      try { await HVC.save(); } catch (e) { console.warn('[UC] HVC save:', e); }
-      StorageCtl.refresh();
-    });
+    _auxPersist();
   } catch (e) {
     console.error('[UC] persist error:', e && e.name, e && e.message, e && e.stack);
     const text = String(e && (e.message || e.name) || e).slice(0, 200);
@@ -21923,6 +21935,9 @@ async function _persistNowImpl(changedList) {
     Toast.err(conflict ? 'Каталог изменился в другой вкладке' : quota ? 'Недостаточно места для кэша' : 'Кэш не сохранён',
       (conflict ? 'Сохранённый каталог не заменён. ' : quota ? 'Браузер или диск отклонил запись по квоте. ' : 'IndexedDB отклонил запись (' + text.slice(0, 90) + '). ') +
       'Часть изменений может быть только в памяти: не закрывайте вкладку, сначала сделайте экспорт. Откройте «Хранилище и квота».');
+    /* Даже если каталог не записался, справочник и правила должны сохраниться:
+       именно из них обогащаются следующие файлы. */
+    try { _auxPersist(); } catch (eAux) { console.warn('[UC] aux persist:', eAux); }
     StorageCtl.refresh(); return false;
   }
   try {
@@ -26022,6 +26037,9 @@ const Import = {
           AnomalyDetector.quarantineRow(row);
         }
         _mark('карантин ОВХ');
+        /* v12.9.49: видно, что справочник действительно пополнился — из него
+           будут обогащаться следующие файлы. */
+        const _partsBefore = HVC.parts.size, _oeBefore = HVC.oe.size;
         const hv = HVC.ingest(touchedUnique);
         _mark('реестр OE');
         /* Группировка от OE выполняется ВСЕГДА после imпорта: rebuildIndex строит
@@ -26058,7 +26076,8 @@ const Import = {
         touchedUnique.length = 0;
         const ftype = HVC.fileTypeOf(targets);
         const dfix = HVC.datesFixed - datesBefore;
-        Toast.info('Каталог V · ' + ftype, `OE +${fmt(hv.oe)} · связей +${fmt(hv.cross)} · цен +${fmt(hv.prices)} · всего OE ${fmt(HVC.oe.size)} · групп от OE пересчитано${dfix ? ` · ячеек с датами исправлено: ${fmt(dfix)}` : ''}`);
+        const _partsNew = HVC.parts.size - _partsBefore, _oeNew = HVC.oe.size - _oeBefore;
+        Toast.info('Каталог V · ' + ftype, `справочник: связок ${fmt(HVC.parts.size)}${_partsNew ? ` (+${fmt(_partsNew)})` : ''} · OE ${fmt(HVC.oe.size)}${_oeNew ? ` (+${fmt(_oeNew)})` : ''} · связей +${fmt(hv.cross)} · цен +${fmt(hv.prices)} · групп от OE пересчитано${dfix ? ` · ячеек с датами исправлено: ${fmt(dfix)}` : ''}`);
       }
       S.imports.push({ id: uid('i'), name: S.pending.file, date: nowISO(), rows: body.length, added, updated, cols: enabled.map(m => m.target || m.src).join('|'), keyMode: S.settings.keyMode, mode });
       await db.imports.add(S.imports[S.imports.length - 1]).catch(e => console.warn('[UC] imports log:', e));
@@ -26124,7 +26143,8 @@ const Import = {
         (mergedByArticle ? ` · сопоставлено по артикулу (без бренда в файле): ${fmt(mergedByArticle)}` : '') +
         (dedup ? ` · объединено дублей: ${fmt(dedup)}` : '') + ` · всего SKU: ${fmt(S.rows.length)}` +
         (S.lastOeAutoCheck ? (S.lastOeAutoCheck.error ? ' · автосверка OE прервана' : ` · авто-OE на проверку: ${fmt(S.lastOeAutoCheck.changed || 0)}, без замены: ${fmt(S.lastOeAutoCheck.noChoice || 0)}`) : ' · автосверка OE выключена') +
-        (_stageText ? ` · время: ${_stageText}` : ''));
+        (_stageText ? ` · время: ${_stageText}` : '') +
+        ` · справочник: ${fmt(HVC.parts.size)} связок, OE ${fmt(HVC.oe.size)}`);
       if (!S.view.length && S.rows.length) {
         Toast.warn('Строки не видны в таблице', 'Все SKU отсеяны правилами-исключениями или фильтрами. Смотрите жёлтый баннер в разделе 2 и счётчик «исключено».');
       }
