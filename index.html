@@ -32,6 +32,21 @@
   навсегда остаётся в режиме памяти; при старте в этом режиме выводится
   предупреждение. Обогащение считает флаги колонок один раз и кэширует ключ
   «артикул+бренд» на прогон, а в консоль печатает стоимость проверки по образцу.
+  v12.9.49 — работа «источник → обогащаемые файлы»: справочник Каталога V
+  (артикул+бренд, OE, кроссы, цены) сохраняется даже если запись каталога
+  товаров не удалась; после импорта видно, сколько связок и OE добавилось,
+  а в мастере импорта описано, что первый файл — источник, следующие
+  обогащаются из него, включая стандартные весогабариты по категории.
+  v12.9.50 — файл, загружаемый после источника (весогабариты, OE-кроссы,
+  названия), обогащает и СВЯЗАННЫЕ строки уже загруженного каталога: те, что
+  не входят в файл, но связаны тем же артикулом или общим OE-номером. Раньше
+  строки источника оставались пустыми до ручного «Обогатить сейчас».
+  Переключатель «Обогащать связанные строки каталога из этого файла» в мастере
+  импорта, по умолчанию включён; непустые значения не меняются.
+  v12.9.51 — ТН ВЭД стал колонкой обогащения: код приходит отдельным файлом и
+  переносится в пустое поле по OE-номеру или паре «артикул + бренд», хранится в
+  реестре частей и в OE-реестре, переживает перезагрузку и учитывается в
+  «Проверить весь каталог», «Обогатить сейчас» и в связанных строках импорта.
   Single-file application. The initial catalog is intentionally empty: records enter
   through user imports, IndexedDB persistence, or the authenticated GAS API.
   The gas-backend block is deployable Apps Script source and must be copied to the
@@ -7452,6 +7467,7 @@ html { -webkit-text-size-adjust: 100%; }
       <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enCol_analog_list"></div><span class="hint">Аналоги</span></div>
       <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enCol_group_articles"></div><span class="hint">Группа артикулов</span></div>
       <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enCol_barcode"></div><span class="hint">Штрихкод</span></div>
+      <div style="display:flex;gap:5px;align-items:center" title="Код ТН ВЭД приходит отдельным файлом и переносится в пустое поле по OE-номеру или паре «артикул + бренд»"><div class="sw on" id="enCol_tnved"></div><span class="hint">ТН ВЭД</span></div>
     </div>
     <div class="pad" style="border-top:1px solid var(--line)">
       <label style="display:flex;gap:7px;align-items:center;cursor:pointer;font-size:11.5px;margin-bottom:6px">
@@ -8888,11 +8904,13 @@ try {
     <div style="display:flex;gap:10px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:#131830;flex-wrap:wrap">
       <div><label class="f">Ключ сопоставления</label><select id="impKey"><option value="article">только article</option><option value="article+brand">article + brand</option></select></div>
       <div><label class="f">Режим</label><select id="impMode"><option value="upsert">Дозагрузка (обновить + добавить)</option><option value="replace">Замена ассортимента (отсутствующие SKU скрываются)</option><option value="newonly">Только новые SKU</option></select><div class="hint" style="max-width:330px">Дозагрузка сохраняет текущие SKU: непустые значения обновляют поля, пустые — пропускаются. Проверьте ключ и маппинг. Загружайте файлы по одному.</div></div>
+      <div class="hint" style="grid-column:1/-1;line-height:1.55;border-left:2px solid #4a566d;padding-left:8px"><b>Порядок работы:</b> сначала загрузите файл-источник — артикулы, бренды, OE-номера, весогабариты, категории. Он остаётся справочником, и следующие файлы обогащаются из него: пустые поля заполняются по OE-номеру или по паре «артикул + бренд», а недостающие весогабариты — типовыми по категории (стандартные ОВХ). Непустые значения из загружаемого файла всегда главнее справочника.</div>
       <div style="display:flex;gap:6px;align-items:center;height:28px" title="Включено по умолчанию: колонка «Цена» в файле — закупочная цена поставщика. Она попадёт в «Себестоимость», а цена продажи будет рассчитана. Если в файле есть отдельная колонка себестоимости, она главнее. Настройка запоминается."><div class="sw" id="impPriceIsCost"></div><span class="hint">«Цена» в файле = себестоимость (закупка)</span></div>
       <div style="display:flex;gap:6px;align-items:center;height:28px"><div class="sw on" id="impRenameStd"></div><span class="hint">разрешить переименование стандартных полей</span></div>
       <div style="display:flex;gap:6px;align-items:center;height:28px"><div class="sw on" id="impOe"></div><span class="hint">объединять группы по OE (транзитивно)</span></div>
       <label style="display:flex;gap:6px;align-items:center;max-width:270px" title="Не скрывает из-за цены/остатка во время импорта; явная видимость, политики и общее автоскрытие после запуска продолжают действовать"><input id="impKeepVisibility" type="checkbox" style="width:auto"><span class="hint">Не скрывать автоматически при импорте</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:360px" title="Источник — тот же артикул и бренд или схожий OE-номер. Из допустимых полных записей выбирается меньший комплект вес + три стороны, проверенный по лимитам категории. Старые значения сохраняются; товар остаётся в карантине до проверки."><input id="impAnomOeAuto" type="checkbox" style="width:auto"><span class="hint">Автосверка аномальных ОВХ по OE · с проверкой</span></label>
+      <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Файлы, загружаемые после источника (весогабариты, OE-кроссы, названия), сразу расходятся по уже загруженному каталогу: строки, связанные тем же артикулом или общим OE-номером, получают недостающие поля и стандартные весогабариты. Пустые поля заполняются, существующие значения не меняются."><input id="impEnrichRelated" type="checkbox" style="width:auto"><span class="hint">Обогащать связанные строки каталога из этого файла</span></label>
       <div style="display:flex;gap:10px;align-items:center;height:28px;flex-wrap:wrap">
         <span class="hint" style="letter-spacing:.08em;text-transform:uppercase">Обогащать по OE:</span>
         <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enDims"></div><span class="hint">Весогабариты</span></div>
@@ -13352,7 +13370,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.48-client+audit.1';
+const APP_VERSION = '12.9.51-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -18268,7 +18286,7 @@ const FIELD_ALIAS = {
   noBuyPct: /(невыкуп|не выкуп|return.*(rate|pct)|non.?buy)/i,
   fixed: /(фикс|fixed|аренда|хранение фикс)/i,
   visible: /(видим|visible|активн)/i
-  ,markRequired: /(нужен.*честн|обязательн.*маркир|mark.*required)/i
+  ,markRequired: /(нужен.*честн|требует.*(?:честн|маркир)|обязательн.*маркир|маркировка\s+обязательна|mark.*required)/i
   ,markStatus: /(статус.*честн|статус.*маркир|mark.*status)/i
   ,markCode: /(честн.*знак|код.*маркир|киз|gtin|data.?matrix|mark.*code)/i
 };
@@ -18306,6 +18324,8 @@ function guessField(header) {
      Раньше «Весогабариты» забирала поле weight, и настоящая колонка «Вес (кг)»
      оставалась без стандартного поля — вес не импортировался вообще. */
   if (/весогабарит|габаритн/.test(h)) return 'dimensions_str';
+  /* Ссылка на страницу товара/сертификат — не изображение (v12.9.49). */
+  if (/^ссылка\s*(?:на|на\s+карточку)?\s*(?:товар|сайт|страниц|сертификат|описан|карточк)/.test(h)) return '';
   if (/^(?:д|длина)\s*[*x×х/]\s*(?:ш|ширина)\s*[*x×х/]\s*(?:в|высота)(?=$|[^а-яё])/.test(h)) return 'dimensions_str';
   /* v12.9.13: «Цена закупки», «Закупочная цена», «Цена поставщика» — это закупка,
      а не цена продажи. Проверяем ДО общего правила «цена…», иначе такие колонки
@@ -18338,7 +18358,11 @@ function autoMap(headers) {
     const isNetWeight = FIELD_ALIAS.net_weight.test(eh);
     /* Отдельный рекомендованный прайс никогда не распознаём как обычную цену. */
     const isRecommended = /(?:рекоменд|ррц|\brrp\b|\bmsrp\b|recommended|suggested)/i.test(eh) && /(?:цен|price|ррц|rrp|msrp)/i.test(eh);
-    let f = isRecommended || exact[eh] === '__custom' || isBuyoutPct || isOrderCount ? ''
+    /* «Ссылка на товар», «Ссылка на сайт», «Ссылка на сертификат» — это не ссылка
+       на изображение: раньше такие колонки уходили в image_url и карточка
+       получала адрес страницы поставщика вместо фото. */
+    const isPageLink = /^ссылка\s*(?:на|на\s+карточку)?\s*(?:товар|сайт|страниц|сертификат|описан|карточк)/i.test(eh);
+    let f = isRecommended || isPageLink || exact[eh] === '__custom' || isBuyoutPct || isOrderCount ? ''
       /* Явные правила идут раньше нечёткого скоринга: иначе «Весогабариты»
          перехватывала weight у «Вес (кг)», а «Объёмный вес» — volume. */
       : (isNetWeight ? 'net_weight'
@@ -21755,6 +21779,30 @@ async function _persistNowImpl(changedList) {
        обрывается AbortError на больших каталогах. */
     const CH = 1000;
     const _tPersist = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  /* v12.9.49: категории/правила и реестры Каталога V сохраняются ОТДЕЛЬНО и
+     независимо от записи товаров. Раньше это происходило только после удачной
+     записи каталога: если запись обрывалась, загруженный справочник
+     (артикул+бренд, OE, кроссы, стандартные ОВХ) не сохранялся — и следующие
+     файлы было нечем обогащать. */
+  const _auxPersist = () => Promise.resolve().then(async () => {
+    try {
+      await db.transaction('rw', db.cats, db.rules, db.excs, db.meta, async () => {
+        await StorageCtl.assertCatalogFresh();
+        for (const [table, values] of [[db.cats, S.cats], [db.rules, S.rules], [db.excs, S.excs]]) {
+          // IDs are identities used by edit/delete. Stripping them here caused
+          // memory and IndexedDB to disagree after an unrelated catalogue save.
+          await table.clear(); if (values.length) await table.bulkAdd(values.map(x => ({...x})));
+        }
+      });
+      S._cacheAuxError = '';
+    } catch (e) {
+      S._cacheAuxError = String(e && (e.message || e.name) || e).slice(0, 160);
+      console.warn('[UC] categories/rules save:', e);
+      Toast.err('Категории или правила не сохранены', 'Предыдущая запись не заменена. Проверьте место и сделайте экспорт; изменения остаются в памяти.');
+    }
+    try { await HVC.save(); } catch (e) { console.warn('[UC] HVC save:', e); }
+    StorageCtl.refresh();
+  });
   /* v12.9.6-mem: строки каталога материализуются ПО ЧАНКАМ. Полный второй массив
      копий (S.rows.map) на 126k SKU — это +150…250 МБ пика и падение вкладки
      «Out of memory» именно при повторном сохранении после импорта. */
@@ -21896,25 +21944,7 @@ async function _persistNowImpl(changedList) {
       StorageCtl.refresh(); return false;
     }
     // Категории/правила и реестры имеют собственные транзакции и отдельный статус.
-    Promise.resolve().then(async () => {
-      try {
-        await db.transaction('rw', db.cats, db.rules, db.excs, db.meta, async () => {
-          await StorageCtl.assertCatalogFresh();
-          for (const [table, values] of [[db.cats, S.cats], [db.rules, S.rules], [db.excs, S.excs]]) {
-            // IDs are identities used by edit/delete. Stripping them here caused
-            // memory and IndexedDB to disagree after an unrelated catalogue save.
-            await table.clear(); if (values.length) await table.bulkAdd(values.map(x => ({...x})));
-          }
-        });
-        S._cacheAuxError = '';
-      } catch (e) {
-        S._cacheAuxError = String(e && (e.message || e.name) || e).slice(0, 160);
-        console.warn('[UC] categories/rules save:', e);
-        Toast.err('Категории или правила не сохранены', 'Предыдущая запись не заменена. Проверьте место и сделайте экспорт; изменения остаются в памяти.');
-      }
-      try { await HVC.save(); } catch (e) { console.warn('[UC] HVC save:', e); }
-      StorageCtl.refresh();
-    });
+    _auxPersist();
   } catch (e) {
     console.error('[UC] persist error:', e && e.name, e && e.message, e && e.stack);
     const text = String(e && (e.message || e.name) || e).slice(0, 200);
@@ -21923,6 +21953,9 @@ async function _persistNowImpl(changedList) {
     Toast.err(conflict ? 'Каталог изменился в другой вкладке' : quota ? 'Недостаточно места для кэша' : 'Кэш не сохранён',
       (conflict ? 'Сохранённый каталог не заменён. ' : quota ? 'Браузер или диск отклонил запись по квоте. ' : 'IndexedDB отклонил запись (' + text.slice(0, 90) + '). ') +
       'Часть изменений может быть только в памяти: не закрывайте вкладку, сначала сделайте экспорт. Откройте «Хранилище и квота».');
+    /* Даже если каталог не записался, справочник и правила должны сохраниться:
+       именно из них обогащаются следующие файлы. */
+    try { _auxPersist(); } catch (eAux) { console.warn('[UC] aux persist:', eAux); }
     StorageCtl.refresh(); return false;
   }
   try {
@@ -22712,7 +22745,7 @@ const HVC = {
     if (k === 'name' || k === 'applicability' || k === 'category') return en[k] !== false;
     return true;
   },
-  EN_COLS: ['length', 'width', 'height', 'weight', 'name', 'applicability', 'category', 'oe_numbers', 'analog_list', 'group_articles', 'barcode'],
+  EN_COLS: ['length', 'width', 'height', 'weight', 'name', 'applicability', 'category', 'tnved', 'oe_numbers', 'analog_list', 'group_articles', 'barcode'],
   enabledColumns() { return HVC.EN_COLS.filter(k => HVC.enCol(k)); },
   /* Пустой ли у строки столбец обогащения — для панели «сколько SKU нужно заполнить». */
   colEmpty(p, k) {
@@ -22724,6 +22757,7 @@ const HVC = {
     if (k === 'analog_list') return txt(p.analog_list);
     if (k === 'group_articles') return txt(p.group_articles);
     if (k === 'barcode') return txt(p.barcode);
+    if (k === 'tnved') return txt(p.tnved);
     return !num(p[k]);
   },
   enrichCoverage() {
@@ -22749,13 +22783,14 @@ const HVC = {
      Один артикул без подтверждённого бренда не доказывает идентичность. */
   _abAgg(p) {
     const key = HVC.keyOf(p), pt = HVC.normalizeKey(p.article) && HVC.normalizeKey(p.brand) ? HVC.parts.get(key) : null;
-    const agg = { length: 0, width: 0, height: 0, weight: 0, dimensions_str: '', name: '', applicability: '', category: '' };
+    const agg = { length: 0, width: 0, height: 0, weight: 0, dimensions_str: '', name: '', applicability: '', category: '', tnved: '' };
     const recs = pt ? [pt] : [];
     const badCat = v => !v || ['без категории', 'разное', 'прочее', 'не определено'].includes(String(v).trim().toLowerCase());
     for (const q of recs) {
       if (!agg.name && q.name) agg.name = q.name;
       if (!agg.applicability && q.applicability) agg.applicability = q.applicability;
       if (badCat(agg.category) && !badCat(q.category)) agg.category = q.category;
+      if (!agg.tnved && q.tnved) agg.tnved = String(q.tnved).trim();
       for (const dim of ['length', 'width', 'height', 'weight']) {
         const v = HVC.safeNum(q[dim], true);
         if (v !== null && v > num(agg[dim])) agg[dim] = v;
@@ -22806,6 +22841,8 @@ const HVC = {
     ozon_type: ['тип ozon', 'ozon type', 'тип озон', 'ozon_type'],
     barcode: ['штрих-код', 'barcode', 'штрихкод', 'ean', 'eac13', 'штрих код'],
     multiplicity: ['кратность шт', 'кратность', 'multiplicity', 'кратность упаковки'],
+    currency: ['валюта', 'currency', 'валюта цены', 'валюта прайса'],
+    markRequired: ['требуется честный знак', 'требуется маркировка', 'нужен честный знак', 'обязательная маркировка', 'маркировка обязательна'],
     length: ['длина (см)', 'длина', 'length', 'длинна', 'длина, см', 'length_cm'],
     width: ['ширина (см)', 'ширина', 'width', 'ширина, см', 'width_cm'],
     height: ['высота (см)', 'высота', 'height', 'высота, см', 'height_cm'],
@@ -22910,6 +22947,7 @@ const HVC = {
         category: String((p.category && !['Без категории','Разное'].includes(p.category)) ? p.category : (prev.category || p.category || '')).trim(),
         multiplicity: num(p.multiplicity) || prev.multiplicity || 1,
         barcode: p.barcode || prev.barcode || '',
+        tnved: String(p.tnved || prev.tnved || '').trim(),
         /* Пустой файл-дозагрузка не должен затереть уже известные габариты нулями. */
         length: (dimensionTrusted && HVC.safeNum(p.length, true)) || prev.length || 0, width: (dimensionTrusted && HVC.safeNum(p.width, true)) || prev.width || 0,
         height: (dimensionTrusted && HVC.safeNum(p.height, true)) || prev.height || 0, weight: (dimensionTrusted && HVC.safeNum(p.weight, true)) || prev.weight || 0,
@@ -22943,6 +22981,7 @@ const HVC = {
           ozon_category: ozonPair ? ozonPair.category : (oldOe.ozon_category || ''),
           ozon_type: ozonPair ? ozonPair.type : (oldOe.ozon_type || ''),
           ozon_conflict: oeOzonConflict,
+          tnved: oldOe.tnved || String(p.tnved || '').trim(),
           length: oldOe.length || (dimensionTrusted && HVC.safeNum(p.length, true)) || 0, width: oldOe.width || (dimensionTrusted && HVC.safeNum(p.width, true)) || 0,
           height: oldOe.height || (dimensionTrusted && HVC.safeNum(p.height, true)) || 0, weight: oldOe.weight || (dimensionTrusted && HVC.safeNum(p.weight, true)) || 0,
           dimensions_str: oldOe.dimensions_str || (dimensionTrusted && p.dimensions_str) || ''
@@ -23354,24 +23393,26 @@ const HVC = {
       return { value:'', source:'' };
     };
     const isOe = (mode || HVC.enrichMode()) === 'oe';
-    let nameVals, applVals, catVals, labels;
+    let nameVals, applVals, catVals, tnVals, labels;
     if (isOe) {
       const H = HVC._oeSetOf(p);             /* кэш: rep = прямой OE-реестр, agg = доноры по OE */
       const rep = H.rep || {}, ag = H.agg;
-      nameVals = [rep.name, ag.name]; applVals = [rep.applicability, ag.applicability]; catVals = [rep.category, ag.category];
+      nameVals = [rep.name, ag.name]; applVals = [rep.applicability, ag.applicability]; catVals = [rep.category, ag.category]; tnVals = [rep.tnved, ag.tnved];
       labels = ['OE-реестр', 'аналоги по OE'];
     } else {
       const ab = HVC._abAgg(p).agg;          /* доноры только по связке артикул + бренд */
-      nameVals = [ab.name]; applVals = [ab.applicability]; catVals = [ab.category];
+      nameVals = [ab.name]; applVals = [ab.applicability]; catVals = [ab.category]; tnVals = [ab.tnved];
       labels = ['Артикул + Бренд'];
     }
     const name = pick(nameVals, labels, false);
     const applicability = pick(applVals, labels, false);
     const category = pick(catVals, labels, true);
+    const tnved = pick(tnVals || [], labels, false);
     return {
       name: name.value, nameSource:name.source,
       applicability: applicability.value, applicabilitySource:applicability.source,
-      category: category.value, categorySource:category.source
+      category: category.value, categorySource:category.source,
+      tnved: tnved.value, tnvedSource: tnved.source
     };
   },
   /* Цена с наценкой: брендовая → глобальная; ограничения min/max */
@@ -23435,6 +23476,8 @@ const HVC = {
     if (HVC.enCol('name') && !wasName && t.name) { p.name = t.name; (p._sources = p._sources || {}).name = { file: srcTag + t.nameSource, date: nowISO() }; }
     if (HVC.enCol('applicability') && !wasAppl && t.applicability) { p.applicability = t.applicability; (p._sources = p._sources || {}).applicability = { file: srcTag + t.applicabilitySource, date: nowISO() }; }
     if (HVC.enCol('category') && !wasCat && t.category) { p.category = t.category; (p._sources = p._sources || {}).category = { file: srcTag + t.categorySource, date: nowISO() }; }
+    /* v12.9.51: ТН ВЭД приходит отдельным файлом — переносим только в пустое поле. */
+    if (HVC.enCol('tnved') && !String(p.tnved || '').trim() && t.tnved) { p.tnved = t.tnved; (p._sources = p._sources || {}).tnved = { file: srcTag + t.tnvedSource, date: nowISO() }; }
     const anyDim = HVC.enCol('length') || HVC.enCol('width') || HVC.enCol('height') || HVC.enCol('weight');
     const pt = HVC.parts.get(key);
     if (anyDim) {
@@ -23531,6 +23574,7 @@ const HVC = {
   _enrichFlags() {
     return {
       name: HVC.enCol('name'), applicability: HVC.enCol('applicability'), category: HVC.enCol('category'),
+      tnved: HVC.enCol('tnved'),
       dims: ['weight', 'length', 'width', 'height'].filter(k => HVC.enCol(k))
     };
   },
@@ -23567,6 +23611,7 @@ const HVC = {
       const badCat = v => !v || ['без категории', 'разное', 'прочее', 'не определено'].includes(String(v).trim().toLowerCase());
       if (badCat(p.category) && !badCat(pt.category)) return false;
     }
+    if (f.tnved && !String(p.tnved || '').trim() && String(pt.tnved || '').trim()) return false;
     for (let i = 0; i < f.dims.length; i++) {
       const k = f.dims[i];
       if (!(num(p[k]) > 0) && num(pt[k]) > 0) return false;
@@ -25490,6 +25535,7 @@ const Import = {
         (headers.includes('Ozon realFBS доставка, ₽/ед') || headers.includes('Ozon DBS доставка, ₽/ед'));
       const guess = advisorTemplate ? null : Import.guessProfile(file.name, headers);
       const keepVis = $('#impKeepVisibility'); if (keepVis) keepVis.checked = true;
+      const relSw = $('#impEnrichRelated'); if (relSw) relSw.checked = S.settings.enrichRelatedOnImport !== false;
       if ($('#impMode')) $('#impMode').value = 'upsert';
       Import.syncPriceIsCost();
       if (advisorTemplate) {
@@ -25698,6 +25744,7 @@ const Import = {
       let sourceCollision=0; const sourceCollisionExamples=[];
       const CHUNK = 4000; // чанк построчной обработки — не блокирует вкладку на больших файлах
       const changedRows = new WeakSet();   /* membership for the partial pipeline */
+      S._relatedEnriched = 0;
       const keep = mode === 'replace' ? new Set() : null;
       const touched = []; // объекты для Каталога V (OE-реестр, кроссы, цены)
       const importTupleStates = new WeakMap(); // для авто-OE доказываем полный комплект из одной входной строки
@@ -26022,6 +26069,9 @@ const Import = {
           AnomalyDetector.quarantineRow(row);
         }
         _mark('карантин ОВХ');
+        /* v12.9.49: видно, что справочник действительно пополнился — из него
+           будут обогащаться следующие файлы. */
+        const _partsBefore = HVC.parts.size, _oeBefore = HVC.oe.size;
         const hv = HVC.ingest(touchedUnique);
         _mark('реестр OE');
         /* Группировка от OE выполняется ВСЕГДА после imпорта: rebuildIndex строит
@@ -26055,10 +26105,49 @@ const Import = {
           if (stdFilled) Prog.msg('стандартные весогабариты по категории: ' + fmt(stdFilled));
         }
         _mark('стандартные ОВХ');
+        /* v12.9.50: файл, загружаемый ПОСЛЕ источника (весогабариты, OE-кроссы,
+           названия), обогащает не только свои строки, но и связанные строки уже
+           загруженного каталога — иначе источник остаётся пустым до ручного
+           «Обогатить сейчас». Непустые значения не меняются. */
+        const relSwEl = $('#impEnrichRelated');
+        const relOn = relSwEl ? !!relSwEl.checked : (S.settings.enrichRelatedOnImport !== false);
+        S.settings.enrichRelatedOnImport = relOn;
+        if (relOn) {
+          let relRows = [];
+          try { relRows = Import._relatedRows(touchedUnique, new Set(touchedUnique), idx, idxArt); }
+          catch (eRel) { console.warn('[UC] связанные строки:', eRel); }
+          if (relRows.length) {
+            if (prog) prog('обогащение связанных строк каталога: ' + fmt(relRows.length));
+            await HVC.enrichAsync(relRows, prog);
+            let relStd = 0;
+            if (S.settings.autoStdDims !== false && typeof StdDims !== 'undefined') {
+              const relStdKeys = StdDims.fields.map(f => f[0]);
+              for (let i = 0; i < relRows.length; i++) {
+                if ((i % 4000) === 0) await Exp._yield();
+                const row = relRows[i];
+                try {
+                  if (row.dimensionAnomalyBlocked || row._dimensionOeReview) continue;
+                  if (relStdKeys.every(k => num(row[k]) > 0)) continue;
+                  const a = StdDims.assess(row, true), f = a.found;
+                  if (a.missing.length && f.status === 'match' && f.match === 'exact' && StdDims.fill(row, f, false).length) relStd++;
+                } catch (e) { }
+              }
+              if (relStd) Prog.msg('связанные строки: стандартные ОВХ ' + fmt(relStd));
+            }
+            /* Без includes() в цикле: на 100k+ строк это квадратично. */
+            const _chSet = new Set(changedList);
+            for (const r of relRows) { changedRows.add(r); _chSet.add(r); }
+            if (_chSet.size !== changedList.length) { changedList.length = 0; for (const r of _chSet) changedList.push(r); }
+            S._relatedEnriched = relRows.length;
+            Prog.msg('обогащено связанных строк каталога: ' + fmt(relRows.length));
+          }
+        }
+        _mark('связанные строки');
         touchedUnique.length = 0;
         const ftype = HVC.fileTypeOf(targets);
         const dfix = HVC.datesFixed - datesBefore;
-        Toast.info('Каталог V · ' + ftype, `OE +${fmt(hv.oe)} · связей +${fmt(hv.cross)} · цен +${fmt(hv.prices)} · всего OE ${fmt(HVC.oe.size)} · групп от OE пересчитано${dfix ? ` · ячеек с датами исправлено: ${fmt(dfix)}` : ''}`);
+        const _partsNew = HVC.parts.size - _partsBefore, _oeNew = HVC.oe.size - _oeBefore;
+        Toast.info('Каталог V · ' + ftype, `справочник: связок ${fmt(HVC.parts.size)}${_partsNew ? ` (+${fmt(_partsNew)})` : ''} · OE ${fmt(HVC.oe.size)}${_oeNew ? ` (+${fmt(_oeNew)})` : ''} · связей +${fmt(hv.cross)} · цен +${fmt(hv.prices)} · групп от OE пересчитано${dfix ? ` · ячеек с датами исправлено: ${fmt(dfix)}` : ''}`);
       }
       S.imports.push({ id: uid('i'), name: S.pending.file, date: nowISO(), rows: body.length, added, updated, cols: enabled.map(m => m.target || m.src).join('|'), keyMode: S.settings.keyMode, mode });
       await db.imports.add(S.imports[S.imports.length - 1]).catch(e => console.warn('[UC] imports log:', e));
@@ -26124,11 +26213,54 @@ const Import = {
         (mergedByArticle ? ` · сопоставлено по артикулу (без бренда в файле): ${fmt(mergedByArticle)}` : '') +
         (dedup ? ` · объединено дублей: ${fmt(dedup)}` : '') + ` · всего SKU: ${fmt(S.rows.length)}` +
         (S.lastOeAutoCheck ? (S.lastOeAutoCheck.error ? ' · автосверка OE прервана' : ` · авто-OE на проверку: ${fmt(S.lastOeAutoCheck.changed || 0)}, без замены: ${fmt(S.lastOeAutoCheck.noChoice || 0)}`) : ' · автосверка OE выключена') +
-        (_stageText ? ` · время: ${_stageText}` : ''));
+        (_stageText ? ` · время: ${_stageText}` : '') +
+        (S._relatedEnriched ? ` · связанных строк обогащено: ${fmt(S._relatedEnriched)}` : '') +
+        ` · справочник: ${fmt(HVC.parts.size)} связок, OE ${fmt(HVC.oe.size)}`);
       if (!S.view.length && S.rows.length) {
         Toast.warn('Строки не видны в таблице', 'Все SKU отсеяны правилами-исключениями или фильтрами. Смотрите жёлтый баннер в разделе 2 и счётчик «исключено».');
       }
     });
+  },
+  /* v12.9.50 · СВЯЗАННЫЕ СТРОКИ КАТАЛОГА.
+     Файлы, загружаемые ПОСЛЕ источника (весогабариты, OE-кроссы, названия),
+     должны расходиться по уже загруженному ассортименту, а не только по своим
+     строкам. Возвращаем строки каталога, которых нет в загружаемом файле, но
+     которые связаны с ним тем же нормализованным артикулом или общим OE-номером
+     и у которых есть хотя бы одно незаполненное поле обогащения. */
+  _relatedRows(imported, importedSet, idx, idxArt) {
+    if (typeof HVC === 'undefined' || !S.rows.length || !Array.isArray(imported) || !imported.length) return [];
+    const out = [], seen = new Set();
+    const flags = HVC._enrichFlags();
+    const empty = p => {
+      if (flags.name && !String(p.name || '').trim()) return true;
+      if (flags.applicability && !String(p.applicability || '').trim()) return true;
+      if (flags.category) {
+        const c = String(p.category || '').trim().toLowerCase();
+        if (!c || c === 'без категории' || c === 'разное' || c === 'прочее' || c === 'не определено') return true;
+      }
+      if (flags.tnved && !String(p.tnved || '').trim()) return true;
+      for (let i = 0; i < flags.dims.length; i++) if (!(num(p[flags.dims[i]]) > 0)) return true;
+      return false;
+    };
+    const add = p => { if (!p || importedSet.has(p) || seen.has(p)) return; seen.add(p); if (empty(p)) out.push(p); };
+    for (const r of imported) {
+      if (!r) continue;
+      const key = HVC.keyOf(r), art = HVC.normalizeKey(r.article);
+      if (art && idxArt) add(idxArt.get(art));
+      const oes = HVC.byArt.get(key);
+      if (oes && oes.size) {
+        for (const oe of oes) {
+          const keys = HVC.byOe.get(oe);
+          if (!keys || !keys.size) continue;
+          for (const k of keys) {
+            if (idx) add(idx.get(k));
+            const cut = String(k).indexOf('|');
+            if (idxArt && cut > 0) add(idxArt.get(String(k).slice(0, cut)));
+          }
+        }
+      }
+    }
+    return out;
   },
   async saveProfile() {
     const name = await askText('Профиль маппинга', 'Название профиля маппинга', S.pending.file.replace(/\.[^.]+$/, '') + ' · профиль');
@@ -26648,8 +26780,8 @@ SUP-SHK-710;RoadTech;Амортизатор подвески передний г
 const EnrichAudit = {
   LABELS: { length:'Длина, см', width:'Ширина, см', height:'Высота, см', weight:'Вес, кг',
     name:'Наименование', applicability:'Применимость', category:'Категория',
-    oe_numbers:'OE-номера', analog_list:'Аналоги', group_articles:'Группа артикулов', barcode:'Штрихкод' },
-  OTHER: { ozon_category:'Категория OZON', tnved:'ТН ВЭД', image_url:'Ссылка на фото', cost:'Себестоимость' },
+    oe_numbers:'OE-номера', analog_list:'Аналоги', group_articles:'Группа артикулов', barcode:'Штрихкод', tnved:'ТН ВЭД' },
+  OTHER: { ozon_category:'Категория OZON', image_url:'Ссылка на фото', cost:'Себестоимость' },
   _otherEmpty(p, k) {
     if (k === 'cost') return !(num(p.cost) > 0);
     if (k === 'ozon_category') return !String(p.ozon_category == null ? '' : p.ozon_category).trim();
@@ -43087,7 +43219,7 @@ function bindAll() {
   /* --- v12.9.9 · Обогащение: выбор способа (Артикул + Бренд / OE-номер) и колонок --- */
   const EN_LABEL = { length: 'Длина, см', width: 'Ширина, см', height: 'Высота, см', weight: 'Вес, кг',
     name: 'Наименование', applicability: 'Применимость', category: 'Категория',
-    oe_numbers: 'OE-номера', analog_list: 'Аналоги', group_articles: 'Группа артикулов', barcode: 'Штрихкод' };
+    oe_numbers: 'OE-номера', analog_list: 'Аналоги', group_articles: 'Группа артикулов', barcode: 'Штрихкод', tnved: 'ТН ВЭД' };
   const EN_GROUP = { dims: ['length', 'width', 'height', 'weight'], name: ['name'], applicability: ['applicability'], category: ['category'] };
   const EN_GROUP_LABEL = { dims: 'Весогабариты', name: 'Наименование', applicability: 'Применимость', category: 'Категория' };
   const ensureEnrichCols = () => {
