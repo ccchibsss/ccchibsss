@@ -43,6 +43,14 @@
   строки источника оставались пустыми до ручного «Обогатить сейчас».
   Переключатель «Обогащать связанные строки каталога из этого файла» в мастере
   импорта, по умолчанию включён; непустые значения не меняются.
+  v12.9.52 — аудит формул выгрузок Excel/CSV: округление приведено к семантике
+  Excel (половина от нуля, «грязное» произведение 31363.499999999996 больше не даёт
+  −313.63 против −313.64 в формуле ROUND); «Наценка к закупке» и топ-10 в «Сводке»
+  гасятся тем же правилом, что и основной лист (раньше кэш хранил число там, где
+  формула возвращала пустую строку); правило «ячейка недоступна» вынесено в одну
+  функцию вместо четырёх одинаковых inline-условий; в калькулятор Ozon добавлены
+  колонки «решатель приложения» и Δ рекомендуемой цены, чтобы сверять формулу и
+  модель без ручного пересчёта.
   v12.9.51 — ТН ВЭД стал колонкой обогащения: код приходит отдельным файлом и
   переносится в пустое поле по OE-номеру или паре «артикул + бренд», хранится в
   реестре частей и в OE-реестре, переживает перезагрузку и учитывается в
@@ -13370,7 +13378,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.51-client+audit.1';
+const APP_VERSION = '12.9.52-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13461,7 +13469,18 @@ const num = v => {
   const n = parseFloat(String(v).replace(/\s+/g, '').replace(',', '.'));
   return isFinite(n) ? n : 0;
 };
-const round = (n, d = 2) => Math.round((Number(n) || 0) * 10 ** d) / 10 ** d;
+/* Округление как в Excel: половина уходит ОТ нуля (Math.round(-2.5) = -2, Excel = -3),
+   а «грязное» произведение (31363.499999999996 вместо 31363.5) трактуется по
+   десятичному значению — иначе значение в приложении и формула ROUND в выгрузке
+   расходятся на копейку. */
+const round = (n, d = 2) => {
+  const v = Number(n) || 0;
+  if (!isFinite(v)) return 0;
+  const f = 10 ** d, a = Math.abs(v * f);
+  const int = Math.floor(a), frac = a - int;
+  const q = frac > 0.5 - 1e-9 && frac < 0.5 ? Math.floor(Number(a.toPrecision(15)) + 0.5) : Math.floor(a + 0.5);
+  return (v < 0 ? -q : q) / f;
+};
 function debounce(f, ms) {
   let t = 0;
   const wrapped = (...a) => { clearTimeout(t); t = setTimeout(() => { t = 0; f(...a); }, ms || 220); };
@@ -31173,6 +31192,9 @@ const OzonExport = {
       ['netUnit','Чистая прибыль/ед, ₽ — формула',22],['margin','Маржа, % — формула',18],
       ['beApp','Безубыточность, ₽ — формула',22],
       ['targetApp','Рекомендуемая цена, ₽ — формула',23],
+      ['solverBe','Безубыточность, ₽ — решатель приложения',24],
+      ['solverTarget','Рекомендуемая цена, ₽ — решатель приложения',26],
+      ['solverDiff','Δ рекомендуемой цены (формула − решатель), ₽',26],
       ['targetMarginPct','Целевая маржа, % — ввод',18],
       ['priceRate','Переменные расходы, доля цены — формула',22],
       ['priceFixed','Фиксированная часть цены, ₽ — формула',22],
@@ -31214,6 +31236,8 @@ const OzonExport = {
         customTaxPct:Math.max(0, Math.min(100, keepZero(S.settings.taxPct, 6))),
         osnoShare:Math.max(0, Math.min(100, keepZero(S.settings.taxOsnoEligibleSharePct, 0))),
         targetMarginPct:Math.max(0, keepZero(S.settings.tgtMargin, 20)),
+        solverBe:(Number.isFinite(num(eco.breakEvenPrice)) && num(eco.breakEvenPrice) > 0 && num(eco.breakEvenPrice) < 1e7) ? Math.ceil(num(eco.breakEvenPrice)) : '',
+        solverTarget:(Number.isFinite(num(eco.tgtPrice)) && num(eco.tgtPrice) > 0 && num(eco.tgtPrice) < 1e7) ? Math.ceil(num(eco.tgtPrice)) : '',
         status:statusReasons.length ? 'СЦЕНАРИЙ — ' + statusReasons.join('; ') :
           'Базовые условия модели заполнены; тарифы всё равно сверьте с кабинетом',
         details:String(eco.details || '')
@@ -31343,6 +31367,12 @@ const OzonExport = {
       setFormula('beApp', `IF(OR(${ref('priceRate')}>=1,${ref('priceFixed')}<0),"",MAX(0,ROUNDUP(${ref('priceFixed')}/(1-${ref('priceRate')}),0)))`, beValue);
       setFormula('targetApp', `IF(${ref('beApp')}="","",IF((1-${ref('profitTaxRate')})*(1-${ref('priceRate')})-${ref('targetMarginPct')}/100<=0,"",` +
         `MAX(${ref('beApp')},ROUNDUP((1-${ref('profitTaxRate')})*${ref('priceFixed')}/((1-${ref('profitTaxRate')})*(1-${ref('priceRate')})-${ref('targetMarginPct')}/100),0))))`, targetValue);
+      /* Сверка «формула ↔ решатель приложения» прямо в файле: решатель ищет цену
+         целочисленно по прибыли, формула линейна по доле цены — расхождение в 1–2 ₽
+         это округление, а не ошибка модели. */
+      setFormula('solverDiff', `IF(OR(${ref('targetApp')}="",${ref('solverTarget')}=""),"",${ref('targetApp')}-${ref('solverTarget')})`,
+        (values.targetApp === '' || values.solverTarget === '' || !Number.isFinite(Number(values.targetApp)) || !Number.isFinite(Number(values.solverTarget))) ? ''
+          : Number(values.targetApp) - Number(values.solverTarget));
       aoa.push(row);
       if (i > 0 && i % 500 === 0) { if (prog) prog(`Ozon калькулятор: ${fmt(i + 1)} из ${fmt(rows.length)} SKU…`); await Exp._yield(); }
     }
@@ -31352,7 +31382,7 @@ const OzonExport = {
       ['Ozon — редактируемый калькулятор юнит-экономики'],
       ['Как пользоваться', `Изменяйте исходные значения в колонках ${inputFrom}:${inputTo} и целевую маржу в ${targetMarginCol}; результаты в ${formulaFrom}:${formulaTo} пересчитываются формулами Excel.`],
       ['Безубыток и рекомендуемая цена', 'Это настоящие формулы от закупки, продаж, фиксированных расходов, процентных удержаний, налогового режима и целевой маржи. Рекомендуемая цена — минимальная целая цена для заданной маржи в текущем сегменте модели, но не ниже безубыточности.'],
-      ['Прозрачные компоненты', 'После рекомендуемой цены выведены переменная доля расходов, фиксированная часть и ставка налога на прибыль. По ним можно проверить знаменатель и числитель формул. Для ограниченных тарифов используется текущий сегмент cap; после его смены сверьте контрольную прибыль. Возможна разница на округление до 1 ₽ с численным солвером приложения.'],
+      ['Прозрачные компоненты', 'После рекомендуемой цены выведены переменная доля расходов, фиксированная часть и ставка налога на прибыль. По ним можно проверить знаменатель и числитель формул. Для ограниченных тарифов используется текущий сегмент cap; после его смены сверьте контрольную прибыль. Колонки «решатель приложения» показывают те же две цены из целочисленного поиска приложения, а Δ — их разницу с формулой. Δ в пределах 0–2 ₽ — округление (ROUNDUP против целочисленного поиска). Δ больше 2 ₽ означает ограничение сегмента: «Нестандарт, %» или процентная сдача ПВЗ при найденной цене упираются в cap, поэтому формула, считающая по текущему сегменту, завышает цену. В таких строках берите цену из колонки «решатель приложения»: она учитывает сегмент по результату.'],
       ['Статус СЦЕНАРИЙ', 'Означает неподтверждённую ставку, отсутствующий маршрут или другое указанное ограничение. Это не достоверный тарифный результат.'],
       ['Налоги', 'Поддерживаются режимы calcTax приложения, включая УСН с НДС 5/7%, ОСНО 22% и самозанятость. Для ОСНО заполните долю расходов с подтверждённым входным НДС.'],
       ['Фиксированные тарифы', 'Логистика, выдача, упаковка, хранение и возвраты задаются в ₽/ед. Для ПВЗ с процентной сдачей колонка сдачи содержит формулу от цены.'],
@@ -33477,7 +33507,7 @@ function buildUnitEconomicsSyncPayload_(){
   const strict=new Proxy(ref,{get(t,k){if(!Object.prototype.hasOwnProperty.call(t,k))throw new Error('UnitEconomics formula references missing column '+String(k));return t[k];}});
   const templates=cat.map(c=>{ if(!c.xl)return ''; try { const f=String(c.xl(2,strict)||''); return f.replace(/([A-Z]{1,3})2\b/g,'$1{ROW}'); } catch(e){ return ''; } });
   columns.forEach((c,i)=>{ c.formulaTemplate=templates[i]||''; });
-  const valueOf=(c,p)=>{ try { if ((p.modelReviewRequired && c.g === 'calc') || ((p.noBuyInconsistent || p.modelReviewRequired) && INVALID_ECON_EXPORT_FIELDS.has(c.k)) || marketplaceResultUnavailable(p,c.k) || missingTariffExportUnavailable(p,c)) return ''; let v=c.src?c.src(p):(c.custom?(p.custom||{})[c.custom]:p[c.k]); if(v instanceof Date)return v.toISOString(); if(typeof v==='number'&&!isFinite(v))return ''; if(v&&typeof v==='object')return JSON.stringify(v); return v===undefined||v===null?'':v; } catch(e){ return p[c.k]===undefined?'':p[c.k]; } };
+  const valueOf=(c,p)=>{ try { if (exportCellUnavailable(p, c.k, c.g)) return ''; let v=c.src?c.src(p):(c.custom?(p.custom||{})[c.custom]:p[c.k]); if(v instanceof Date)return v.toISOString(); if(typeof v==='number'&&!isFinite(v))return ''; if(v&&typeof v==='object')return JSON.stringify(v); return v===undefined||v===null?'':v; } catch(e){ return p[c.k]===undefined?'':p[c.k]; } };
   const rows=[], queued=new Set();
   (S.rows||[]).forEach(p=>{ const articleKey=normArticle(p.article); if(!articleKey || p.dimensionAnomalyBlocked)return; const key=articleKey+'|v'+(num(p.version)||1); if(seen[key]||queued.has(key))return; queued.add(key); rows.push({record_key:key,synced_at:nowISO(),values:cat.map(c=>valueOf(c,p))}); });
   return {columns:columns,formulaTemplates:templates,rows:rows};
@@ -37316,7 +37346,12 @@ function exportCatalog() {
       xl: (R, r) => `=ROUND(${r.costMult}${R}*(1+${r.markupPct}${R}/100),2)` },
     { g: 'calc', k: 'markupLabelText', n: 'Правило наценки', w: 22, txt: 1, src: p => markupLabelFor(p) },
     { g: 'calc', k: 'markupOnCost', n: 'Наценка к закупке, %', w: 14, f: '#,##0.0',
-      src: p => { const c = costWithMultiplicity(p), t = num(p.tgtPrice); return !p.priceTargetUnavailable && c > 0 && t > 0 ? Math.round((t / c - 1) * 1000) / 10 : ''; },
+      src: p => { const c = costWithMultiplicity(p), t = num(p.tgtPrice);
+        /* Цена-ориентир может быть погашена (неполные входы, блок тарифов, пересмотр модели).
+           Тогда наценка к закупке обязана быть пустой: иначе в файле формула даёт "",
+           а кэш хранит число. */
+        if (exportCellUnavailable(p, 'tgtPrice')) return '';
+        return !p.priceTargetUnavailable && c > 0 && t > 0 ? Math.round((t / c - 1) * 1000) / 10 : ''; },
       xl: (R, r) => `=IFERROR(IF(${r.tgtPrice}${R}>0,ROUND((${r.tgtPrice}${R}/${r.costMult}${R}-1)*100,1),""),"")` },
     { g: 'calc', k: 'markupMargin', n: 'Наценка по марже, %', w: 17, f: '0.0', xl: (R, r) => `=IFERROR(ROUND((${r.price}${R}-${r.costMult}${R})/${r.costMult}${R}*100,1),0)` },
     { g: 'calc', k: 'markupProfit', n: 'Наценка по прибыли, %', w: 17, f: '0.0;[Red]-0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.cogs}${R}*100,1),0)` },
@@ -37379,6 +37414,17 @@ function missingTariffExportUnavailable(p, c) {
   if (p.priceInputsIncomplete && ['priceForApi','priceToSet','breakEvenPrice','tgtPrice'].includes(c.k)) return true;
   if (p.missingTariffBlocked && !mp && INVALID_ECON_EXPORT_FIELDS.has(c.k)) return true;
   return false;
+}
+/* v12.9.52: одно правило решает и что писать в XLSX/CSV, и какое значение кэшировать.
+   Раньше inline-условие повторялось в четырёх местах, и «Сводка» кэшировала число
+   там, где в основном листе стояла пустая ячейка (формула возвращала ""). */
+function exportCellUnavailable(p, field, group) {
+  if (!p || !field) return false;
+  const g = group || 'calc';
+  return !!((p.modelReviewRequired && g === 'calc')
+    || ((p.noBuyInconsistent || p.modelReviewRequired) && INVALID_ECON_EXPORT_FIELDS.has(field))
+    || marketplaceResultUnavailable(p, field)
+    || missingTariffExportUnavailable(p, { k: field, g }));
 }
 function genericEconExportUnavailable(p) {
   return !p || !!(p.dimensionAnomalyBlocked || p.noBuyInconsistent || p.modelReviewRequired || p.missingTariffBlocked);
@@ -37964,7 +38010,7 @@ const Exp = {
           /* Список кодов нельзя молча обрезать по лимиту Excel. */
           if (c.rejectLongText && typeof v === 'string' && v.length > XLSX_CELL_MAX)
             throw new Error('Колонка «' + c.n + '», строка ' + R + ': больше ' + XLSX_CELL_MAX + ' символов. Используйте CSV или сократите список.');
-          const unavailable = (p.modelReviewRequired && c.g === 'calc') || ((p.noBuyInconsistent || p.modelReviewRequired) && INVALID_ECON_EXPORT_FIELDS.has(c.k)) || marketplaceResultUnavailable(p, c.k) || missingTariffExportUnavailable(p,c);
+          const unavailable = exportCellUnavailable(p, c.k, c.g);
           if (unavailable) v = '';
           if (v instanceof Date) v = 0;
           /* Кодовые колонки (артикул, штрихкод, КИЗ, OE-списки) — ВСЕГДА текст:
@@ -37980,9 +38026,13 @@ const Exp = {
             if (fs) {
               let f = Exp._sanitizeFormula(fs);
               if (!f && !skippedFormulas.has(c.k)) skippedFormulas.set(c.k, 'формула отклонена санитайзером (ведущие =,+,-,@ / управляющие символы / длина >8192)');
-              /* Третья линия защиты: IFERROR(..., кэш из JS) — если пользователь
-                 после экспорта удалит колонку в Excel, ячейка покажет значение. */
-              else if (f && typeof v === 'number' && isFinite(v) && !/^IFERROR\(/i.test(f)) f = `IFERROR(${f},${v})`;
+              /* Подстраховка на случай ошибки формулы. Раньше вторым аргументом
+                 подставлялся кэш из JS: если пользователь удалял или портил
+                 зависимую колонку, Excel молча показывал СТАРОЕ число вместо
+                 ошибки — в финансовой выгрузке это хуже, чем пустая ячейка.
+                 Теперь ошибка даёт пусто, а корректные строки по-прежнему
+                 несут кэш и пересчитываются при открытии. */
+              else if (f && typeof v === 'number' && isFinite(v) && !/^IFERROR\(/i.test(f)) f = `IFERROR(${f},"")`;
               fml = f;
             }
           }
@@ -38235,7 +38285,7 @@ const Exp = {
         const vl = (col, fallback, st) => {
           const i2 = vi(col); if (i2 <= 0) return [fallback, null, st];
           const target = `'Юнит-экономика'!$${COL_LET(i2 - 1)}$${excelRow}`;
-          return [{ f: `IF(ISBLANK(${target}),"",${target})`, v: fallback }, null, st];
+          return [{ f: `IF(ISBLANK(${target}),"",${target})`, v: exportCellUnavailable(p, col) ? '' : fallback }, null, st];
         };
         add(R, [[p.article], vl('price', num(p.price), 3), vl('category', p.category || '', 0), vl('breakEvenPrice', num(p.breakEvenPrice), 3), vl('margin', num(p.margin), 4)]);
         R++;
@@ -38324,7 +38374,7 @@ const Exp = {
      * даёт нечитаемую строку "Mon Jul 22 2024 00:00:00 GMT+0300…" вместо числа. */
     const cellVal = (c, p) => {
       let v = c.src ? c.src(p) : c.custom ? (p.custom || {})[c.custom] : (p[c.k] ?? '');
-      if ((p.modelReviewRequired && c.g === 'calc') || ((p.noBuyInconsistent || p.modelReviewRequired) && INVALID_ECON_EXPORT_FIELDS.has(c.k)) || marketplaceResultUnavailable(p, c.k) || missingTariffExportUnavailable(p,c)) v = '';
+      if (exportCellUnavailable(p, c.k, c.g)) v = '';
       if (c.txt) return (v == null ? '' : String(v)); /* кодовые колонки — только текст */
       if (v instanceof Date) v = num(v);
       else if (c.f && v !== '' && v !== null && v !== undefined) v = num(v);
