@@ -51,6 +51,18 @@
   Точечный пересчёт после импорта и автосверки ОВХ пропускает неизменённые строки
   целиком (на 217 000 SKU это сотни секунд), группы OE после подстановки ОВХ не
   пересобираются. В журнал добавлены тайминги записи по этапам и размер heap.
+  v12.9.56 — СКОРОСТЬ ПЕРЕСЧЁТА. Строка каталога упаковывается в числовой массив ДО
+  расчёта, а не после: на первом проходе обычная строка получает ~90 расчётных полей,
+  объект переходит в словарный режим и переразмечается — это дороже самой упаковки
+  (замер: расчёт по обычной строке 119 мкс, по компактной 92 мкс, упаковка 20 мкс).
+  Итог: 30 000 строк 6,2 → 4,5 с, 60 000 строк 10,7 → 8,3 с (138 мкс/строка против
+  481 в 12.9.54), память строки 5,9 → 4,7 КБ (≈ −260 МБ на 217 тыс. SKU). Точечный
+  пересчёт по изменённым строкам сохраняет сопоставление объект→замена, поэтому
+  пересчитываются ровно изменённые SKU. Подпись тарифа считается один раз на объект
+  (WeakMap вместо JSON.stringify на каждый SKU), месячные статьи — функцией без
+  замыкания и без Object.values/reduce, раскладка полей площадки в p.mp кэшируется
+  целиком, шаблон Float64Array копируется нативно. Поля непосчитанных площадок
+  отсутствуют (undefined, а не null): в интерфейсе «—», в выгрузке пустая ячейка.
   v12.9.55 — ОСНОВНОЙ РЕЖИМ: одна выбранная площадка. Пайплайн считает юнит-экономику
   только выбранного маркетплейса (по умолчанию Ozon): четыре решателя из пяти не
   запускаются, p.mp хранит одну экономику вместо пяти, колонки чужих площадок не
@@ -13405,7 +13417,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.55-client+audit.1';
+const APP_VERSION = '12.9.56-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19897,6 +19909,8 @@ function keepZero(value, fallback) {
   const n = num(value);
   return Number.isFinite(n) ? n : fallback;
 }
+/* Месячная сумма статьи: цена статьи × продажи/мес, округление до копеек. */
+function ecoMonth(value, sales) { return round(Math.max(0, num(value)) * sales, 2); }
 function finalizeMarketplaceEco(eco, fixedTotal, solverOnly, invalidNoBuy) {
   eco.returnRateInvalid = !!invalidNoBuy;
   /* Solver создаёт десятки временных eco-объектов на SKU. Подпись нужна только
@@ -19908,29 +19922,34 @@ function finalizeMarketplaceEco(eco, fixedTotal, solverOnly, invalidNoBuy) {
     if (solverOnly) delete eco.details;
     else eco.details = shareEcoText(makeDetails());
   }
+  /* v12.9.56: месяц считается функцией (без замыкания на каждую пробу решателя),
+     сумма месячных расходов складывается тем же порядком, что Object.values,
+     но без массива и reduce на каждый SKU. */
   const sales = Math.max(0, num(eco.sales));
-  const month = value => round(Math.max(0, num(value)) * sales, 2);
   const monthly = solverOnly ? null : {
-    commission: month(eco.commissionRub), specialFee: month(eco.specialFeeRub),
-    acquiring: month(eco.agencyFee), paymentTransfer: month(eco.paymentTransferRub),
-    lastMile: month(eco.lastMileRub), boost: month(eco.adsRub), cofin: month(eco.cofinRub),
-    logistics: month(eco.logisticsRub), scDelivery: month(eco.scDeliveryRub),
-    packaging: month(eco.packRub), processing: month(num(eco.transitPackRub) + num(eco.processingRub)),
-    storage: month(eco.storageRub), returns: month(eco.returnsRub),
-    returnStorage: month(eco.returnStorageRub), penalties: month(eco.penaltiesRub),
-    tax: month(eco.taxRub), listing: month(eco.listingRub), nonStd: month(eco.nonStdRub),
-    lateShip: month(eco.lateShipRub)
+    commission: ecoMonth(eco.commissionRub, sales), specialFee: ecoMonth(eco.specialFeeRub, sales),
+    acquiring: ecoMonth(eco.agencyFee, sales), paymentTransfer: ecoMonth(eco.paymentTransferRub, sales),
+    lastMile: ecoMonth(eco.lastMileRub, sales), boost: ecoMonth(eco.adsRub, sales), cofin: ecoMonth(eco.cofinRub, sales),
+    logistics: ecoMonth(eco.logisticsRub, sales), scDelivery: ecoMonth(eco.scDeliveryRub, sales),
+    packaging: ecoMonth(eco.packRub, sales), processing: ecoMonth(num(eco.transitPackRub) + num(eco.processingRub), sales),
+    storage: ecoMonth(eco.storageRub, sales), returns: ecoMonth(eco.returnsRub, sales),
+    returnStorage: ecoMonth(eco.returnStorageRub, sales), penalties: ecoMonth(eco.penaltiesRub, sales),
+    tax: ecoMonth(eco.taxRub, sales), listing: ecoMonth(eco.listingRub, sales), nonStd: ecoMonth(eco.nonStdRub, sales),
+    lateShip: ecoMonth(eco.lateShipRub, sales)
   };
+  /* Порядок слагаемых повторяет Object.values(monthly), чтобы не менять
+     округление и двоичную сумму в контрольных расчётах. */
   const monthlyCosts = solverOnly
-    /* Порядок слагаемых повторяет Object.values(monthly), чтобы не менять
-       округление и двоичную сумму в контрольных расчётах. */
-    ? month(eco.commissionRub) + month(eco.specialFeeRub) + month(eco.agencyFee) +
-      month(eco.paymentTransferRub) + month(eco.lastMileRub) + month(eco.adsRub) + month(eco.cofinRub) +
-      month(eco.logisticsRub) + month(eco.scDeliveryRub) + month(eco.packRub) +
-      month(num(eco.transitPackRub) + num(eco.processingRub)) + month(eco.storageRub) + month(eco.returnsRub) +
-      month(eco.returnStorageRub) + month(eco.penaltiesRub) + month(eco.taxRub) + month(eco.listingRub) +
-      month(eco.nonStdRub) + month(eco.lateShipRub)
-    : Object.values(monthly).reduce((sum, value) => sum + num(value), 0);
+    ? ecoMonth(eco.commissionRub, sales) + ecoMonth(eco.specialFeeRub, sales) + ecoMonth(eco.agencyFee, sales) +
+      ecoMonth(eco.paymentTransferRub, sales) + ecoMonth(eco.lastMileRub, sales) + ecoMonth(eco.adsRub, sales) + ecoMonth(eco.cofinRub, sales) +
+      ecoMonth(eco.logisticsRub, sales) + ecoMonth(eco.scDeliveryRub, sales) + ecoMonth(eco.packRub, sales) +
+      ecoMonth(num(eco.transitPackRub) + num(eco.processingRub), sales) + ecoMonth(eco.storageRub, sales) + ecoMonth(eco.returnsRub, sales) +
+      ecoMonth(eco.returnStorageRub, sales) + ecoMonth(eco.penaltiesRub, sales) + ecoMonth(eco.taxRub, sales) + ecoMonth(eco.listingRub, sales) +
+      ecoMonth(eco.nonStdRub, sales) + ecoMonth(eco.lateShipRub, sales)
+    : monthly.commission + monthly.specialFee + monthly.acquiring + monthly.paymentTransfer + monthly.lastMile +
+      monthly.boost + monthly.cofin + monthly.logistics + monthly.scDelivery + monthly.packaging + monthly.processing +
+      monthly.storage + monthly.returns + monthly.returnStorage + monthly.penalties + monthly.tax + monthly.listing +
+      monthly.nonStd + monthly.lateShip;
   eco.revenue = round(Math.max(0, num(eco.effPrice)) * sales);
   eco.cogs = round(Math.max(0, num(eco.cost)) * sales);
   eco.netProfit = round(eco.revenue - eco.cogs - monthlyCosts - Math.max(0, num(fixedTotal)), 2);
@@ -20038,11 +20057,15 @@ function solveMarketplacePrices(evaluate, baseEco, targetMargin, discontinuityAt
   /* BE и target часто probing'уют одни и те же целые цены. Делим лёгкий
      solver-результат между обоими проходами; полный monthly/UI-объект нужен
      только для baseEco, который уже рассчитан вызывающим кодом. */
-  const solverCache = new Map();
+  /* v12.9.56: пробных цен на SKU единицы — линейный кэш на двух массивах
+     дешевле Map (который создавался заново на каждую строку и кормил GC). */
+  const cacheKey = [], cacheEco = [];
   const evaluateSolver = price => {
     const key = Math.max(0, Math.round(price));
-    if (!solverCache.has(key)) solverCache.set(key, evaluate(key, true));
-    return solverCache.get(key);
+    for (let i = 0; i < cacheKey.length; i++) if (cacheKey[i] === key) return cacheEco[i];
+    const eco = evaluate(key, true);
+    cacheKey.push(key); cacheEco.push(eco);
+    return eco;
   };
   const beMetric = price => evaluateSolver(price).solverNetUnit;
   const tgtMetric = price => {
@@ -20541,16 +20564,21 @@ function calcMarketplacesEconomics(p, ov, meta) {
   if (avitoEco) p.mp.AVITO = packEco(avitoEco);
   p.bestMp = best ? best.code : ''; p.bestMpName = best ? best.name : ''; p.bestMpProfit = best ? best.eco.netProfit : 0;
   p.bestMpMargin = best ? best.eco.margin : 0; p.profitDiff = best && worst ? round(best.eco.netProfit - worst.eco.netProfit) : 0;
-  const flatMp = (suffix, eco, withUnavailable) => {
-    if (!eco) { p['profit'+suffix] = null; p['margin'+suffix] = null; p['be'+suffix] = null; p['tgt'+suffix] = null; return; }
+  /* v12.9.56: четыре поля площадки пишутся прямо в числовой массив строки —
+     через прототип это 20 обращений к сеттеру на SKU. Имена полей предвычислены. */
+  const flatMp = (fields, eco, withUnavailable) => {
+    /* v12.9.56: непосчитанная площадка — поле отсутствует (undefined), а не null:
+       null в __nv занимал ~0,3 КБ на строку, а смысл тот же — «данных нет»
+       (интерфейс показывает «—», выгрузка оставляет ячейку пустой). */
+    if (!eco) { setRowNum(p, fields[0], undefined); setRowNum(p, fields[1], undefined); setRowNum(p, fields[2], undefined); setRowNum(p, fields[3], undefined); return; }
     const blocked = eco.returnRateInvalid || (withUnavailable && eco.inputUnavailable);
-    p['profit'+suffix] = blocked ? 0 : eco.netProfit;
-    p['margin'+suffix] = blocked ? 0 : eco.margin;
-    p['be'+suffix] = blocked ? 0 : eco.breakEvenPrice;
-    p['tgt'+suffix] = blocked ? 0 : eco.tgtPrice;
+    setRowNum(p, fields[0], blocked ? 0 : eco.netProfit);
+    setRowNum(p, fields[1], blocked ? 0 : eco.margin);
+    setRowNum(p, fields[2], blocked ? 0 : eco.breakEvenPrice);
+    setRowNum(p, fields[3], blocked ? 0 : eco.tgtPrice);
   };
-  flatMp('WB', wbEco, false); flatMp('Ozon', ozonEco, true); flatMp('YM', ymEco, true);
-  flatMp('MM', mmEco, false); flatMp('Avito', avitoEco, false);
+  flatMp(FLAT_MP.WB, wbEco, false); flatMp(FLAT_MP.Ozon, ozonEco, true); flatMp(FLAT_MP.YM, ymEco, true);
+  flatMp(FLAT_MP.MM, mmEco, false); flatMp(FLAT_MP.Avito, avitoEco, false);
   p.belowBeAny = currentEffPrice < Math.max(0, ...comparableMps.map(x => num(x.eco.breakEvenPrice)));
   return { wbEco, ozonEco, ymEco, mmEco, avitoEco, best, worst };
 }
@@ -20609,15 +20637,30 @@ const _ecoLayouts = new Map();
 const MP_ECO_KEEP = ['revenue','netProfit','cogs','commissionRub','acquiringRub','logisticsRub','lastMileRub',
   'returnsRub','middleMileRub','fboAssemblyRub','dropoffRub','commissionPct','netProfitUnit','margin',
   'breakEvenPrice','tgtPrice','fulfillment','isKgt','liters','nonStdRub','handoverRub','lateShipRub','returnStorageRub','shipDiscountPp','nonStdByWeight','nonStdByCategory','nonStdFlag','commissionRateConfirmed','returnRateInvalid','inputUnavailable','tariffIncomplete','comparisonEligible','comparisonReasons','realFbsServiceRub','failedCaseCost','failedCostSource','storageDays'];
+function buildEcoLayout(keys) {
+  const proto = Object.create(null);
+  keys.forEach((k,i) => Object.defineProperty(proto,k,{enumerable:true,get(){return this._v[i];}}));
+  Object.defineProperty(proto,'toJSON',{value:function(){const out={};keys.forEach((k,i)=>out[k]=this._v[i]);return out;}});
+  return proto;
+}
+/* v12.9.56: у итогового объекта площадки заполнены все поля MP_ECO_KEEP —
+   это обычный случай. Для него не строятся ни массив filter(), ни строка
+   подписи join('|') на каждый SKU: раскладка кэшируется один раз. */
+let _ecoFullLayout = null;
 function packEco(eco) {
+  let full = true;
+  for (let i = 0; i < MP_ECO_KEEP.length; i++) if (eco[MP_ECO_KEEP[i]] === undefined) { full = false; break; }
+  if (full) {
+    const proto = _ecoFullLayout || (_ecoFullLayout = buildEcoLayout(MP_ECO_KEEP));
+    const out = Object.create(proto);
+    const v = new Array(MP_ECO_KEEP.length);
+    for (let i = 0; i < MP_ECO_KEEP.length; i++) v[i] = eco[MP_ECO_KEEP[i]];
+    out._v = v;
+    return out;
+  }
   const keys = MP_ECO_KEEP.filter(k => eco[k] !== undefined), signature = keys.join('|');
   let proto = _ecoLayouts.get(signature);
-  if (!proto) {
-    proto = Object.create(null);
-    keys.forEach((k,i) => Object.defineProperty(proto,k,{enumerable:true,get(){return this._v[i];}}));
-    Object.defineProperty(proto,'toJSON',{value:function(){const out={};keys.forEach((k,i)=>out[k]=this._v[i]);return out;}});
-    _ecoLayouts.set(signature,proto);
-  }
+  if (!proto) { proto = buildEcoLayout(keys); _ecoLayouts.set(signature,proto); }
   const out=Object.create(proto);
   const v = new Array(keys.length);
   for (let i = 0; i < keys.length; i++) v[i] = eco[keys[i]];
@@ -20632,8 +20675,14 @@ function shareEcoText(text) {
 }
 const ZERO_ECO_MONTH = Object.freeze({commission:0,specialFee:0,acquiring:0,paymentTransfer:0,lastMile:0,boost:0,cofin:0,logistics:0,scDelivery:0,packaging:0,processing:0,storage:0,returns:0,returnStorage:0,penalties:0,tax:0,listing:0,nonStd:0,lateShip:0});
 const _sharedTariffs = new Map();
+/* v12.9.56 · КЭШ ПОДПИСИ ТАРИФА. JSON.stringify одного и того же тарифного
+   объекта вызывался для каждой строки (десятки ключей на SKU). Подпись
+   считается один раз на объект тарифа и переиспользуется. */
+const _tariffSigCache = new WeakMap();
 function shareTariff(t) {
-  const signature = JSON.stringify(t);
+  if (!t || typeof t !== 'object') return t;
+  let signature = _tariffSigCache.get(t);
+  if (signature === undefined) { signature = JSON.stringify(t); _tariffSigCache.set(t, signature); }
   let hit = _sharedTariffs.get(signature);
   if (hit) return hit;
   if (_sharedTariffs.size >= 1024) _sharedTariffs.clear();
@@ -20937,6 +20986,10 @@ function runPipeline(full, options) {
      экономика пересчитывается только для них. */
   const changedRows = options.changedRows || null;
   const compactReplacement = new WeakMap();
+  /* v12.9.56: упаковка строки выполняется ДО расчёта, поэтому объект-замена
+     должна уметь отвечать «это та же изменившаяся строка». */
+  const sourceOf = new WeakMap();
+  const isChangedRow = changedRows ? (p => changedRows.has(p) || (sourceOf.has(p) && changedRows.has(sourceOf.get(p)))) : (() => false);
   const preserveView = options.preserveView === true;   /* v12.9.7-mem: данные не менялись */
   /* v12.9.46: при вызове из импорта прогресс не должен откатываться назад —
      пересчёт занимает свою часть шкалы (78…97 %). */
@@ -20975,9 +21028,24 @@ function runPipeline(full, options) {
       const end = Math.min(start + CHUNK, total);
       if (prog) prog(`расчёт SKU ${fmt(start + 1)}–${fmt(end)} из ${fmt(total)}`);
       _step(5 + (start / Math.max(total, 1)) * 70);
+      /* v12.9.56 · ПОРЯДОК УПАКОВКИ. Обычная строка каталога на первом проходе
+         получает ~90 расчётных полей: объект переходит в словарный режим и
+         переразмечается, и это дороже самой упаковки. Замер: расчёт по обычной
+         строке 119 мкс, по компактной 92 мкс, упаковка 20 мкс. Поэтому строка
+         упаковывается ДО расчёта, а не после него. */
+      for (let i = start; i < end; i++) {
+        const old = S.rows[i];
+        if (deltaFast && !changedRows.has(old)) continue;
+        const compact = compactRowNumeric(internRowStrings(old));
+        if (compact !== old) {
+          compactReplacement.set(old, compact);
+          sourceOf.set(compact, old);
+          S.rows[i] = compact;
+        }
+      }
       for (let idx = start; idx < end; idx++) {
         const p = S.rows[idx];
-        if (deltaFast && !changedRows.has(p)) continue;
+        if (deltaFast && !isChangedRow(p)) continue;
         try {
           /* Только дешёвая нормализация ключевых колонок. Тяжёлое HVC-обогащение
              выполняется один раз после импорта или по кнопке «Обогатить сейчас»,
@@ -20990,7 +21058,7 @@ function runPipeline(full, options) {
           for (const nk of NUMERIC_DATE_GUARD) { if (p[nk] instanceof Date) p[nk] = 0; }
           if (typeof HVC !== 'undefined') HVC.ensureNorm(p);
           /* v12.9.7-mem: untouched rows retain their previous policy results. */
-          const skipHeavy = changedRows ? !changedRows.has(p) : false;
+          const skipHeavy = changedRows ? !isChangedRow(p) : false;
           if (skipHeavy) { if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p); continue; }
           p.excluded = false;
           p.deletePending = false;
@@ -21073,14 +21141,7 @@ function runPipeline(full, options) {
       }
       if (typeof MemGuard !== 'undefined') MemGuard.check('пересчёт каталога');
       await _pipelineYield();
-      /* компактная упаковка чанка: пик памяти ограничен одним чанком */
-      for (let i = start; i < end; i++) {
-        const old = S.rows[i];
-        if (deltaFast && !changedRows.has(old)) continue;
-        const compact = compactRowNumeric(internRowStrings(old));
-        if (old !== compact && changedRows && changedRows.has(old)) compactReplacement.set(old, compact);
-        S.rows[i] = compact;
-      }
+      /* Пик памяти ограничен чанком: упаковка уже выполнена выше, до расчёта. */
     }
     if (prog) prog('группировка по OE-номерам…'); _step(80);
     if (!preserveView && !options.smallDelta && !options.skipGroups) { try { await rebuildGroups(); } catch (e) { console.error('[UC] OE-группы:', e); Toast.err('Ошибка группировки OE', String(e.message || e).slice(0, 160)); } }
@@ -21223,23 +21284,62 @@ CALC_NUM_FIELDS.forEach((k, i) => {
 /* Переводит обычную строку в компактный вид. Исходные поля (артикул, бренд, цена,
    габариты, пользовательские колонки) остаются обычными свойствами; расчётные —
    в Float64Array. Возвращает новый объект, старый собирается сборщиком мусора. */
+/* v12.9.56: шаблон «все NaN» создаётся один раз, строка получает нативную
+   копию (slice) вместо поэлементного fill на 186 ячеек. */
+const CALC_NAN_TEMPLATE = new Float64Array(CALC_N).fill(NaN);
 function compactRowNumeric(p) {
   if (!p || Object.getPrototypeOf(p) === ROW_PROTO) return p;
   const np = Object.create(ROW_PROTO);
-  const c = new Float64Array(CALC_N); c.fill(NaN);
-  let nonNum = null, packed = false;
-  for (const k in p) {
-    if (!Object.prototype.hasOwnProperty.call(p, k)) continue;
-    const v = p[k];
+  const c = CALC_NAN_TEMPLATE.slice();
+  let nonNum = null;
+  /* v12.9.56: Object.keys вместо for..in + hasOwnProperty (на строку ~70 ключей),
+     без лишнего флага packed. Порядок обхода тот же. */
+  const keys = Object.keys(p);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i], v = p[k];
     const ix = CALC_IDX[k];
     if (ix === undefined) { np[k] = v; continue; }
-    if (typeof v === 'number' && isFinite(v)) { c[ix] = v; packed = true; }
+    if (typeof v === 'number' && v === v && v !== Infinity && v !== -Infinity) c[ix] = v;
     else if (v !== undefined) { nonNum = nonNum || {}; nonNum[k] = v; }
   }
   Object.defineProperty(np, '_c', { value: c, enumerable: false, writable: true, configurable: true });
   if (nonNum) Object.defineProperty(np, '__nv', { value: nonNum, enumerable: false, writable: true, configurable: true });
   return np;
 }
+/* v12.9.56 · БЫСТРАЯ ЗАПИСЬ ЧИСЛА В СТРОКУ. На компактной строке числовые поля
+   живут в Float64Array за прототипом: обычная запись p.field = v проходит через
+   сеттер (проверки типа, __nv, delete). Здесь поле пишется прямо в массив по
+   заранее известному индексу. На обычной строке (первый проход) — обычная запись. */
+function setRowNum(p, key, v) {
+  const c = p._c;
+  if (c === undefined) { p[key] = v; return; }
+  const ix = CALC_IDX[key];
+  if (ix === undefined) { p[key] = v; return; }
+  const nv = p.__nv;
+  if (typeof v === 'number' && v === v && v !== Infinity && v !== -Infinity) {
+    c[ix] = v;
+    if (nv !== undefined && nv[key] !== undefined) delete nv[key];
+    return;
+  }
+  c[ix] = NaN;
+  /* Как и сеттер прототипа: null сохраняется (не «теряется»), стирается только
+     undefined — иначе поля непосчитанных площадок меняли бы тип null → undefined. */
+  if (v === undefined) { if (nv !== undefined && nv[key] !== undefined) delete nv[key]; return; }
+  if (nv === undefined) {
+    Object.defineProperty(p, '__nv', { value: {}, enumerable: false, writable: true, configurable: true });
+    p.__nv[key] = v;
+  } else nv[key] = v;
+}
+
+/* Поля площадок в порядке profit · margin · be · tgt. */
+const FLAT_MP = {
+  WB: ['profitWB', 'marginWB', 'beWB', 'tgtWB'],
+  Ozon: ['profitOzon', 'marginOzon', 'beOzon', 'tgtOzon'],
+  YM: ['profitYM', 'marginYM', 'beYM', 'tgtYM'],
+  MM: ['profitMM', 'marginMM', 'beMM', 'tgtMM'],
+  Avito: ['profitAvito', 'marginAvito', 'beAvito', 'tgtAvito']
+};
+
 function rowValue(p, k) { return p ? p[k] : undefined; }
 
 /* -------------------------- 8. ABC / XYZ РАСЧЁТ ------------------------- */
