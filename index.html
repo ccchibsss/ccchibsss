@@ -1,7 +1,12 @@
 <!--
   UNIT·CONTROL production client, v12.1-client (OZON category/type classification of the
   whole catalog: 7 categories · 59 subcategories · 1718 types, automatic assignment + manual review UI;
-  v12.1 — fix: OZON export no longer reads an async/empty S.view on catalogs > 20k SKU).
+  v12.1 — fix: OZON export no longer reads an async/empty S.view on catalogs > 20k SKU;
+  v12.9.43 — dimension picking rule: smaller dims only from the same article+brand or a
+  similar OE number, validated against the category anomaly limits, never between
+  unrelated articles; the rule is applied to both the anomaly quarantine and the
+  «Обогатить сейчас» pass (OE mode takes the smallest complete donor tuple);
+  «Цена» в файле поставщика по умолчанию пишется в себестоимость).
   Single-file application. The initial catalog is intentionally empty: records enter
   through user imports, IndexedDB persistence, or the authenticated GAS API.
   The gas-backend block is deployable Apps Script source and must be copied to the
@@ -7423,7 +7428,7 @@ html { -webkit-text-size-adjust: 100%; }
       <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enCol_barcode"></div><span class="hint">Штрихкод</span></div>
     </div>
     <div class="pad" style="border-top:1px solid var(--line)">
-      <div class="hint" style="margin-bottom:6px">Сколько SKU нужно заполнить (только пустые значения; источник пишется в «Происхождение»):</div>
+      <div class="hint" style="margin-bottom:6px">Правило ОВХ: только тот же артикул+бренд или схожий OE-номер; из допустимых полных записей выбирается меньший комплект вес+три стороны, который проходит лимиты аномалий категории. Между разными артикулами без схожего OE данные не переносятся. Заполняются только пустые значения, источник пишется в «Происхождение».</div>
       <div id="enCoverage" style="display:flex;gap:6px;flex-wrap:wrap"></div>
     </div></div>
   <div class="card" id="categoryFillCard" style="margin-bottom:13px;border-color:#365571">
@@ -8454,11 +8459,11 @@ try {
 <!-- ===== 12. АНОМАЛИИ ГАБАРИТОВ ===== -->
 <section class="view" id="v-anomaly">
   <div class="vhead">
-    <div><h2>Детектор аномалий габаритов и веса</h2><p>Проверка при каждом пересчёте: подозрительные SKU сохраняются, но блокируются для расчётов и выгрузок до исправления или подтверждения. Пороги и соотношение массы к объёму — эвристики, не нормы Ozon. Нетто больше брутто и отрицательные/некорректные числа нужно исправить. Отклонённые при импорте ячейки требуют проверки сохранённых значений. Пустые или нулевые поля отдельно считаются недостающими данными. Исправление единиц и предложения по OE требуют проверки упаковки.</p></div>
+    <div><h2>Детектор аномалий габаритов и веса</h2><p>Проверка при каждом пересчёте: подозрительные SKU сохраняются, но блокируются для расчётов и выгрузок до исправления или подтверждения. Пороги и соотношение массы к объёму — эвристики, не нормы Ozon. Нетто больше брутто и отрицательные/некорректные числа нужно исправить. Отклонённые при импорте ячейки требуют проверки сохранённых значений. Пустые или нулевые поля отдельно считаются недостающими данными. <b>Правило подбора:</b> меньшие весогабариты берутся только у записей того же артикула и бренда или со схожим OE-номером; между разными артикулами данные не переносятся. Категория служит только для проверки лимитов. Итог всё равно требует проверки упаковки.</p></div>
     <div class="sp"></div>
     <button type="button" class="btn tl" id="btnAnomalyScan"><i class="fa-solid fa-magnifying-glass-chart"></i> Сканировать каталог</button>
     <button type="button" class="btn" id="btnAnomalyFix"><i class="fa-solid fa-wand-magic-sparkles"></i> Эвристика для отмеченных</button>
-    <button type="button" class="btn pri" id="btnAnomalyOe"><i class="fa-solid fa-link"></i> Найти весогабариты по OE</button>
+    <button type="button" class="btn pri" id="btnAnomalyOe"><i class="fa-solid fa-link"></i> Подобрать меньшие весогабариты</button>
   </div>
   <div class="grid3" style="grid-template-columns:1.15fr .85fr 1fr;align-items:start;margin-bottom:13px">
     <div class="card"><div class="cardtop"><i class="fa-solid fa-ruler-combined" style="color:var(--amber)"></i><h3>Категориальные ограничители</h3><div class="sp"></div><button type="button" class="btn sm gh" id="btnAnomalyAdd"><i class="fa-solid fa-plus"></i></button></div>
@@ -8469,6 +8474,7 @@ try {
         <input id="anomMaxL" type="number" placeholder="Макс габарит см" style="width:120px">
         <input id="anomMaxVol" type="number" placeholder="Макс объём л" style="width:100px">
       </div>
+      <div class="hint" style="padding:0 13px 11px;line-height:1.5">Лимиты используются только для проверки уже выбранных ОВХ и подсветки аномалий. Значения из лимитов не подставляются в товары.</div>
     </div>
     <div class="card"><div class="cardtop"><i class="fa-solid fa-triangle-exclamation" style="color:var(--red)"></i><h3>Найденные аномалии</h3><div class="sp"></div><button type="button" class="btn sm gh" id="anomPrev">←</button><span class="hint" id="anomPage"></span><button type="button" class="btn sm gh" id="anomNext">→</button><span class="pill" id="anomCount">0</span></div>
       <div class="pad" style="padding:0;max-height:380px;overflow:auto"><table class="plain" id="anomalyTable"></table></div>
@@ -8485,16 +8491,16 @@ try {
   <div class="card" style="margin-bottom:13px" id="anomOeAutoCard">
     <div class="cardtop"><i class="fa-solid fa-wand-magic-sparkles" style="color:var(--teal)"></i><h3>Автосверка габаритов при импорте</h3></div>
     <div class="pad">
-      <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer"><input id="anomOeAutoEnabled" type="checkbox" style="width:auto;margin-top:2px"><span>При загрузке подставлять вес и три стороны по прямому OE, если полные локальные источники не противоречат друг другу</span></label>
-      <div class="hint" style="margin-top:7px;line-height:1.55">Общий OE не гарантирует одинаковую упаковку. Старые значения и источник сохраняются у SKU, исправленные товары остаются на проверке и не попадают в выгрузки до подтверждения. Для автоподстановки вес и все стороны донора должны быть в одной исходной строке; старые записи без такого подтверждения нужно загрузить заново. Конфликты и уже ожидающие проверки изменения не заменяются. В авторазделителе слэш внутри номера (например, W 712/75) считается частью OE, а « / » с пробелами — разделителем. История хранится локально, не в облаке: скачивайте CSV для резервной копии. Внешние базы не вызываются.</div>
+      <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer"><input id="anomOeAutoEnabled" type="checkbox" style="width:auto;margin-top:2px"><span>При загрузке подбирать меньшие вес и три стороны у записей того же артикула и бренда или со схожим OE-номером</span></label>
+      <div class="hint" style="margin-top:7px;line-height:1.55">Источник данных ограничен правилом: тот же артикул и бренд либо схожий OE (без разделителей, регистра и ведущих нулей). Записи других артикулов без схожего OE не используются. Из допустимых полных записей выбирается меньший комплект, но только если он проходит лимиты аномалий своей категории; иначе подстановки нет. Старые значения и источник сохраняются у SKU, исправленные товары остаются на проверке и не попадают в выгрузки до подтверждения. Для автоподстановки вес и все стороны донора должны быть в одной исходной строке. Уже ожидающие проверки изменения не заменяются. История хранится локально, не в облаке: скачивайте CSV для резервной копии. Внешние базы не вызываются.</div>
       <div class="hint mono" id="anomOeAutoSummary" style="margin-top:7px"></div>
       <button type="button" class="btn sm gh" id="anomOeReviewCsv" style="margin-top:8px">Скачать исходные и предложенные ОВХ CSV</button>
     </div>
   </div>
   <div class="card" style="margin-bottom:13px" id="anomOeCard">
-    <div class="cardtop"><i class="fa-solid fa-link" style="color:var(--teal)"></i><h3>Предложения по прямому OE</h3><div class="sp"></div><button type="button" class="btn sm gh" id="anomOePrev">←</button><span class="hint" id="anomOePage"></span><button type="button" class="btn sm gh" id="anomOeNext">→</button><button type="button" class="btn sm pri" id="anomOeApply">Применить отмеченные</button></div>
-    <div class="pad" style="line-height:1.55"><div class="hint" id="anomOeInfo">Поиск использует только загруженный каталог и Каталог V; сеть и внешние каталоги не вызываются. Если в списке аномалий есть отметки, ищем для них, иначе — для всех заблокированных SKU.</div>
-      <div class="hint" style="color:#ffd98a;margin-top:5px">Общий OE не доказывает одинаковый вес и упаковку. Данные берутся целиком из одной записи, конфликты не применяются. После подстановки SKU остаётся в карантине, пока вы не подтвердите измерения.</div></div>
+    <div class="cardtop"><i class="fa-solid fa-link" style="color:var(--teal)"></i><h3>Подбор меньших ОВХ по артикулу и OE</h3><div class="sp"></div><button type="button" class="btn sm gh" id="anomOePrev">←</button><span class="hint" id="anomOePage"></span><button type="button" class="btn sm gh" id="anomOeNext">→</button><button type="button" class="btn sm pri" id="anomOeApply">Применить отмеченные</button></div>
+    <div class="pad" style="line-height:1.55"><div class="hint" id="anomOeInfo">Источники: тот же артикул и бренд или схожий OE-номер. Между разными артикулами без схожего OE данные не переносятся. Категория используется только для проверки лимитов аномалий. Поиск идёт по загруженному каталогу и Каталогу V; сеть и внешние каталоги не вызываются. Если в списке аномалий есть отметки, ищем для них, иначе — для всех заблокированных SKU.</div>
+      <div class="hint" style="color:#ffd98a;margin-top:5px">Из допустимых полных записей выбирается меньший комплект (объём, затем наибольшая сторона, затем вес); непрошедшие лимиты категории варианты отклоняются. Общий OE не доказывает одинаковую упаковку. После подстановки SKU остаётся в карантине, пока вы не подтвердите измерения.</div></div>
     <div class="pad mobile-table-scroll" style="padding-top:0;max-height:400px;overflow:auto"><table class="plain" id="anomOeTable"></table></div>
   </div>
 </section>
@@ -8839,11 +8845,11 @@ try {
     <div style="display:flex;gap:10px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:#131830;flex-wrap:wrap">
       <div><label class="f">Ключ сопоставления</label><select id="impKey"><option value="article">только article</option><option value="article+brand">article + brand</option></select></div>
       <div><label class="f">Режим</label><select id="impMode"><option value="upsert">Дозагрузка (обновить + добавить)</option><option value="replace">Замена ассортимента (отсутствующие SKU скрываются)</option><option value="newonly">Только новые SKU</option></select><div class="hint" style="max-width:330px">Дозагрузка сохраняет текущие SKU: непустые значения обновляют поля, пустые — пропускаются. Проверьте ключ и маппинг. Загружайте файлы по одному.</div></div>
-      <div style="display:flex;gap:6px;align-items:center;height:28px" title="Включите, если колонка «Цена» в файле — закупочная цена поставщика: она попадёт в «Себестоимость», а цена продажи будет рассчитана"><div class="sw" id="impPriceIsCost"></div><span class="hint">«Цена» в файле — закупка поставщика</span></div>
+      <div style="display:flex;gap:6px;align-items:center;height:28px" title="Включено по умолчанию: колонка «Цена» в файле — закупочная цена поставщика. Она попадёт в «Себестоимость», а цена продажи будет рассчитана. Если в файле есть отдельная колонка себестоимости, она главнее. Настройка запоминается."><div class="sw" id="impPriceIsCost"></div><span class="hint">«Цена» в файле = себестоимость (закупка)</span></div>
       <div style="display:flex;gap:6px;align-items:center;height:28px"><div class="sw on" id="impRenameStd"></div><span class="hint">разрешить переименование стандартных полей</span></div>
       <div style="display:flex;gap:6px;align-items:center;height:28px"><div class="sw on" id="impOe"></div><span class="hint">объединять группы по OE (транзитивно)</span></div>
       <label style="display:flex;gap:6px;align-items:center;max-width:270px" title="Не скрывает из-за цены/остатка во время импорта; явная видимость, политики и общее автоскрытие после запуска продолжают действовать"><input id="impKeepVisibility" type="checkbox" style="width:auto"><span class="hint">Не скрывать автоматически при импорте</span></label>
-      <label style="display:flex;gap:6px;align-items:center;max-width:340px" title="Только прямой OE и непротиворечивый комплект вес + три стороны. Старые значения сохраняются; товар остаётся в карантине до проверки."><input id="impAnomOeAuto" type="checkbox" style="width:auto"><span class="hint">Автосверка аномальных ОВХ по OE · с проверкой</span></label>
+      <label style="display:flex;gap:6px;align-items:center;max-width:360px" title="Источник — тот же артикул и бренд или схожий OE-номер. Из допустимых полных записей выбирается меньший комплект вес + три стороны, проверенный по лимитам категории. Старые значения сохраняются; товар остаётся в карантине до проверки."><input id="impAnomOeAuto" type="checkbox" style="width:auto"><span class="hint">Автосверка аномальных ОВХ по OE · с проверкой</span></label>
       <div style="display:flex;gap:10px;align-items:center;height:28px;flex-wrap:wrap">
         <span class="hint" style="letter-spacing:.08em;text-transform:uppercase">Обогащать по OE:</span>
         <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enDims"></div><span class="hint">Весогабариты</span></div>
@@ -13302,7 +13308,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.42-client+audit.5';
+const APP_VERSION = '12.9.43-client+audit.7';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -17541,6 +17547,9 @@ const S = {
     cheapFbsEnabled: true, cheapFbsRate: 42, cheapFbsPriceLimit: 300, cheapFbsVolumeLimit: 5, cheapFbsUntil: '2026-12-31T23:59:59+03:00',
     autoHideMark: true,
     autoOeAnomalyOnImport: true, // однозначные ОВХ по прямому OE — только с карантином и исходными данными
+    /* Цена поставщика = закупка. По умолчанию «Цена» из файла попадает в
+       «Себестоимость», а цена продажи рассчитывается. Настройка запоминается. */
+    priceIsCost: true,
     autoCategoryByName: true, // внутренняя категория и черновик Ozon при импорте/пересчёте
     markValidStatuses: '',         // v10.8.6 (К#5): доп. валидные статусы Честного знака через «;»
     markInvalidStatuses: '',       // v10.8.6: доп. ЗАПРЕЩЁННЫЕ статусы Честного знака через «;»
@@ -22836,7 +22845,10 @@ const HVC = {
     if (!HVC._oeAggCache) HVC._oeAggCache = new Map();
     let hit = HVC._oeAggCache.get(oe);
     if (hit) return hit;
-    const H = { agg: { length:0, width:0, height:0, weight:0, dimensions_str:'', name:'', applicability:'', category:'', list:[], listN:[] }, rep: null };
+    const H = { agg: { length:0, width:0, height:0, weight:0, dimensions_str:'', name:'', applicability:'', category:'', list:[], listN:[] }, rep: null,
+      /* Меньший ЦЕЛЬНЫЙ комплект вес+три стороны из одной исходной строки
+         среди держателей этого OE. Смешивать поля разных записей нельзя. */
+      smallest:null, smallestOe:'' };
     const oeRec = HVC.identityUnsafeOe(oe) ? null : HVC.oe.get(oe);
     if (oeRec && (oeRec.name || oeRec.applicability || (oeRec.category && !['Без категории','Разное','Прочее','Не определено'].includes(String(oeRec.category).trim())) || oeRec.length || oeRec.dimensions_str)) H.rep = oeRec;
     const keys = HVC.byOe.get(oe);
@@ -22847,6 +22859,11 @@ const HVC = {
       for (const k of keys) {
         if (HVC.identityUnsafeKey(k)) continue;
         const pt = HVC.parts.get(k); if (!pt) continue;
+        const ev = pt._dimensionEvidence;
+        if (ev && DimPolicy.validTuple(ev) && (!H.smallest || DimPolicy.compareTuples(ev, H.smallest) < 0)) {
+          H.smallest = { weight:num(ev.weight), length:num(ev.length), width:num(ev.width), height:num(ev.height) };
+          H.smallestOe = oe;
+        }
         const an = normArticle(pt.artikul);
         if (an && !seenArt.has(an)) { seenArt.add(an); if (H.agg.list.length < 40) { H.agg.list.push(pt.artikul); listN.push(an); } }
         if (!H.agg.name && pt.name) H.agg.name = pt.name;
@@ -22889,11 +22906,14 @@ const HVC = {
     const selfArt = normArticle(key.split('|')[0]);
     const agg = { length:0, width:0, height:0, weight:0, dimensions_str:'', name:'', applicability:'', category:'', list:[] };
     const aggListSeen = new Set();
-    let rep = null;
+    let rep = null, smallest = null, smallestOe = '';
     if (myOes) {
       for (const oe of myOes) {
         const O = HVC._oeAggOf(oe);
         if (!rep && O.rep) rep = O.rep;
+        if (O.smallest && (!smallest || DimPolicy.compareTuples(O.smallest, smallest) < 0)) {
+          smallest = O.smallest; smallestOe = O.smallestOe || oe;
+        }
         const a2 = O.agg;
         if (a2.length) agg.length = Math.max(agg.length, a2.length);
         if (a2.width) agg.width = Math.max(agg.width, a2.width);
@@ -22910,7 +22930,8 @@ const HVC = {
     /* Группа артикулов — одним дешёвым проходом от нормализованного OE (с кэшем по oeKey
        и защитой от OE-хабов), вместо дорогого слияния O.group по каждому OE. */
     const groupArr = HVC._groupOnly(key);
-    const H = { group: groupArr.join(OE_DELIMITERS[oeMode()].join), groupSize: groupArr.length, analog_list: agg.list.join(', '), agg, rep };
+    const H = { group: groupArr.join(OE_DELIMITERS[oeMode()].join), groupSize: groupArr.length, analog_list: agg.list.join(', '), agg, rep,
+      smallest, smallestOe };
     if (oeKey) {
       HVC._lrSet(HVC._oeSetCache, oeKey, H, CONST.OE_SET_CACHE_MAX);   // LRU вместо Map.clear()
     }
@@ -22979,7 +23000,10 @@ const HVC = {
        Способ «OE-номер» — плюс агрегат доноров по OE. */
     const oeMode_ = HVC.enrichMode() === 'oe';
     const abAgg = oeMode_ ? null : HVC._abAgg(p).agg;
-    const ag = oeMode_ ? HVC.analogAgg(p) :   /* передаём СТРОКУ, не key: иначе терялся бренд в ключе и доноры не находились */ { length: abAgg.length, width: abAgg.width, height: abAgg.height, weight: abAgg.weight, dimensions_str: abAgg.dimensions_str };
+    /* В режиме OE недостающие стороны берём из меньшего ЦЕЛЬНОГО комплекта,
+       если он есть, а не из пополевого максимума разных аналогов. */
+    const oeSet = oeMode_ ? HVC._oeSetOf(p) : null;
+    const ag = oeMode_ ? Object.assign({}, HVC.analogAgg(p), oeSet.smallest || {}) :   /* передаём СТРОКУ, не key: иначе терялся бренд в ключе и доноры не находились */ { length: abAgg.length, width: abAgg.width, height: abAgg.height, weight: abAgg.weight, dimensions_str: abAgg.dimensions_str };
     /* v12.9.9: ноль в габаритах = «значения нет» (импорт без колонок пишет 0),
        поэтому 0 больше не блокирует подстановку донора — иначе обогащение не работало вовсе. */
     const pick = (...vals) => { for (const val of vals) { const n = HVC.safeNum(val, true); if (n !== null && n !== undefined && n > 0) return n; } return 0; };
@@ -23101,19 +23125,42 @@ const HVC = {
     const anyDim = HVC.enCol('length') || HVC.enCol('width') || HVC.enCol('height') || HVC.enCol('weight');
     const pt = HVC.parts.get(key);
     if (anyDim) {
-      /* Legacy dimsFor aggregates independently across several analogues, which
-         is NOT one measured package. Never write that mixture as a fact. Only a
-         single earlier complete row for this exact SKU may fill missing fields,
-         and even that requires a separate packaging confirmation in quarantine. */
-      const evidence=pt && pt._dimensionEvidence, dimKeys=['weight','length','width','height'];
-      const complete=evidence && dimKeys.every(k=>num(evidence[k])>0);
-      const compatible=complete && dimKeys.every(k=>!(num(p[k])>0) || num(p[k])===num(evidence[k]));
-      if (!p._dimensionOeReview && compatible && dimKeys.some(k=>HVC.enCol(k) && !(num(p[k])>0))) {
+      /* Допустимые источники ОВХ (DimPolicy):
+         1) полный снимок ТОЙ ЖЕ пары артикул+бренд;
+         2) меньший ЦЕЛЬНЫЙ комплект среди записей со схожим OE.
+         Смешивать поля разных записей и брать данные у чужих артикулов нельзя.
+         Каждый вариант проверяется по лимитам аномалий категории. */
+      const dimKeys=['weight','length','width','height'];
+      const evidence=pt && pt._dimensionEvidence;
+      const donors=[];
+      if (evidence && DimPolicy.validTuple(evidence)) donors.push({
+        tuple:{weight:num(evidence.weight),length:num(evidence.length),width:num(evidence.width),height:num(evidence.height)},
+        source:'снимок того же артикула и бренда', oe:''});
+      /* Аналоги по OE допустимы только в режиме OE (в «auto» это первый проход).
+         Режим «Артикул + Бренд» ищет ОВХ только у той же пары. */
+      if (mode === 'oe' && H.smallest && DimPolicy.validTuple(H.smallest)) donors.push({
+        tuple:H.smallest, source:'меньший комплект по схожему OE', oe:H.smallestOe || ''});
+      const compatible=t=>dimKeys.every(k=>!(num(p[k])>0) || num(p[k])===num(t[k]));
+      const passing=t=>{
+        if (typeof AnomalyDetector==='undefined') return true;
+        const test={category:p.category||'',weight:num(t.weight),length:num(t.length),width:num(t.width),height:num(t.height),
+          net_weight:p.net_weight,volume:productVolumeIsExplicit(p)?p.volume:0,
+          _volumeExplicit:!!p._volumeExplicit,_sources:p._sources||{}};
+        return !AnomalyDetector.evaluate(test).issues.length;
+      };
+      let chosen=null;
+      for(const d of donors) {
+        if(!compatible(d.tuple) || !passing(d.tuple)) continue;
+        if(!chosen || DimPolicy.compareTuples(d.tuple,chosen.tuple)<0) chosen=d;
+      }
+      const hasEmpty=dimKeys.some(k=>HVC.enCol(k) && !(num(p[k])>0));
+      if (!p._dimensionOeReview && !p.dimensionAnomalyBlocked && chosen && hasEmpty) {
         const before=Object.fromEntries(dimKeys.map(k=>[k,p[k]])),at=nowISO();
         for(const col of dimKeys) if(HVC.enCol(col) && !(num(p[col])>0)) {
-          p[col]=num(evidence[col]);(p._sources=p._sources || {})[col]={file:'Каталог V: один снимок артикула+бренда · нужна проверка',date:at};
+          p[col]=num(chosen.tuple[col]);
+          (p._sources=p._sources || {})[col]={file:'Каталог V: '+chosen.source+' (нужна проверка)',date:at};
         }
-        p._dimensionOeReview={oe:'',source:'Каталог V: снимок того же артикула и бренда · сверьте упаковку',at,before,
+        p._dimensionOeReview={oe:chosen.oe||'',source:'Каталог V: '+chosen.source+' · сверьте упаковку',at,before,
           after:Object.fromEntries(dimKeys.map(k=>[k,p[k]]))};
         delete p.dimensionAnomalyAck;
       }
@@ -25041,6 +25088,7 @@ const Import = {
       const guess = advisorTemplate ? null : Import.guessProfile(file.name, headers);
       const keepVis = $('#impKeepVisibility'); if (keepVis) keepVis.checked = true;
       if ($('#impMode')) $('#impMode').value = 'upsert';
+      Import.syncPriceIsCost();
       if (advisorTemplate) {
         /* The helper's sale-price column is never a supplier-cost column. */
         $('#impPriceIsCost')?.classList.remove('on');
@@ -25068,9 +25116,25 @@ const Import = {
   /** нормализация артикулов + ключевой блок на предпросмотре */
   /* v12.9.8: «Цена» из прайса поставщика — это закупка, а не цена продажи.
      Переключатель переносит сопоставление price → cost до применения импорта. */
-  priceIsCostOn() { const el = $('#impPriceIsCost'); return !!(el && el.classList.contains('on')); },
+  priceIsCostOn() { const el = $('#impPriceIsCost'); if (el) return el.classList.contains('on'); return !(S.settings && S.settings.priceIsCost === false); },
+  /* «Цена» в прайсе поставщика — это закупка. Настройка общая и запоминается,
+     чтобы каждый импорт не требовал повторного переключения. */
+  syncPriceIsCost() {
+    const el = $('#impPriceIsCost');
+    if (!el) return;
+    el.classList.toggle('on', !(S.settings && S.settings.priceIsCost === false));
+  },
+  async setPriceIsCost(on) {
+    S.settings.priceIsCost = !!on;
+    const el = $('#impPriceIsCost'); if (el) el.classList.toggle('on', !!on);
+    try { if (typeof UI2 !== 'undefined' && UI2.saveSettings) await UI2.saveSettings(); }
+    catch (e) { console.warn('[UC] priceIsCost:', e); }
+  },
   applyPriceIsCost() {
     if (!S.pending || !this.priceIsCostOn()) return 0;
+    /* Если в файле есть отдельная колонка себестоимости, она главнее:
+       «Цену» в таком файле не перезаписываем в закупку. */
+    if (S.pending.map.some(m => m.enabled && m.field === 'cost')) return 0;
     let moved = 0;
     const costName = (STD.find(x => x.k === 'cost') || {}).n || 'Себестоимость';
     S.pending.map.forEach(m => {
@@ -39272,6 +39336,131 @@ const PriceLimiter = {
   }
 };
 
+/* ---------- 1B. Правило выбора весогабаритов ----------
+   Меньшие габариты выбираются ТОЛЬКО среди записей того же артикула и бренда
+   либо записей со схожим OE-номером. Записи других артикулов без схожего OE
+   источником не являются: между разными артикулами данные не переносятся.
+   Категория товара используется только для проверки лимитов аномалий
+   (AnomalyDetector.getLimit) и никогда как источник значений. */
+const DimPolicy = {
+  revision: 'dim-policy-1',
+  MAX_CODES: 64,
+  MAX_CANDIDATES: 240,
+  /* Нормализованный OE: буквы и цифры, без разделителей, регистра и пробелов. */
+  normOe(value) {
+    return String(value == null ? '' : value).toUpperCase().replace(/[^0-9A-ZА-ЯЁ]/g, '');
+  },
+  /* «Схожий» вариант того же номера: те же символы без ведущих нулей в числовых
+     группах. Разделители уже убраны; ведущие нули не меняют сам номер. */
+  looseOe(value) {
+    const s = this.normOe(value);
+    if (!s) return '';
+    return s.replace(/(^|[^0-9])0+(?=\d)/g, '$1');
+  },
+  similarOe(a, b) {
+    const x = this.normOe(a), y = this.normOe(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    /* Совсем короткие номера сравниваем только на точное совпадение: иначе
+       «123» и «124» стали бы «схожими» и данные ушли бы чужому SKU. */
+    if (x.length < 5 || y.length < 5) return false;
+    const lx = this.looseOe(x), ly = this.looseOe(y);
+    if (lx && lx === ly) return true;
+    /* Похожие, но РАЗНЫЕ номера (отличие в символе/цифре) не считаем тем же
+       OE: у запчастей соседние номера часто относятся к разным деталям.
+       Совпадать должен весь номер после нормализации разделителей/нулей. */
+    return false;
+  },
+  codes(p) {
+    if (!p) return [];
+    const raw = codeList([p.oe_numbers, p.oe_list]);
+    if (!raw.length && p.oe_norm) raw.push(...codeList(p.oe_norm));
+    /* Коды, сохранённые автосверкой импорта: тот же SKU мог получить OE
+       из исходной строки, когда колонка OE не была выбрана для импорта. */
+    const ev = p._dimensionAutoOeEvidence;
+    if (ev && Array.isArray(ev.entries)) for (const item of ev.entries) if (item && item.code) raw.push(item.code);
+    const out = [];
+    const seen = new Set();
+    for (const value of raw) {
+      const key = this.normOe(value);
+      if (!key || seen.has(key)) continue;
+      seen.add(key); out.push(key);
+      if (out.length >= this.MAX_CODES) break;
+    }
+    return out;
+  },
+  articleOf(p) { return normArticle(p && (p.article ?? p.artikul)); },
+  brandOf(p) { return normArticle(p && p.brand); },
+  /* Тот же артикул И бренд. Пустой бренд идентичность не доказывает. */
+  sameSku(a, b) {
+    if (!a || !b || a === b) return false;
+    const aa = this.articleOf(a), bb = this.articleOf(b);
+    if (!aa || !bb || aa !== bb) return false;
+    const ab = this.brandOf(a), bbr = this.brandOf(b);
+    return !!ab && !!bbr && ab === bbr;
+  },
+  /* Схожий OE у двух записей. Возвращает совпавший нормализованный номер. */
+  oeLink(a, b, matchedCode) {
+    const ca = this.codes(a), cb = this.codes(b);
+    const mc = matchedCode ? this.normOe(matchedCode) : '';
+    /* У записи-донора есть свои OE: связь должна подтверждаться ими, а не
+       только кодом из индекса. Иначе «соседний» номер мог бы протащить
+       данные другого артикула. */
+    if (cb.length) {
+      for (const y of cb) {
+        if (ca.some(x => this.similarOe(x, y))) return y;
+        if (mc && this.similarOe(y, mc) && ca.some(x => this.similarOe(x, mc))) return y;
+      }
+      return '';
+    }
+    /* Запись реестра без собственного списка OE: доверяем только связи,
+       найденной по коду, который действительно есть у целевого SKU. */
+    if (mc && ca.some(x => this.similarOe(x, mc))) return mc;
+    return '';
+  },
+  /* Единственная точка допуска донора к переносу значений. */
+  sourceAllowed(target, candidate, matchedCode) {
+    if (!target || !candidate || target === candidate) return { ok:false, tier:'', oe:'', reason:'нет источника' };
+    if (this.sameSku(target, candidate)) return { ok:true, tier:'sku', oe:'', reason:'тот же артикул и бренд' };
+    const oe = this.oeLink(target, candidate, matchedCode);
+    if (oe) return { ok:true, tier:'oe', oe, reason:'схожий OE ' + oe };
+    return { ok:false, tier:'', oe:'', reason:'другой артикул без схожего OE — данные не переносятся' };
+  },
+  validTuple(t) {
+    return !!t && ['weight', 'length', 'width', 'height'].every(k => Number.isFinite(Number(t[k])) && Number(t[k]) > 0);
+  },
+  tupleKey(t) {
+    return ['weight', 'length', 'width', 'height'].map(k => Number(t[k]).toFixed(6)).join('|');
+  },
+  /* Порядок «меньшие габариты»: объём упаковки, затем наибольшая сторона,
+     затем вес. Детерминированный и не зависит от порядка источников. */
+  measure(t) {
+    const l = Number(t.length), w = Number(t.width), h = Number(t.height), wt = Number(t.weight);
+    return [round(l * w * h / 1000, 6), round(Math.max(l, w, h), 4), round(wt, 6), round(l + w + h, 4)];
+  },
+  compareTuples(a, b) {
+    const ma = this.measure(a), mb = this.measure(b);
+    for (let i = 0; i < ma.length; i++) if (ma[i] !== mb[i]) return ma[i] - mb[i];
+    return 0;
+  },
+  /* Выбор минимального допустимого варианта. isValid(tuple) проверяет лимиты
+     категории и прочие аномалии; отклонённые варианты не подставляются. */
+  pick(target, candidates, isValid) {
+    const seen = new Set(), rows = [];
+    let rejected = 0;
+    for (const c of candidates || []) {
+      if (!c || !c.complete || !this.validTuple(c.tuple)) continue;
+      const key = c.identity + '|' + this.tupleKey(c.tuple);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (isValid && !isValid(c.tuple)) { rejected++; continue; }
+      rows.push(c);
+    }
+    rows.sort((a, b) => this.compareTuples(a.tuple, b.tuple));
+    return { choice: rows[0] || null, variants: rows.length, rejected };
+  }
+};
+
 /* ---------- 2. Anomaly Detector ---------- */
 const AnomalyDetector = {
   defaults: [
@@ -39318,6 +39507,7 @@ const AnomalyDetector = {
       this.limits = this.defaults.map(d => ({ category:d[0], maxW:d[1], maxL:d[2], maxVol:d[3] }));
       this.log = [];
     }
+    this.invalidateLimits();
   },
   init() {
     this.loadLocal();
@@ -39338,10 +39528,33 @@ const AnomalyDetector = {
   },
   save() {
     this._localLoaded = true;
+    this.invalidateLimits();
+    /* Журнал не растёт без границы: в памяти держим последние 1000 записей,
+       в localStorage — 500. */
+    if (this.log.length > 1000) this.log = this.log.slice(-1000);
     try { localStorage.setItem('uc.anomaly', JSON.stringify({ limitsRevision:2, limits:this.limits, log:this.log.slice(-500) })); } catch (e) {}
   },
+  /* Лимиты категории ищутся по нормализованному имени (регистр и лишние
+     пробелы не важны) через индекс. Раньше точное сравнение не находило
+     лимит при малейшем расхождении, и проверка молча шла по общим 400/300/1000. */
+  limitKey(value) {
+    return String(value == null ? '' : value).trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+  },
+  _limitVersion: 0, _limitIndex: null, _limitIndexVersion: -1,
+  invalidateLimits() { this._limitVersion = (this._limitVersion || 0) + 1; this._limitIndex = null; },
+  buildLimitIndex() {
+    const map = new Map();
+    for (const item of this.limits || []) {
+      const key = this.limitKey(item && item.category);
+      if (!key || map.has(key)) continue;
+      map.set(key, item);
+    }
+    this._limitIndex = map; this._limitIndexVersion = this._limitVersion;
+    return map;
+  },
   getLimit(cat) {
-    return this.limits.find(l => l.category === cat) || { maxW:400, maxL:300, maxVol:1000 };
+    const map = (this._limitIndex && this._limitIndexVersion === this._limitVersion) ? this._limitIndex : this.buildLimitIndex();
+    return map.get(this.limitKey(cat)) || { category: String(cat == null ? '' : cat), maxW: 400, maxL: 300, maxVol: 1000 };
   },
   evaluate(p) {
     const lim = this.getLimit(p.category || '');
@@ -39622,7 +39835,7 @@ const AnomalyDetector = {
   renderAutoOeSummary() {
     const box=$('#anomOeAutoSummary'); if(!box)return;
     const r=S.lastOeAutoCheck;
-    box.textContent=r ? `Последний импорт: проверено ${fmt(r.checked || 0)} · подставлено на проверку ${fmt(r.changed || 0)} · без безопасной замены ${fmt(r.noChoice || 0)} (конфликты ${fmt(r.conflicts || 0)}, нет OE ${fmt(r.noOe || 0)}, другие причины ${fmt(r.other || 0)}) · с сохранённой историей, без повтора ${fmt(r.pending || 0)}${r.error ? ' · проверка прервана: '+String(r.error).slice(0,160) : ''}${S._cacheWriteError || S._volatileStorage ? ' · данные могут быть только в памяти' : ''}.` : 'Результаты последней автосверки будут показаны после импорта.';
+    box.textContent=r ? `Последний импорт: проверено ${fmt(r.checked || 0)} · подставлено на проверку ${fmt(r.changed || 0)} · выбрано меньших вариантов ${fmt(r.smaller || 0)} · без безопасной замены ${fmt(r.noChoice || 0)} (конфликты ${fmt(r.conflicts || 0)}, нет OE ${fmt(r.noOe || 0)}, другие причины ${fmt(r.other || 0)}) · с сохранённой историей, без повтора ${fmt(r.pending || 0)}${r.errors ? ' · строк с ошибкой: '+fmt(r.errors) : ''}${r.error ? ' · проверка прервана: '+String(r.error).slice(0,160) : ''}${S._cacheWriteError || S._volatileStorage ? ' · данные могут быть только в памяти' : ''}.` : 'Результаты последней автосверки будут показаны после импорта.';
   },
   downloadOeReviews() {
     const rows=[['Артикул','Бренд','OE','Источник предложения','Способ','Дата подстановки','Дата подтверждения','Источники исходных ОВХ (JSON)','Было: вес, кг','Было: длина, см','Было: ширина, см','Было: высота, см','Было: объём, л','Предложено: вес, кг','Предложено: длина, см','Предложено: ширина, см','Предложено: высота, см','Текущий вес, кг','Текущая длина, см','Текущая ширина, см','Текущая высота, см','Текущий объём, л','Подтверждённые значения (JSON)','Предыдущие подстановки (JSON)']];
@@ -39660,6 +39873,7 @@ const AnomalyDetector = {
  * подстановки отдельно подтверждает фактическую упаковку товара. */
 const AnomalyOE = {
   preview:[], page:0, pageSize:50, catalogVersion:0, hvcRevision:0, busy:false, _found:false,
+  _token:0, _lastErrors:0,
   key(p) { return normArticle(p && (p.article || p.artikul)) + '|' + normArticle(p && p.brand); },
   pullAuditPlan(remoteRows,localRows) {
     const local=new Map(), remote=new Map(), duplicates=new Set(), remoteDuplicates=new Set();
@@ -39712,6 +39926,9 @@ const AnomalyOE = {
       const key=entry.code+'|'+entry.pieces.join(',');
       if(!have.has(key)){have.add(key);list.push(entry);changed=true;}
     }
+    /* Предел на доказательства импорта: повторные загрузки одного SKU не
+       должны накапливать неограниченный список кодов в памяти и в снимке. */
+    if(list.length>64){ list.splice(0,list.length-64); changed=true; }
     if(changed) p._dimensionAutoOeEvidence={identity,entries:list};
     return changed;
   },
@@ -39737,7 +39954,10 @@ const AnomalyOE = {
     const previous=p._dimensionOeReview;
     if(previous && typeof previous==='object') {
       const {history,...snapshot}=previous;
-      next.history=[...(Array.isArray(history) ? history : []),snapshot];
+      /* История подстановок ограничена: повторные импорты не должны
+         накапливать неограниченный снимок внутри каждой строки каталога. */
+      const kept=(Array.isArray(history) ? history : []).concat([snapshot]);
+      next.history=kept.length>20 ? kept.slice(-20) : kept;
     }
     p._dimensionOeReview=next;
   },
@@ -39801,7 +40021,11 @@ const AnomalyOE = {
     return !AnomalyDetector.evaluate(test).issues.length;
   },
   targetSig(p) { return AnomalyDetector.signature(p) + '|' + this.codes(p).sort().join('\u001f') + '|' + String(p && p.oeSource || ''); },
-  invalidate() { this.preview=[]; this.page=0; this._found=false; this.render(); },
+  invalidate() {
+    /* Отменяем незавершённый поиск: его результат уже не относится к каталогу. */
+    this._token=(this._token||0)+1;
+    this.preview=[]; this.page=0; this._found=false; this._lastErrors=0; this.render();
+  },
   async find(options) {
     options=options || {};
     const automatic=options.automatic === true;
@@ -39817,49 +40041,54 @@ const AnomalyOE = {
       Toast.info('Нет SKU для поиска', marked.length ? 'Отметьте заблокированные строки.' : 'Сначала запустите проверку аномалий.'); return;
     }
     this.busy=true;
+    const runToken=(this._token||0)+1; this._token=runToken; this._lastErrors=0;
+    const stale=()=>runToken!==this._token;
     try {
       const search = async prog => {
         const revision=S.catalogVersion||0, hvcRevision=HVC.ozonRevision||0, rows=S.rows;
         const need=new Set(); for(const f of targets) for(const c of this.codes(f.p,automatic)) need.add(c);
-        /* Не использовать устаревший снимок реестра для SKU, который в каталоге
-           уже изменился, исключён или сам получил заимствованные ОВХ. */
-        const relevantOwners=new Set(), owners=new Map();
-        if(automatic) {
-          let scanned=0;
-          for(const link of HVC.cross.values()) {
-            if(need.has(normArticle(link && link.oeNorm))) {
-              const part=HVC.parts.get(link.artKey); if(part) relevantOwners.add(this.key(part));
-            }
-            if(++scanned%10000===0) {
-              if(prog) prog(`Проверка источников Каталога V: ${fmt(scanned)}`);
-              await new Promise(r=>setTimeout(r,0));
-              if(S.rows!==rows || (S.catalogVersion||0)!==revision || (HVC.ozonRevision||0)!==hvcRevision) throw new Error('Реестры изменились во время поиска. Запустите поиск снова.');
-            }
-          }
-        }
-        const index=new Map(), MAX=64;
+        /* owners строится одним проходом по каталогу (ниже): отдельный обход
+           HVC.cross на каждый поиск больше не нужен — на больших каталогах он
+           дублировал работу и замедлял импорт. */
+        const owners=new Map();
+        const index=new Map(), byIdentity=new Map(), MAX=64, MAX_IDENT=8;
         const add=(code,entry)=>{
           if(!need.has(code)) return;
           let bucket=index.get(code); if(!bucket){bucket={entries:new Map(),overflow:false};index.set(code,bucket);}
           if(bucket.overflow) return;
-          const ekey=entry.identity+'|'+JSON.stringify(entry.tuple);
-          if(!bucket.entries.has(ekey)) bucket.entries.set(ekey,entry);
+          if(!bucket.entries.has(entry.ekey)) bucket.entries.set(entry.ekey,entry);
           if(bucket.entries.size>MAX){bucket.entries.clear();bucket.overflow=true;}
         };
+        /* Тот же артикул+бренд — допустимый источник даже без общего OE.
+           Индекс строится только для артикулов, которые действительно ищем. */
+        const targetIdentities=new Set(); for(const f of targets) targetIdentities.add(this.key(f.p));
+        const addIdentity=(entry)=>{
+          if(!entry.identity || entry.identity==='|' || !targetIdentities.has(entry.identity)) return;
+          const list=byIdentity.get(entry.identity);
+          if(!list){byIdentity.set(entry.identity,[entry]);return;}
+          if(list.length<MAX_IDENT && !list.some(x=>x.ref===entry.ref && x.ekey===entry.ekey)) list.push(entry);
+        };
         for(let i=0;i<rows.length;i++) {
+          if(i && i%500===0 && stale()) throw new Error('Поиск отменён: каталог изменился. Запустите его снова.');
           const q=rows[i], identity=q && this.key(q);
-          if(automatic && identity && relevantOwners.has(identity)) owners.set(identity,owners.has(identity) ? null : q);
-          if(q && !q.excluded && !q.dimensionAnomalyBlocked && !(automatic && q._dimensionOeReview)) {
-            const codes=this.codes(q,automatic), matches=codes.filter(x=>need.has(x));
-            if(matches.length) {
-              const tuple=this.tuple(q), complete=this.full(tuple), evidence=automatic ? this.autoEvidence(q) : null;
-              if((complete && this.issueFree(q,tuple)) || (!complete && Object.values(tuple).some(x=>x>0))) {
-                const prior=q._dimensionAutoEvidence;
-                const conflicting=!!q._dimensionAutoConflict || !!(prior && prior.identity===identity && !this.exactTuple(prior,tuple));
-                const entry={kind:'row',identity,ref:q,tuple,complete,autoEligible:!!evidence,conflicting,
-                  source:`Каталог: ${q.article||'без артикула'}${q.brand?' · '+q.brand:''}${evidence ? ' · '+evidence.file+' · строка данных '+evidence.row : this.rowSource(q)}`};
-                for(const c of matches) add(c,entry);
-              }
+          const codes=q ? this.codes(q,automatic) : [], matches=codes.filter(x=>need.has(x));
+          /* Однозначность владельца проверяем только для нужных артикулов и
+             доноров по искомым OE, а не для всего каталога. */
+          if(automatic && identity && (targetIdentities.has(identity) || matches.length)) owners.set(identity,owners.has(identity) ? null : q);
+          /* Проверка лимитов (issueFree) — только для потенциально нужных
+             строк. Раньше она выполнялась для всего каталога с заполненными
+             ОВХ, хотя донором такая строка может и не стать. */
+          if((matches.length || targetIdentities.has(identity)) && q && !q.excluded && !q.dimensionAnomalyBlocked && !(automatic && q._dimensionOeReview)) {
+            const tuple=this.tuple(q), complete=this.full(tuple), evidence=automatic ? this.autoEvidence(q) : null;
+            const usable=(complete && this.issueFree(q,tuple)) || (!complete && Object.values(tuple).some(x=>x>0));
+            if(usable) {
+              const prior=q._dimensionAutoEvidence;
+              const conflicting=!!q._dimensionAutoConflict || !!(prior && prior.identity===identity && !this.exactTuple(prior,tuple));
+              const entry={kind:'row',identity,ref:q,tuple,complete,autoEligible:!!evidence,conflicting,tkey:this.tupleKey(tuple),
+                source:`Каталог: ${q.article||'без артикула'}${q.brand?' · '+q.brand:''}${evidence ? ' · '+evidence.file+' · строка данных '+evidence.row : this.rowSource(q)}`};
+              entry.ekey=identity+'|'+entry.tkey;
+              for(const c of matches) add(c,entry);
+              if(complete) addIdentity(entry);
             }
           }
           if(i && i%3000===0){ if(prog)prog(`Каталог: ${fmt(i)} / ${fmt(rows.length)}`); await new Promise(r=>setTimeout(r,0));
@@ -39869,53 +40098,109 @@ const AnomalyOE = {
            отдельный снимок полного исходного ряда с 12.9.28; старые сводные
            записи и агрегированный HVC.oe не считаем единой упаковкой. */
         let ci=0;
-        for(const [linkKey,link] of HVC.cross) {
-          const code=normArticle(link && link.oeNorm); if(!need.has(code)) continue;
-          const part=HVC.parts.get(link.artKey), evidence=part && part._dimensionEvidence;
-          if(!part || !evidence) continue;
-          const identity=this.key(part), owner=automatic && owners.has(identity) ? owners.get(identity) : undefined;
-          if(automatic && owners.has(identity) && (!owner || owner.excluded || owner.dimensionAnomalyBlocked || owner._dimensionOeReview ||
-              !this.codes(owner,true).includes(code) || !this.autoEvidence(owner) || !this.exactTuple(owner,evidence))) continue;
-          const tuple=this.tuple(evidence), complete=this.full(tuple);
-          if(complete && this.issueFree({category:part.category||'',_volumeExplicit:false},tuple)) {
-            add(code,{kind:'hvc',identity,ref:part,evidence,owner,linkKey,partKey:link.artKey,code,tuple,complete,
-              autoEligible:!!(evidence.singleRow && evidence.file && evidence.identity===identity && Array.isArray(evidence.oeCodes) && evidence.oeCodes.includes(code)),
-              source:`Каталог V: ${part.artikul||''}${part.brand?' · '+part.brand:''}${evidence.file?' · '+evidence.file:' · общий исходный файл ОВХ не подтверждён'}`});
-          }
-          if(++ci%3000===0){await new Promise(r=>setTimeout(r,0)); if(S.rows!==rows || (S.catalogVersion||0)!==revision || (HVC.ozonRevision||0)!==hvcRevision) throw new Error('Реестры изменились во время поиска. Запустите поиск снова.');}
-        }
-        const registry=new Set(); for(const [key,value] of HVC.oe) { const n=normArticle((value && value.oe)||key); if(need.has(n))registry.add(n); }
-        const result=[];
-        for(const f of targets){
-          const p=f.p, codes=this.codes(p,automatic), own=this.key(p), candidates=new Map(); let overflow=false,hasRegistry=false;
-          for(const code of codes){
-            if(registry.has(code)) hasRegistry=true;
-            const bucket=index.get(code); if(!bucket) continue; if(bucket.overflow){overflow=true;continue;}
-            for(const e of bucket.entries.values()){
-              if(!e.identity || e.identity==='|' || this.sameOwner(e.identity,p) || e.ref===p) continue;
-              const k=e.identity+'|'+JSON.stringify(e.tuple);
-              if(!candidates.has(k)) candidates.set(k,{...e,matchedCode:code});
+        /* Идём от нужных OE к держателям (HVC.byOe), а не по всему HVC.cross:
+           объём работы пропорционален найденным связям, а не размеру реестра. */
+        for(const code of need) {
+          const holders=HVC.byOe.get(normArticle(code));
+          if(!holders || !holders.size) continue;
+          for(const artKey of holders) {
+            const part=HVC.parts.get(artKey), evidence=part && part._dimensionEvidence;
+            if(!part || !evidence) continue;
+            const identity=this.key(part), owner=automatic && owners.has(identity) ? owners.get(identity) : undefined;
+            if(automatic && owners.has(identity) && (!owner || owner.excluded || owner.dimensionAnomalyBlocked || owner._dimensionOeReview ||
+                !this.codes(owner,true).includes(normArticle(code)) || !this.autoEvidence(owner) || !this.exactTuple(owner,evidence))) continue;
+            const tuple=this.tuple(evidence), complete=this.full(tuple);
+            if(complete && this.issueFree({category:part.category||'',_volumeExplicit:false},tuple)) {
+              const entry={kind:'hvc',identity,ref:part,evidence,owner,linkKey:normArticle(code)+'\u001F'+artKey,partKey:artKey,code,tuple,complete,
+                tkey:this.tupleKey(tuple),
+                autoEligible:!!(evidence.singleRow && evidence.file && evidence.identity===identity && Array.isArray(evidence.oeCodes) && evidence.oeCodes.map(normArticle).includes(normArticle(code))),
+                source:`Каталог V: ${part.artikul||''}${part.brand?' · '+part.brand:''}${evidence.file?' · '+evidence.file:' · общий исходный файл ОВХ не подтверждён'}`};
+              entry.ekey=identity+'|'+entry.tkey;
+              add(code,entry);
+              if(evidence.singleRow) addIdentity(entry);
             }
+            if(++ci%3000===0){await new Promise(r=>setTimeout(r,0)); if(stale() || S.rows!==rows || (S.catalogVersion||0)!==revision || (HVC.ozonRevision||0)!==hvcRevision) throw new Error('Реестры изменились во время поиска. Запустите поиск снова.');}
           }
-          const complete=[...candidates.values()].filter(c=>c.complete), partial=[...candidates.values()].filter(c=>!c.complete);
-          const groups=new Map(); for(const c of complete){const k=this.tupleKey(c.tuple);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(c);}
-          let status='', choice=null;
-          if(!codes.length) status='Нет OE-номера у SKU';
-          else if(overflow) status='Слишком много совпадений по OE; нужна ручная проверка';
-          else if([...candidates.values()].some(c=>c.conflicting)) status='Противоречивые исходные строки одного донора';
-          else if(groups.size>1) status=`Конфликт: ${groups.size} разных комплектов веса и сторон`;
-          else if(!groups.size) status=partial.length ? 'Только неполные данные: вес и три стороны должны быть из одной записи' : (hasRegistry ? 'Есть сводный OE-реестр, но нет цельной записи с известным источником' : 'Нет полной локальной записи донора');
-          else {
-            const group=groups.values().next().value;
-            choice=automatic ? group.find(c=>c.autoEligible) || null : group[0];
-            if(!choice) status='Нет подтверждённой полной исходной строки: загрузите данные донора заново';
-            else if(partial.some(c=>this.partialConflicts(c.tuple,choice.tuple))) { status='Противоречие с неполной записью по тому же OE'; choice=null; }
-            else if(!this.issueFree(p,choice.tuple)){ status='Предложение не проходит пределы SKU или противоречит заданному объёму'; choice=null; }
-            else status=`Предложение; ${group.length} совпадений с теми же значениями${partial.length ? ' · неполные записи не использованы' : ''}`;
-          }
-          result.push({p,signature:this.targetSig(p),codes,status,choice,checked:false,hasRegistry});
         }
-        if(S.rows!==rows || (S.catalogVersion||0)!==revision || (HVC.ozonRevision||0)!==hvcRevision) throw new Error('Каталог изменился во время поиска. Запустите поиск снова.');
+        /* Только нужные коды, без обхода всего OE-реестра. */
+        const registry=new Set();
+        for(const code of need) { const n=normArticle(code); if(HVC.oe.has(n)) registry.add(n); }
+        const result=[];
+        let targetErrors=0;
+        for(const f of targets){
+          try {
+            if(stale()) throw new Error('Поиск отменён: каталог или реестры изменились. Запустите его снова.');
+            const p=f.p, codes=this.codes(p,automatic), own=this.key(p), candidates=new Map();
+            let overflow=false, hasRegistry=false, denied=0;
+            const take=(e,matchedCode)=>{
+              if(!e || !e.ref || e.ref===p || !e.identity || e.identity==='|') return;
+              const ekey=e.ekey || (e.ekey=e.identity+'|'+(e.tkey||(e.tkey=this.tupleKey(e.tuple))));
+              let hit=candidates.get(ekey);
+              if(!hit){
+                if(candidates.size>=DimPolicy.MAX_CANDIDATES){overflow=true;return;}
+                hit={...e,matchedCode:'',matchedCodes:new Set()};
+                candidates.set(ekey,hit);
+              }
+              if(matchedCode){hit.matchedCodes.add(matchedCode); if(!hit.matchedCode) hit.matchedCode=matchedCode;}
+            };
+            for(const code of codes){
+              if(registry.has(normArticle(code))) hasRegistry=true;
+              const bucket=index.get(code); if(!bucket) continue; if(bucket.overflow){overflow=true;continue;}
+              for(const e of bucket.entries.values()) take(e,code);
+            }
+            /* Записи того же артикула и бренда — допустимый источник и без общего OE. */
+            for(const e of (byIdentity.get(own)||[])) take(e,'');
+            const candidateList=[...candidates.values()];
+            const allowed=[];
+            for(const c of candidateList){
+              const verdict=DimPolicy.sourceAllowed(p,c.ref,c.matchedCode||'');
+              if(verdict.ok){c.link=verdict;allowed.push(c);} else denied++;
+            }
+            const complete=allowed.filter(c=>c.complete), partial=allowed.filter(c=>!c.complete);
+            /* Лимиты категории проверяются для КАЖДОГО варианта; непрошедшие
+               не подставляются, даже если они меньше остальных. */
+            const limit=AnomalyDetector.getLimit(p.category||'');
+            const valid=[], seenTuple=new Set();
+            let limitRejected=0;
+            for(const c of complete){
+              const tk=c.tkey||(c.tkey=this.tupleKey(c.tuple));
+              if(seenTuple.has(tk)) continue;
+              seenTuple.add(tk);
+              if(!this.issueFree(p,c.tuple)){limitRejected++;continue;}
+              valid.push(c);
+            }
+            const eligible=automatic ? valid.filter(c=>c.autoEligible) : valid;
+            const pick=DimPolicy.pick(p,eligible,null);
+            const choice=pick.choice||null;
+            let status='';
+            if(!candidateList.length) {
+              status=!codes.length && !(byIdentity.get(own)||[]).length
+                ? 'Нет OE-номера у SKU'
+                : (hasRegistry ? 'Есть сводный OE-реестр, но нет цельной записи с известным источником' : 'Нет полной локальной записи донора');
+            }
+            else if(overflow) status='Слишком много совпадений по OE; нужна ручная проверка';
+            else if(!allowed.length) status='Другой артикул без схожего OE — данные не переносятся';
+            else if(!valid.length) {
+              if(!complete.length) status='Только неполные данные: вес и три стороны должны быть из одной записи';
+              else if(limitRejected) status=`Не проходит лимиты категории «${limit.category||p.category||'—'}»: вес ≤ ${fmt(limit.maxW)} кг · габарит ≤ ${fmt(limit.maxL)} см · объём ≤ ${fmt(limit.maxVol)} л`;
+              else status='Нет полной локальной записи донора';
+            }
+            else if(!choice) status='Нет подтверждённой полной исходной строки: загрузите данные донора заново';
+            else {
+              status=(pick.variants>1 ? `Выбраны меньшие из ${pick.variants} вариантов · проверьте упаковку` : `Предложение; ${pick.variants} совпадение с теми же значениями`)
+                + (choice.link && choice.link.tier==='sku' ? ' · тот же артикул и бренд' : ' · схожий OE')
+                + (partial.length ? ' · неполные записи не использованы' : '')
+                + (denied ? ` · отклонено источников: ${denied}` : '');
+            }
+            result.push({p,signature:this.targetSig(p),codes,status,choice,checked:false,hasRegistry,link:choice?choice.link:null});
+          } catch(e) {
+            if(stale()) throw e;
+            targetErrors++;
+            console.warn('[UC] OE-подбор: строка пропущена', f && f.p && f.p.article, e);
+          }
+        }
+        if(stale() || S.rows!==rows || (S.catalogVersion||0)!==revision || (HVC.ozonRevision||0)!==hvcRevision) throw new Error('Каталог изменился во время поиска. Запустите поиск снова.');
+        this._lastErrors=targetErrors;
         this.catalogVersion=revision;this.hvcRevision=hvcRevision;this.preview=result;this.page=0;this._found=true;this.render();
       };
       if (automatic) await search(typeof options.onProgress==='function' ? options.onProgress : ()=>{});
@@ -39925,25 +40210,40 @@ const AnomalyOE = {
         const noOe=this.preview.filter(x=>!x.choice && /^Нет OE/.test(x.status)).length;
         const conflicts=this.preview.filter(x=>!x.choice && /^(?:Конфликт|Противореч|Слишком много)/.test(x.status)).length;
         const other=noChoice-noOe-conflicts;
+        const smaller=this.preview.filter(x=>x.choice && /^Выбраны меньшие/.test(x.status)).length;
+        const errors=this._lastErrors||0;
         for(const x of this.preview) if(x.choice) x.checked=true;
-        if(checked===noChoice) return {checked,changed:0,noChoice,pending,noOe,conflicts,other};
+        if(checked===noChoice) return {checked,changed:0,noChoice,pending,noOe,conflicts,other,smaller,errors};
         const done=await this.apply({automatic:true,fromSearch:true,onProgress:options.onProgress});
-        return {checked,changed:(done && done.changed)||0,noChoice,pending,noOe,conflicts,other,...(done && done.error ? {error:done.error} : {})};
+        return {checked,changed:(done && done.changed)||0,noChoice,pending,noOe,conflicts,other,smaller,errors,...(done && done.error ? {error:done.error} : {})};
       }
       Toast.info('Предложения готовы', `${checked-noChoice} из ${checked} SKU · отметьте подходящие после проверки источника`);
     } finally {this.busy=false;}
   },
   live(entry, target, rowSet, automatic) {
-    if(!entry || !entry.ref || this.sameOwner(entry.identity,target) || entry.ref===target) return false;
+    if(!entry || !entry.ref || entry.ref===target) return false;
+    /* Повторная проверка правила перед записью: источник — тот же артикул+бренд
+       или схожий OE; иначе данные не переносятся. */
+    const verdict=DimPolicy.sourceAllowed(target,entry.ref,entry.matchedCode||'');
+    if(!verdict.ok) return false;
+    const oeOk=(codes)=>codes.map(x=>DimPolicy.normOe(x)).some(x=>DimPolicy.similarOe(x,verdict.oe));
     if(entry.kind==='row') {
-      if(!rowSet.has(entry.ref) || entry.ref.excluded || entry.ref.dimensionAnomalyBlocked || !this.codes(entry.ref,automatic).includes(entry.matchedCode)) return false;
+      if(!rowSet.has(entry.ref) || entry.ref.excluded || entry.ref.dimensionAnomalyBlocked) return false;
+      if(verdict.tier==='oe' && !oeOk(this.codes(entry.ref,automatic))) return false;
       if(automatic && !this.autoEvidence(entry.ref)) return false;
       const t=this.tuple(entry.ref); return this.full(t) && this.exactTuple(t,entry.tuple) && this.issueFree(entry.ref,t);
     }
-    if(automatic && (!entry.evidence.singleRow || !entry.evidence.file || entry.evidence.identity!==entry.identity || !Array.isArray(entry.evidence.oeCodes) || !entry.evidence.oeCodes.includes(entry.matchedCode) || (entry.owner && (!rowSet.has(entry.owner) || entry.owner.excluded || entry.owner.dimensionAnomalyBlocked ||
-       !this.autoEvidence(entry.owner) || !this.codes(entry.owner,true).includes(entry.matchedCode) || !this.exactTuple(entry.owner,entry.evidence))))) return false;
+    if(automatic) {
+      const ev=entry.evidence||{};
+      if(!ev.singleRow || !ev.file || ev.identity!==entry.identity) return false;
+      if(verdict.tier==='oe' && !(Array.isArray(ev.oeCodes) && oeOk(ev.oeCodes))) return false;
+      if(entry.owner && (!rowSet.has(entry.owner) || entry.owner.excluded || entry.owner.dimensionAnomalyBlocked ||
+        !this.autoEvidence(entry.owner) || (verdict.tier==='oe' && !oeOk(this.codes(entry.owner,true))) ||
+        !this.exactTuple(entry.owner,ev))) return false;
+    }
     const link=HVC.cross.get(entry.linkKey), part=HVC.parts.get(entry.partKey);
-    return !!(link && normArticle(link.oeNorm)===entry.matchedCode && part===entry.ref && part._dimensionEvidence===entry.evidence &&
+    const codeOk=verdict.tier==='sku' || !!(link && DimPolicy.similarOe(normArticle(link.oeNorm),verdict.oe));
+    return !!(codeOk && part===entry.ref && part._dimensionEvidence===entry.evidence &&
       this.full(this.tuple(entry.evidence)) && this.exactTuple(this.tuple(entry.evidence),entry.tuple));
   },
   async apply(options) {
@@ -39958,12 +40258,13 @@ const AnomalyOE = {
       this.invalidate();Toast.warn('Предложения устарели','Каталог, OE или габариты изменились. Повторите поиск перед применением.');
       return {changed:0,error:'Каталог изменился; повторите поиск по OE.'};
     }
-    if(!automatic && !confirm(`Подставить показанные вес и габариты из одной записи для ${chosen.length} SKU? Общий OE не гарантирует одинаковую упаковку. SKU останутся в карантине до отдельного подтверждения измерений.`)) return {changed:0};
+    if(!automatic && !confirm(`Подставить выбранные (меньшие допустимые) вес и габариты для ${chosen.length} SKU? Источник — тот же артикул и бренд или схожий OE; разные артикулы без схожего OE не используются. Результат проверен по лимитам категории, но общий OE не гарантирует одинаковую упаковку. SKU останутся в карантине до отдельного подтверждения измерений.`)) return {changed:0};
     this.busy=true;
     try {
       const changed=[], at=nowISO();
       for(const x of chosen){
         const p=x.p,c=x.choice,before={weight:p.weight,length:p.length,width:p.width,height:p.height,volume:p.volume};
+        const via=(c.link && c.link.oe) ? ('по схожему OE '+c.link.oe) : 'по тому же артикулу и бренду';
         const explicit=productVolumeIsExplicit(p);
         Object.assign(p,c.tuple);
         if(!explicit){p.volume=round(p.length*p.width*p.height/1000,4);p._volumeExplicit=false;}
@@ -39973,11 +40274,11 @@ const AnomalyOE = {
         for(const key of ['weight','length','width','height']){
           const def=STD.find(s=>s.k===key), label=def ? def.n : key;
           beforeSources[key]=p._sources[key] || p._sources[label] || null;
-          const source={file:(automatic ? 'Автосверка по OE (нужна проверка): ' : 'По OE (нужна проверка): ')+c.source,date:at};
+          const source={file:(automatic ? 'Автосверка ' : 'Подбор ')+via+' (нужна проверка): '+c.source,date:at};
           p._sources[key]=source; p._sources[label]=source;
         }
-        this.recordReview(p,{oe:c.matchedCode,source:c.source,at,before,beforeSources,after:{...c.tuple},oeProofVersion:1,method:automatic ? 'авто при импорте' : 'вручную'});
-        AnomalyDetector.log.push({ts:at,article:p.article,category:p.category,before,after:{...c.tuple},heuristic:(automatic ? 'Автосверка' : 'Поиск')+' по OE '+c.matchedCode+' · '+c.source+' · требуется проверка упаковки'});
+        this.recordReview(p,{oe:c.link&&c.link.oe||'',source:c.source,at,before,beforeSources,after:{...c.tuple},oeProofVersion:1,method:automatic ? 'авто при импорте' : 'вручную'});
+        AnomalyDetector.log.push({ts:at,article:p.article,category:p.category,before,after:{...c.tuple},heuristic:(automatic ? 'Автосверка ' : 'Подбор ')+via+' · '+c.source+' · требуется проверка упаковки'});
         changed.push(p);
       }
       AnomalyDetector.save();
@@ -40000,14 +40301,15 @@ const AnomalyOE = {
   },
   render() {
     const table=$('#anomOeTable'),info=$('#anomOeInfo'); if(!table) return;
-    if(!this._found){table.innerHTML='';if(info)info.textContent='Поиск использует только загруженный каталог и Каталог V; сеть и внешние каталоги не вызываются. Если в списке аномалий есть отметки, ищем для них, иначе — для всех заблокированных SKU.';}
+    if(!this._found){table.innerHTML='';if(info)info.textContent='Источники: тот же артикул и бренд или схожий OE-номер; между разными артикулами без схожего OE данные не переносятся. Категория используется только для лимитов аномалий. Поиск идёт по загруженному каталогу и Каталогу V; сеть и внешние каталоги не вызываются. Если в списке аномалий есть отметки, ищем для них, иначе — для всех заблокированных SKU.';}
     else {
       const max=Math.max(0,Math.ceil(this.preview.length/this.pageSize)-1);this.page=Math.max(0,Math.min(this.page,max));
       const start=this.page*this.pageSize,items=this.preview.slice(start,start+this.pageSize);
       const count=this.preview.filter(x=>x.choice).length,checked=this.preview.filter(x=>x.checked).length;
-      if(info)info.textContent=`Проверено ${fmt(this.preview.length)} SKU · предложений ${fmt(count)} · отмечено ${fmt(checked)}. Неполные и конфликтующие данные не подставляются.`;
-      table.innerHTML='<thead><tr><th><input type="checkbox" id="anomOeSelAll" title="Отметить предложения на этой странице"></th><th>SKU и OE</th><th>Сейчас</th><th>Предложение из одной записи</th><th>Проверка</th></tr></thead><tbody>'+
-        (items.map((x,j)=>{const i=start+j,c=x.choice;return `<tr><td>${c?`<input type="checkbox" data-oe-i="${i}" ${x.checked?'checked':''}>`:'—'}</td><td class="mono">${esc(x.p.article)}<br><span class="hint">${esc(x.codes.join(' / ')||'нет OE')}</span></td><td>${esc(this.pretty(this.tuple(x.p)))}</td><td>${c?`${esc(this.pretty(c.tuple))}<br><span class="hint">${esc(c.source)} · OE ${esc(c.matchedCode)}</span>`:'—'}</td><td class="hint">${esc(x.status)}</td></tr>`;}).join('')||'<tr><td colspan="5">Нет строк</td></tr>')+'</tbody>';
+      const smaller=this.preview.filter(x=>x.choice && /^Выбраны меньшие/.test(x.status)).length;
+      if(info)info.textContent=`Проверено ${fmt(this.preview.length)} SKU · предложений ${fmt(count)} (из них меньших вариантов: ${fmt(smaller)}) · отмечено ${fmt(checked)}. Неполные варианты и источники без права переноса не подставляются.`+(this._lastErrors?` · пропущено строк с ошибкой: ${fmt(this._lastErrors)}`:'');
+      table.innerHTML='<thead><tr><th><input type="checkbox" id="anomOeSelAll" title="Отметить предложения на этой странице"></th><th>SKU и OE</th><th>Сейчас</th><th>Выбранный источник</th><th>Проверка</th></tr></thead><tbody>'+
+        (items.map((x,j)=>{const i=start+j,c=x.choice;const via=x.link&&x.link.tier==='sku'?'тот же артикул и бренд':(x.link&&x.link.oe?'схожий OE '+x.link.oe:'');return `<tr><td>${c?`<input type="checkbox" data-oe-i="${i}" ${x.checked?'checked':''}>`:'—'}</td><td class="mono">${esc(x.p.article)}<br><span class="hint">${esc(x.codes.join(' / ')||'нет OE')}</span></td><td>${esc(this.pretty(this.tuple(x.p)))}</td><td>${c?`${esc(this.pretty(c.tuple))}<br><span class="hint">${esc(c.source)}${via?' · '+esc(via):''}</span>`:'—'}</td><td class="hint">${esc(x.status)}</td></tr>`;}).join('')||'<tr><td colspan="5">Нет строк</td></tr>')+'</tbody>';
       const all=$('#anomOeSelAll'); if(all){const ready=items.filter(x=>x.choice);all.checked=ready.length>0&&ready.every(x=>x.checked);all.onchange=e=>{ready.forEach(x=>x.checked=e.target.checked);this.render();};}
       $$('#anomOeTable [data-oe-i]').forEach(el=>el.onchange=e=>{this.preview[+e.target.dataset.oeI].checked=e.target.checked;this.render();});
     }
@@ -42134,6 +42436,9 @@ function bindAll() {
   });
   $('#impRenameStd').onclick = e => e.target.classList.toggle('on');
   $('#impOe').onclick = e => e.target.classList.toggle('on');
+  const priceIsCostSw = $('#impPriceIsCost');
+  if (priceIsCostSw) priceIsCostSw.onclick = () => Import.setPriceIsCost(!Import.priceIsCostOn());
+  Import.syncPriceIsCost();
   /* --- v12.9.9 · Обогащение: выбор способа (Артикул + Бренд / OE-номер) и колонок --- */
   const EN_LABEL = { length: 'Длина, см', width: 'Ширина, см', height: 'Высота, см', weight: 'Вес, кг',
     name: 'Наименование', applicability: 'Применимость', category: 'Категория',
@@ -42171,8 +42476,8 @@ function bindAll() {
       : mode === 'auto' ? 'порядок: прямой OE-номер, затем точная пара SKU+бренд'
       : 'источник: реестр частей Каталога V · поиск по article_norm + brand_norm';
     if (mh) mh.textContent = mode === 'oe'
-      ? 'доноры: OE-реестр и артикулы с тем же OE-номером (включая аналоги)'
-      : mode === 'auto' ? 'сначала OE; недостающие поля — из словаря по точной паре SKU+бренд'
+      ? 'доноры: этот же артикул+бренд и записи со схожим OE; для ОВХ берётся меньший цельный комплект, проходящий лимиты категории'
+      : mode === 'auto' ? 'сначала OE (меньший комплект по лимитам категории), затем недостающее — из точной пары SKU+бренд'
       : 'доноры: только этот артикул и бренд (без OE-аналогов)';
   };
   syncEnSw();
@@ -42282,7 +42587,10 @@ function bindAll() {
       mode === 'oe' ? 'поиск доноров по нормализованному OE (oe_norm)' : mode === 'auto' ? 'сначала OE, затем недостающие поля по article_norm + brand_norm' : 'поиск доноров по article_norm + brand_norm', async prog => {
       if (typeof HVC !== 'undefined') { HVC.rebuildIndex(S.rows); }
       const n = await HVC.enrichAsync(S.rows, prog);
-      await persistNow(); bumpVersion(); applyFilter(); Table.paint(); Dash.render();
+      /* Единая граница: карантин аномалий, пересчёт экономики и запись.
+         Раньше новые ОВХ сохранялись без проверки лимитов до следующего пересчёта. */
+      await runPipeline(true, { onProgress: prog });
+      Table.paint(); Dash.render();
       renderEnrichCoverage();
       Toast.ok('Обогащение выполнено', `затронуто строк: ${fmt(n)} · способ: ${mode === 'oe' ? 'по OE-номеру' : mode === 'auto' ? 'OE → SKU+бренд' : 'Артикул + Бренд'} · колонки: ${cols.map(k => EN_LABEL[k] || k).join(', ')}`);
     });
