@@ -20,6 +20,12 @@
   повтор после AbortError; пересчёт идёт чанками по 600 строк с живым прогрессом;
   стандартные весогабариты пропускают строки с заполненными полями; по каждому
   этапу импорта печатаются тайминги (консоль + тост).
+  v12.9.47 — каталог свыше 20 000 SKU пишется порциями в отдельных транзакциях
+  (одна транзакция на 94k строк обрывалась браузером: BulkError → AbortError),
+  каждая порция повторяется до трёх раз; обогащение пропускает строки, которым
+  нечего переносить (нет OE и донора в реестре) — на каталоге без OE это
+  снимает десятки секунд; сообщения о сбросе памяти больше не повторяются на
+  каждой порции.
   Single-file application. The initial catalog is intentionally empty: records enter
   through user imports, IndexedDB persistence, or the authenticated GAS API.
   The gas-backend block is deployable Apps Script source and must be copied to the
@@ -13339,12 +13345,13 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.46-client+audit.1';
+const APP_VERSION = '12.9.47-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
   DEXIE_ATOMIC_ROWS: 120000,  // до этого объёма persist идёт одной атомарной транзакцией
   PIPE_CHUNK: 600,            // строк на чанк в пересчёте: чаще обновляется прогресс и вкладка не «висит»
+  CHUNKED_WRITE_ROWS: 20000,  // с этого размера каталог пишется порциями в отдельных транзакциях
   PERSIST_CHUNK: 3000,        // чанк bulkAdd в IndexedDB
   IMPORT_CHUNK: 4000,         // чанк построчной обработки импорта
   ENRICH_CHUNK: 3000,         // чанк обогащения HVC
@@ -17770,6 +17777,82 @@ const StorageCtl = {
     this.acceptCatalog(committedCatalog);
     S._cacheLastWrite = { mode: 'economy', count: rowCount, written, deleted, partial: onlyChanged };
   },
+  /* v12.9.47 · ЗАПИСЬ КРУПНОГО КАТАЛОГА ПОРЦИЯМИ.
+     Одна транзакция на 94 000 строк рвётся самим браузером: он держит в памяти
+     все поставленные в очередь записи и обрывает транзакцию
+     (BulkError … AbortError: The transaction was aborted). Поэтому каталог
+     пишется короткими транзакциями по chunk строк: обрыв стоит одной порции
+     (её повторяем), а не всего каталога. Неатомарность закрывается маркером
+     meta.incomplete: ревизия meta.catalog пишется последней, и оборванная
+     запись видна при следующем запуске. */
+  async saveChunked({ rowCount, chunk, changedList, withId, slimChunk, fullWrite }) {
+    const onlyChanged = Array.isArray(changedList) && changedList.length > 0 && changedList.length < rowCount;
+    const chunkRows = Math.max(100, Math.min(3000, num(chunk) || 500));
+    let written = 0, deleted = 0, committedCatalog;
+    let fp = { count: rowCount, fp: '' }, oldFp = '';
+    try { fp = catFp(S.rows); } catch (e) { console.warn('[UC] отпечаток каталога не посчитан:', e); }
+    const started = nowISO();
+    await db.transaction('rw', db.meta, async () => {
+      const current = await this.assertCatalogFresh();
+      oldFp = current && current.value && current.value.fp || '';
+      await db.meta.put({ key: 'incomplete', value: { started, count: rowCount, fp: fp.fp, oldFp, backup: '' } });
+    });
+    if (!onlyChanged) {
+      /* Устаревшие ключи удаляются до записи: иначе исчезнувшие SKU остались бы
+         в кэше рядом с новыми. Ключи новых строк проверяются так же, как в
+         атомарной записи. */
+      const keys = new Set();
+      for (let i = 0; i < rowCount; i++) {
+        const row = S.rows[i];
+        if (row.id === undefined || row.id === null) withId(row);
+        if (keys.has(row.id)) throw new Error('Обнаружены повторяющиеся внутренние ID товаров; запись остановлена без замены каталога.');
+        keys.add(row.id);
+      }
+      const oldKeys = await db.products.toCollection().primaryKeys();
+      let gone = [];
+      for (const id of oldKeys) {
+        if (!keys.has(id)) gone.push(id);
+        if (gone.length >= chunkRows) { await db.products.bulkDelete(gone); deleted += gone.length; gone = []; }
+      }
+      if (gone.length) { await db.products.bulkDelete(gone); deleted += gone.length; }
+    }
+    const total = onlyChanged ? changedList.length : rowCount;
+    for (let i = 0; i < total; i += chunkRows) {
+      const rows = onlyChanged
+        ? changedList.slice(i, i + chunkRows).map(p => withId(p))
+        : slimChunk(i, i + chunkRows);
+      if (!rows.length) continue;
+      let ok = false, lastErr = null;
+      for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+        try { await db.products.bulkPut(rows); ok = true; }
+        catch (eChunk) {
+          lastErr = eChunk;
+          console.warn('[UC] порция записи ' + fmt(i) + '–' + fmt(i + rows.length) + ' прервана (' + (attempt + 1) + '/3):', eChunk && eChunk.name);
+          try { await db.open(); } catch (eOpen) { }
+          await new Promise(r => setTimeout(r, 150 * (attempt + 1)));
+        }
+      }
+      if (!ok) throw lastErr;
+      written += rows.length;
+      if ((i / chunkRows) % 4 === 0) {
+        if (typeof MemGuard !== 'undefined') MemGuard.check('запись каталога');
+        await new Promise(r => setTimeout(r, 0));
+      }
+      /* Журнал записи: видно, что каталог действительно пишется порциями. */
+      if ((i / chunkRows) % 10 === 0 && written < total) console.info('[UC] запись каталога: ' + fmt(written) + ' из ' + fmt(total) + ' строк');
+    }
+    await db.transaction('rw', db.meta, async () => {
+      await this.assertCatalogFresh();
+      committedCatalog = this.catalogValue(rowCount, onlyChanged ? '' : fp.fp);
+      await db.meta.put({ key: 'catalog', value: committedCatalog });
+      await db.meta.put({ key: 'custom', value: S.custom });
+      await db.meta.put({ key: 'settings', value: { ...S.settings, lastPersistError: '' } });
+      await db.meta.put({ key: 'tariffs', value: S.tariffs });
+      await db.meta.delete('incomplete');
+    });
+    this.acceptCatalog(committedCatalog);
+    S._cacheLastWrite = { mode: 'chunked', count: rowCount, written, deleted, partial: onlyChanged };
+  },
   jsonLine(row) {
     return JSON.stringify(row, function(key, value) {
       const original = this && this[key];
@@ -19446,9 +19529,24 @@ const MemGuard = {
       try { if (typeof MarkStatus !== 'undefined' && MarkStatus.unknown && MarkStatus.unknown.size > 5000) MarkStatus.unknown.clear(); } catch (e) { }
     }
     this.level = level;
-    if (freed.length) console.warn('[UC] память ' + Math.round(this.share() * 100) + '% (' + (stage || '') + '): освобождено — ' + freed.join(', '));
-    if (level >= 2) {
-      Toast.warn('Мало памяти', 'Освобождены кэши и служебные копии каталога. Данные товаров не затронуты. Использование heap: ' + Math.round(this.share() * 100) + '%');
+    /* v12.9.47: сброс памяти повторяется на каждой порции пересчёта — писать в
+       консоль каждый раз бессмысленно и мешает читать журнал импорта. Сообщение
+       выводится при изменении доли heap на 5 п.п. или раз в 30 секунд. */
+    const now = Date.now(), pct = Math.round(this.share() * 100);
+    const sameState = this._lastPct !== undefined && Math.abs(pct - this._lastPct) < 5 && (now - (this._lastAt || 0)) < 30000;
+    if (freed.length && !sameState) {
+      this._lastPct = pct; this._lastAt = now;
+      console.warn('[UC] память ' + pct + '% (' + (stage || '') + '): освобождено — ' + freed.join(', ') +
+        (this._quiet ? ' · повторов без изменений: ' + fmt(this._quiet) : ''));
+      this._quiet = 0;
+    } else if (freed.length) {
+      this._quiet = (this._quiet || 0) + 1;
+    }
+    /* Предупреждение показываем один раз за сессию вкладки: данные не теряются,
+       а повтор тоста на каждой порции только пугает. */
+    if (level >= 2 && !this._toastShown) {
+      this._toastShown = true;
+      Toast.warn('Мало памяти', 'Освобождены кэши и служебные копии каталога. Данные товаров не затронуты. Использование heap: ' + pct + '%');
     }
   },
   reset() { this.level = 0; }
@@ -21633,9 +21731,15 @@ async function _persistNowImpl(changedList) {
        строки с уже лежащими в IndexedDB бессмысленно (это чтение 94k записей и
        глубокое сравнение каждого объекта). Передаём fullWrite и не тратим время. */
     const _fullWrite = !Array.isArray(changedList) || !changedList.length || changedList.length >= rowCount;
+    /* v12.9.47: крупный каталог не пишем одной транзакцией — браузер обрывает
+       её на десятках тысяч записей. Порционная запись держит память в норме и
+       повторяет только повреждённую порцию. */
+    const _bigWrite = rowCount > (num(CONST.CHUNKED_WRITE_ROWS) || 20000);
     if (StorageCtl.mode() === 'economy') {
       const _writeArgs = { rowCount, chunk: CH, changedList, withId, slimChunk, fullWrite: _fullWrite };
-      try { await StorageCtl.saveDiffAtomic(_writeArgs); }
+      if (_fullWrite && _bigWrite) {
+        await StorageCtl.saveChunked(Object.assign({}, _writeArgs, { chunk: 1000 }));
+      } else try { await StorageCtl.saveDiffAtomic(_writeArgs); }
       catch (eWrite) {
         /* AbortError/BulkError на большом каталоге: один повтор уменьшенными
            чанками после переоткрытия базы. Иначе весь импорт остаётся только в
@@ -21647,7 +21751,8 @@ async function _persistNowImpl(changedList) {
         if (!_abort) throw eWrite;
         try { await db.open(); } catch (eOpen) { console.warn('[UC] reopen db:', eOpen); }
         await new Promise(r => setTimeout(r, 300));
-        await StorageCtl.saveDiffAtomic(Object.assign({}, _writeArgs, { chunk: 300 }));
+        /* Повтор — порциями по 300 строк в отдельных транзакциях. */
+        await StorageCtl.saveChunked(Object.assign({}, _writeArgs, { chunk: 300 }));
       }
     /* Режим черновика: частичное/небольшое обновление записывается одной
        транзакцией. Для полной замены большого каталога сначала занимаем
@@ -21666,6 +21771,10 @@ async function _persistNowImpl(changedList) {
         await db.meta.put({ key: 'tariffs', value: S.tariffs });
       });
       StorageCtl.acceptCatalog(committedCatalog);
+    } else if (_bigWrite) {
+      /* Режим черновика на крупном каталоге: подмена одной транзакцией рвётся
+         так же, как в обычном режиме, поэтому пишем порциями. */
+      await StorageCtl.saveChunked({ rowCount, chunk: 1000, changedList, withId, slimChunk, fullWrite: _fullWrite });
     } else if (rowCount <= CONST.DEXIE_ATOMIC_ROWS) {
       let committedCatalog;
       await db.transaction('rw', db.products, db.meta, async () => {
@@ -23313,13 +23422,59 @@ const HVC = {
   enrich(list,mode) { const rows=list || S.rows, scope=HVC.identityScope(rows); let n = 0; rows.forEach(p => { if (HVC.enrichOne(p,scope,mode)) n++; }); return n; },
   async enrichAsync(list, prog, mode) {
     const rows = list || S.rows, scope=HVC.identityScope(rows), CH = 1200; let n = 0;
+    const _t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    let fast = 0, oeRows = 0, abRows = 0;
+    const autoMode = !mode || mode === 'auto';
     for (let i=0;i<rows.length;i+=CH) {
       const end = Math.min(i+CH, rows.length);
-      for (let j=i;j<end;j++) { try { if (HVC.enrichOne(rows[j],scope,mode)) n++; } catch(e) { console.warn('[UC] enrichOne:', e, rows[j]?.article); } }
+      for (let j=i;j<end;j++) {
+        try {
+          const p = rows[j];
+          /* v12.9.47: строки, которым нечего переносить (нет OE, нет донора в
+             реестре, все поля уже заполнены), проходят мимо тяжёлой ветки.
+             Результат тот же — эта ветка ничего бы не записала. */
+          if (autoMode && HVC._nothingToEnrich(p, scope)) { fast++; continue; }
+          if (autoMode) { if (HVC._oeKnown(p)) oeRows++; else abRows++; }
+          if (HVC.enrichOne(p,scope,mode)) n++;
+        } catch(e) { console.warn('[UC] enrichOne:', e, rows[j]?.article); }
+      }
       if (prog) prog(`обогащение по SKU/OE: ${fmt(end)} из ${fmt(rows.length)}`);
       await Exp._yield();
     }
+    try {
+      const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _t0);
+      console.info('[UC] обогащение: ' + fmt(rows.length) + ' строк · ' + fmt(ms) + ' мс · заполнено ' + fmt(n) +
+        ' · без работы ' + fmt(fast) + ' · по OE ' + fmt(oeRows) + ' · по паре ' + fmt(abRows) +
+        ' · ' + (rows.length ? Math.round(ms * 1000 / rows.length) : 0) + ' мкс/строка');
+    } catch (e) { }
     return n;
+  },
+  /* v12.9.47 · БЫСТРАЯ ПРОВЕРКА «нечего переносить».
+     Обогащение пишет только ПУСТЫЕ поля, а донором для строки без OE может быть
+     лишь её собственная запись в реестре частей. Если все поля этой записи уже
+     заполнены в строке — вызов бесполезен, но стоил 0,4 мс на 94 000 строках
+     (40 секунд «обогащения» на каталоге без OE). */
+  _nothingToEnrich(p, scope) {
+    if (!p || typeof p !== 'object') return true;
+    if (HVC.identityUnsafe(p, scope)) return true;                 /* строка всё равно пропускается */
+    const rawOe = String(p.oe_norm || '').trim();
+    if (rawOe) return false;                                       /* есть OE — решает OE-ветка */
+    const sku = HVC.normalizeKey(p.article), brand = HVC.normalizeKey(p.brand);
+    if (!sku || !brand) return true;                               /* гейт пары не пропустит */
+    const key = HVC.keyOf(p);
+    const myOes = HVC.byArt.get(key);
+    if (myOes && myOes.size) return false;                         /* у связки есть OE — доноры возможны */
+    const pt = HVC.parts.get(key);
+    if (!pt) return true;                                          /* записи реестра нет — переносить нечего */
+    const badCat = v => !v || ['без категории', 'разное', 'прочее', 'не определено'].includes(String(v).trim().toLowerCase());
+    if (HVC.enCol('name') && !String(p.name || '').trim() && pt.name) return false;
+    if (HVC.enCol('applicability') && !String(p.applicability || '').trim() && pt.applicability) return false;
+    if (HVC.enCol('category') && badCat(p.category) && pt.category && !badCat(pt.category)) return false;
+    for (const k of ['weight', 'length', 'width', 'height']) {
+      if (!HVC.enCol(k)) continue;
+      if (!(num(p[k]) > 0) && num(pt[k]) > 0) return false;
+    }
+    return true;
   },
   enrichAll() { return HVC.enrich(S.rows); },
   /* Строка экспорта v100.20: колонки блока + описание с шаблоном */
