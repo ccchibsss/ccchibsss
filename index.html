@@ -51,6 +51,17 @@
   Точечный пересчёт после импорта и автосверки ОВХ пропускает неизменённые строки
   целиком (на 217 000 SKU это сотни секунд), группы OE после подстановки ОВХ не
   пересобираются. В журнал добавлены тайминги записи по этапам и размер heap.
+  v12.9.55 — ОСНОВНОЙ РЕЖИМ: одна выбранная площадка. Пайплайн считает юнит-экономику
+  только выбранного маркетплейса (по умолчанию Ozon): четыре решателя из пяти не
+  запускаются, p.mp хранит одну экономику вместо пяти, колонки чужих площадок не
+  рисуются и не выгружаются (вместо нулей — пустая ячейка). На 60 000 SKU пересчёт
+  30,6 → 10,7 с (509 → 178 мкс/строка), p.mp 2,4 → 0,68 КБ на строку. Поля «Лучший МП»
+  и «Разброс ЧП МП» заполняются только в режиме сравнения; кнопка «Сравнение» в шапке
+  возвращает расчёт всех пяти моделей. Сохранённый режим сравнения при первом запуске
+  переводится на Ozon с пояснением (настройка calcSelectedMpOnly). Калькулятор Ozon
+  больше не теряет безубыток и рекомендованную цену, если Ozon не был посчитан
+  пайплайном — считает их решателем. В имени файла выгрузки юнит-экономики теперь
+  площадка: UC_unit_economics_OZON_<дата>.xlsx.
   v12.9.53 — безубыток и рекомендуемая цена в калькуляторе Ozon считаются с учётом
   сегмента cap: сначала цена находится по текущему сегменту, затем флаги «нестандарт, %»
   и процентной сдачи ПВЗ пересчитываются на найденной цене и цена уточняется (закрытая
@@ -13394,7 +13405,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.54-client+audit.1';
+const APP_VERSION = '12.9.55-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -17690,7 +17701,12 @@ const S = {
   cats: [], rules: [], excs: [], sups: [], orders: [], hist: [], imports: [], snaps: [], mprof: [], eprof: [], pnl: [],
   settings: { gasUrl: '', cid: '', secret: '', serverUrl: '', serverToken: '', serverTenantId: '', serverSyncMode: 'bidirectional', serverTimeout: 15000, wbApiToken: '', wbWarehouseId: '', ymApiKeyInput: '', ymCampaignId: '', ymBusinessId: '', mmMerchantId: '', mmAuthToken: '', avitoClientId: '', avitoClientSecret: '', backendType: 'custom_server', businessId: '', campaignId: '', apiKey: '', chunk: 2000, timeout: 25000, proxy: true, dry: false, autoHide: true, autosave: true, autosaveMin: 15, cloudSyncState: { status:'idle' }, unitEconomicsSynced: {}, showExcluded: false, oeDelimiter: 'auto', dimUnit: 'cm', weightImportUnit: 'kg',
     /* Мульти-маркетплейс профили и налоговые режимы */
-    activeMarketplace: 'ALL', activeFulfillment: 'FBS', taxRegime: 'usn_income_6', taxOsnoEligibleSharePct: 0, tariffModelVersion: '2026-10-24-r2',
+    /* v12.9.55 · ОСНОВНОЙ РЕЖИМ. Юнит-экономика считается для одной выбранной
+       площадки (по умолчанию Ozon) — это ~3× меньше расчёта и в 3,5 раза меньше
+       памяти на строку. calcSelectedMpOnly снимается кнопкой «Сравнение» в шапке:
+       тогда считаются все пять площадок, как раньше. */
+    activeMarketplace: 'OZON', calcSelectedMpOnly: true,
+    activeFulfillment: 'FBS', taxRegime: 'usn_income_6', taxOsnoEligibleSharePct: 0, tariffModelVersion: '2026-10-24-r2',
     wbCommissionPct: 15, wbAcquiringPct: 1.5, wbBaseLogistics: 46, wbExtraLiter: 14, wbWarehouseCoeff: 1.7, wbReturnExtraFixed: 0, wbStoragePerLDay: 0.08, wbStorageCoeff: 1, wbAcceptanceFee: 0, wbBoostPct: 0, wbSppPct: 0, wbFulfillment: 'FBS',
     wbFailedCostManual: null, ymFailedCostManual: null, mmFailedCostManual: null, avitoFailedCostManual: null, wbStorageDaysPerUnit: 30,
     ymProcessingPerUnit: null, ymStoragePerSale: 0,
@@ -18310,9 +18326,24 @@ const TCOLS = [
   { k: 'visible', n: 'Вид', w: 54 },
   { k: 'version', n: 'Версия', w: 60, r: 1 }
 ];
+/* v12.9.55: колонки чужой площадки не нужны в таблице, когда считаем одну —
+   они всегда пустые, а рисовать их на 200 000 строк дорого. */
+function columnMarketplace(k) {
+  const m = /^(profit|margin|be|tgt)(WB|Ozon|YM|MM|Avito)$/.exec(String(k || ''));
+  if (!m) return '';
+  return m[2] === 'Ozon' ? 'OZON' : m[2] === 'Avito' ? 'AVITO' : m[2].toUpperCase();
+}
+
 function buildCols() {
   const hidden = S.settings.hiddenCols || {};
-  S.cols = TCOLS.filter(c => !hidden[c.k]).concat(S.custom.filter(supportedCustomColumn).map(c => ({ k: 'c_' + c.key, n: c.name, w: 116, r: c.type === 'num', custom: 1 })));
+  const scopeMp = economicsScopeMp();
+  const scopeFilter = c => {
+    if (scopeMp === 'ALL') return true;
+    const mp = columnMarketplace(c.k);
+    if (mp) return mp === scopeMp;
+    return !['bestMp', 'profitDiff'].includes(c.k);
+  };
+  S.cols = TCOLS.filter(c => !hidden[c.k] && scopeFilter(c)).concat(S.custom.filter(supportedCustomColumn).map(c => ({ k: 'c_' + c.key, n: c.name, w: 116, r: c.type === 'num', custom: 1 })));
 }
 
 /* ------------------------- 5. ПАРСЕР / НОРМАЛИЗАЦИЯ --------------------- */
@@ -20042,6 +20073,15 @@ function solveMarketplacePrices(evaluate, baseEco, targetMargin, discontinuityAt
   return baseEco;
 }
 
+/* v12.9.55: какая площадка считается в пайплайне. 'ALL' — прежний режим сравнения
+   пяти моделей, иначе — только выбранная (по умолчанию OZON). */
+function economicsScopeMp() {
+  const raw = String((S.settings && S.settings.activeMarketplace) || 'OZON').toUpperCase();
+  const onlySelected = !S.settings || S.settings.calcSelectedMpOnly !== false;
+  if (!onlySelected || raw === 'ALL') return 'ALL';
+  return raw;
+}
+
 function calcMarketplacesEconomics(p, ov, meta) {
   if (commonFulfillment() === 'SELECT_MODE') throw new Error('Выберите поддерживаемую схему FBS или FBO перед расчётом.');
   ensureTariffModelSettings2026();
@@ -20299,8 +20339,18 @@ function calcMarketplacesEconomics(p, ov, meta) {
       eco.comparisonReasons = shareEcoText(why.join('; '));
       /* Численные ориентиры уже рассчитаны основным pipeline; текущий быстрый
          режим не повторяет численный солвер только ради копии этих двух полей. */
-      eco.breakEvenPrice = num(previous.breakEvenPrice || p.beOzon);
-      eco.tgtPrice = num(previous.tgtPrice || p.tgtOzon);
+      const cachedBe = num(previous.breakEvenPrice || p.beOzon), cachedTgt = num(previous.tgtPrice || p.tgtOzon);
+      if (cachedBe > 0 && cachedTgt > 0) {
+        eco.breakEvenPrice = cachedBe;
+        eco.tgtPrice = cachedTgt;
+      } else {
+        /* v12.9.55: в режиме одной площадки Ozon может быть не посчитан пайплайном
+           (выбрана другая площадка). Раньше калькулятор в этом случае молча
+           терял безубыток и рекомендованную цену — считаем их решателем. */
+        const solved = solveMarketplacePrices(evaluateOzon, eco, tgtMargin);
+        eco.breakEvenPrice = solved.breakEvenPrice;
+        eco.tgtPrice = solved.tgtPrice;
+      }
       return { ozonEco:eco, currentOzonOnly:true };
     }
 
@@ -20435,19 +20485,25 @@ function calcMarketplacesEconomics(p, ov, meta) {
     return finalizeMarketplaceEco(eco, fixedTotal, solverOnly, invalidByMp.AVITO);
   }
 
-  const wbEco = solveMarketplacePrices(evaluateWb, evaluateWb(currentEffPrice), tgtMargin);
-  const ozonEco = solveMarketplacePrices(evaluateOzon, evaluateOzon(currentEffPrice), tgtMargin);
-  const ymCheapBoundary = cheapFbsTariff(p, 300, rawVolume, explicitVolume).applied ? 300 : 0;
-  const ymEco = solveMarketplacePrices(evaluateYm, evaluateYm(currentEffPrice), tgtMargin, ymCheapBoundary);
-  const mmEco = solveMarketplacePrices(evaluateMm, evaluateMm(currentEffPrice), tgtMargin);
-  const avitoEco = solveMarketplacePrices(evaluateAvito, evaluateAvito(currentEffPrice), tgtMargin);
-  ozonEco.inputUnavailable = ozonEco.fulfillment === 'REALFBS' && !!ozonEco.tariffIncomplete;
-  ymEco.inputUnavailable = !t.found; // не подставляем нулевую комиссию, если совместимый тариф не найден
+  /* v12.9.55 · ОДНА ПЛОЩАДКА. Решатель запускается только для выбранной
+     площадки: остальные модели не считаются вовсе. На каталоге в сотни тысяч
+     SKU это главная экономия — четыре решателя из пяти не работают, а p.mp
+     хранит одну экономику вместо пяти. Режим сравнения (scope 'ALL') — как раньше. */
+  const scopeMp = meta && meta.scopeMp ? String(meta.scopeMp).toUpperCase() : 'ALL';
+  const needMp = code => scopeMp === 'ALL' || scopeMp === code;
+  const wbEco = needMp('WB') ? solveMarketplacePrices(evaluateWb, evaluateWb(currentEffPrice), tgtMargin) : null;
+  const ozonEco = needMp('OZON') ? solveMarketplacePrices(evaluateOzon, evaluateOzon(currentEffPrice), tgtMargin) : null;
+  const ymCheapBoundary = needMp('YM') && cheapFbsTariff(p, 300, rawVolume, explicitVolume).applied ? 300 : 0;
+  const ymEco = needMp('YM') ? solveMarketplacePrices(evaluateYm, evaluateYm(currentEffPrice), tgtMargin, ymCheapBoundary) : null;
+  const mmEco = needMp('MM') ? solveMarketplacePrices(evaluateMm, evaluateMm(currentEffPrice), tgtMargin) : null;
+  const avitoEco = needMp('AVITO') ? solveMarketplacePrices(evaluateAvito, evaluateAvito(currentEffPrice), tgtMargin) : null;
+  if (ozonEco) ozonEco.inputUnavailable = ozonEco.fulfillment === 'REALFBS' && !!ozonEco.tariffIncomplete;
+  if (ymEco) ymEco.inputUnavailable = !t.found; // не подставляем нулевую комиссию, если совместимый тариф не найден
   const allMps = [
     { code: 'WB', name: 'Wildberries', eco: wbEco }, { code: 'OZON', name: 'Ozon', eco: ozonEco },
     { code: 'YM', name: 'Яндекс Маркет', eco: ymEco }, { code: 'MM', name: 'Мегамаркет', eco: mmEco },
     { code: 'AVITO', name: 'Авито', eco: avitoEco }
-  ];
+  ].filter(x => x.eco);
   const comparisonBlocked=[];
   for (const x of allMps) {
     const e=x.eco, why=[];
@@ -20460,22 +20516,41 @@ function calcMarketplacesEconomics(p, ov, meta) {
     if (why.length) comparisonBlocked.push(x.name+': '+why.join(', '));
   }
   const comparableMps = allMps.filter(x => x.eco.comparisonEligible);
-  p.marketComparisonIncomplete=comparisonBlocked.length>0;
-  p.marketComparisonReasons=shareEcoText(comparisonBlocked.join('; '));
+  if (scopeMp !== 'ALL') {
+    /* Сравнение не запрашивалось: это не «неполные данные», а режим одной площадки. */
+    p.marketComparisonIncomplete = false;
+    p.marketComparisonReasons = shareEcoText('считается только ' + scopeMp + ': сравнение площадок отключено');
+  } else {
+    p.marketComparisonIncomplete=comparisonBlocked.length>0;
+    p.marketComparisonReasons=shareEcoText(comparisonBlocked.join('; '));
+  }
   // A best of only some marketplaces is not a best of all marketplaces.
-  let best = !p.marketComparisonIncomplete ? (comparableMps[0] || null) : null, worst = best;
+  let best = (scopeMp === 'ALL' && !p.marketComparisonIncomplete) ? (comparableMps[0] || null) : null, worst = best;
   for (let i = 1; best && i < comparableMps.length; i++) {
     if (comparableMps[i].eco.netProfit > best.eco.netProfit) best = comparableMps[i];
     if (comparableMps[i].eco.netProfit < worst.eco.netProfit) worst = comparableMps[i];
   }
-  p.mp = { WB: packEco(wbEco), OZON: packEco(ozonEco), YM: packEco(ymEco), MM: packEco(mmEco), AVITO: packEco(avitoEco) };
+  /* v12.9.55: в p.mp попадают только посчитанные площадки. Плоские поля
+     нерассчитанных площадок — null (а не 0), чтобы интерфейс и выгрузка
+     показывали «—», а не нулевую прибыль. */
+  p.mp = {};
+  if (wbEco) p.mp.WB = packEco(wbEco);
+  if (ozonEco) p.mp.OZON = packEco(ozonEco);
+  if (ymEco) p.mp.YM = packEco(ymEco);
+  if (mmEco) p.mp.MM = packEco(mmEco);
+  if (avitoEco) p.mp.AVITO = packEco(avitoEco);
   p.bestMp = best ? best.code : ''; p.bestMpName = best ? best.name : ''; p.bestMpProfit = best ? best.eco.netProfit : 0;
   p.bestMpMargin = best ? best.eco.margin : 0; p.profitDiff = best && worst ? round(best.eco.netProfit - worst.eco.netProfit) : 0;
-  p.profitWB = wbEco.returnRateInvalid ? 0 : wbEco.netProfit; p.marginWB = wbEco.returnRateInvalid ? 0 : wbEco.margin; p.beWB = wbEco.returnRateInvalid ? 0 : wbEco.breakEvenPrice; p.tgtWB = wbEco.returnRateInvalid ? 0 : wbEco.tgtPrice;
-  p.profitOzon = (ozonEco.returnRateInvalid || ozonEco.inputUnavailable) ? 0 : ozonEco.netProfit; p.marginOzon = (ozonEco.returnRateInvalid || ozonEco.inputUnavailable) ? 0 : ozonEco.margin; p.beOzon = (ozonEco.returnRateInvalid || ozonEco.inputUnavailable) ? 0 : ozonEco.breakEvenPrice; p.tgtOzon = (ozonEco.returnRateInvalid || ozonEco.inputUnavailable) ? 0 : ozonEco.tgtPrice;
-  p.profitYM = (ymEco.returnRateInvalid || ymEco.inputUnavailable) ? 0 : ymEco.netProfit; p.marginYM = (ymEco.returnRateInvalid || ymEco.inputUnavailable) ? 0 : ymEco.margin; p.beYM = (ymEco.returnRateInvalid || ymEco.inputUnavailable) ? 0 : ymEco.breakEvenPrice; p.tgtYM = (ymEco.returnRateInvalid || ymEco.inputUnavailable) ? 0 : ymEco.tgtPrice;
-  p.profitMM = mmEco.returnRateInvalid ? 0 : mmEco.netProfit; p.marginMM = mmEco.returnRateInvalid ? 0 : mmEco.margin; p.beMM = mmEco.returnRateInvalid ? 0 : mmEco.breakEvenPrice; p.tgtMM = mmEco.returnRateInvalid ? 0 : mmEco.tgtPrice;
-  p.profitAvito = avitoEco.returnRateInvalid ? 0 : avitoEco.netProfit; p.marginAvito = avitoEco.returnRateInvalid ? 0 : avitoEco.margin; p.beAvito = avitoEco.returnRateInvalid ? 0 : avitoEco.breakEvenPrice; p.tgtAvito = avitoEco.returnRateInvalid ? 0 : avitoEco.tgtPrice;
+  const flatMp = (suffix, eco, withUnavailable) => {
+    if (!eco) { p['profit'+suffix] = null; p['margin'+suffix] = null; p['be'+suffix] = null; p['tgt'+suffix] = null; return; }
+    const blocked = eco.returnRateInvalid || (withUnavailable && eco.inputUnavailable);
+    p['profit'+suffix] = blocked ? 0 : eco.netProfit;
+    p['margin'+suffix] = blocked ? 0 : eco.margin;
+    p['be'+suffix] = blocked ? 0 : eco.breakEvenPrice;
+    p['tgt'+suffix] = blocked ? 0 : eco.tgtPrice;
+  };
+  flatMp('WB', wbEco, false); flatMp('Ozon', ozonEco, true); flatMp('YM', ymEco, true);
+  flatMp('MM', mmEco, false); flatMp('Avito', avitoEco, false);
   p.belowBeAny = currentEffPrice < Math.max(0, ...comparableMps.map(x => num(x.eco.breakEvenPrice)));
   return { wbEco, ozonEco, ymEco, mmEco, avitoEco, best, worst };
 }
@@ -20595,6 +20670,8 @@ function computeEconomics(p, ov) {
   if (commonFulfillment() === 'SELECT_MODE') return clearUnsupportedFulfillmentEconomics(p);
   p.modelReviewRequired = false;
   const calcMeta = {};
+  /* v12.9.55: в пайплайне считается только выбранная площадка (по умолчанию Ozon). */
+  calcMeta.scopeMp = economicsScopeMp();
   const allMpsResult = calcMarketplacesEconomics(p, ov, calcMeta);
   const activeMp = S.settings.activeMarketplace || 'ALL';
   const selectedEco = (activeMp !== 'ALL' && allMpsResult && allMpsResult[activeMp.toLowerCase() + 'Eco'])
@@ -25204,6 +25281,13 @@ const UI = {
       }
       const ls = lsGet('uc.settings'); if (ls) { try { S.settings = { ...S.settings, ...JSON.parse(ls) }; } catch (e) { } }
       reviewLegacyFulfillment(S.settings);
+      /* v12.9.55: по умолчанию считаем одну выбранную площадку. Сохранённый
+         «режим сравнения» (ALL) переводим на Ozon один раз и показываем это
+         подсказкой: вернуть сравнение можно кнопкой «Сравнение» в шапке. */
+      if (S.settings.calcSelectedMpOnly !== false && String(S.settings.activeMarketplace || 'ALL').toUpperCase() === 'ALL') {
+        S.settings.activeMarketplace = 'OZON';
+        S._mpScopeMigrated = true;
+      }
       refreshFulfillmentControls(); refreshMarketplaceControls();
       const lsp = lsGet('uc.mprof'); if (lsp && !S.mprof.length) { try { S.mprof = JSON.parse(lsp); } catch (e) { } }
       const lse = lsGet('uc.eprof'); if (lse && !S.eprof.length) { try { S.eprof = JSON.parse(lse); } catch (e) { } }
@@ -25245,6 +25329,14 @@ const UI = {
       const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting && e.target.classList.add('in')), { threshold: .08 });
       $$('.card').forEach(c => { c.classList.add('reveal'); io.observe(c); });
       S._bootReady = true; // только после загрузки полного каталога и завершения запуска
+      /* v12.9.55: одноразовое пояснение, если сохранённый режим сравнения переведён
+         на расчёт одной площадки. Повторно не показываем — настройка уже изменена. */
+      if (S._mpScopeMigrated) {
+        S._mpScopeMigrated = false;
+        Toast.info('Расчёт по одной площадке: ' + S.settings.activeMarketplace,
+          'Юнит-экономика считается для выбранной площадки — каталог обрабатывается в разы быстрее. Все пять моделей считаются по кнопке «Сравнение» в шапке.');
+        UI2.saveSettings().catch(() => {});
+      }
     });
   },
   fillFilters() {
@@ -25467,6 +25559,9 @@ const Dash = {
     const names={ALL:'Режим сравнения: общие KPI рассчитаны по Яндекс Маркету',WB:'Расчёт по Wildberries',OZON:'Расчёт по Ozon',YM:'Расчёт по Яндекс Маркету',MM:'Расчёт по Мегамаркету',AVITO:'Расчёт по Авито'};
     const scope=document.getElementById('dashboardMarketScope'); if(scope) {
       scope.textContent=names[S.settings.activeMarketplace] || names.ALL;
+      /* v12.9.55: в режиме одной площадки явно говорим, что сравнение не считалось. */
+      if (!S.settings.activeMarketplace || S.settings.activeMarketplace !== 'ALL')
+        scope.textContent += ' · считается одна площадка (сравнение — кнопка «Сравнение» в шапке)';
       // Global fixed expense is spread over ALL catalogue rows; blocked/excluded
       // rows are not in the displayed totals, so their share is absent as well.
       const totalFixed=Math.max(0,num(S.tariffs && S.tariffs.fixed));
@@ -37595,6 +37690,13 @@ function missingTariffExportUnavailable(p, c) {
 /* v12.9.52: одно правило решает и что писать в XLSX/CSV, и какое значение кэшировать.
    Раньше inline-условие повторялось в четырёх местах, и «Сводка» кэшировала число
    там, где в основном листе стояла пустая ячейка (формула возвращала ""). */
+/* v12.9.55: метка площадки в именах файлов — выгрузка прогноза должна быть
+   однозначной: по какой площадке посчитана эта юнит-экономика. */
+function mpTag() {
+  const mp = String((S.settings && S.settings.activeMarketplace) || 'OZON').toUpperCase();
+  return mp === 'ALL' ? 'ALL5' : mp;
+}
+
 function exportCellUnavailable(p, field, group) {
   if (!p || !field) return false;
   const g = group || 'calc';
@@ -37991,11 +38093,11 @@ const Exp = {
         prog('CSV: сериализация чанками…'); Prog.step(10);
         const blob = await Exp.csvAsync(cat, rows, prog);
         Prog.step(92);
-        Exp.download(blob, 'UC_economics_' + new Date().toISOString().slice(0, 10) + '.csv');
+        Exp.download(blob, 'UC_economics_' + mpTag() + '_' + new Date().toISOString().slice(0, 10) + '.csv');
       } else {
         const blob = await Exp.streamXlsx(cat, rows, prog);
         Prog.step(96);
-        Exp.download(blob, 'UC_unit_economics_' + new Date().toISOString().slice(0, 10) + '.xlsx');
+        Exp.download(blob, 'UC_unit_economics_' + mpTag() + '_' + new Date().toISOString().slice(0, 10) + '.xlsx');
       }
       await Exp.snap('Экспорт ' + (isCsv ? 'CSV' : 'XLSX'), rows.length, cat.length);
       Toast.ok('Файл готов (одна книга)', `${fmt(rows.length)} строк · ${cat.length} колонок`);
@@ -43012,14 +43114,22 @@ window.setActiveMarketplace = function(mpCode) {
   mpCode=String(mpCode || 'ALL').toUpperCase();
   if (!['ALL','WB','OZON','YM','MM','AVITO'].includes(mpCode)) { Toast.warn('Площадка не поддерживается','Выберите площадку из списка.'); return; }
   S.settings.activeMarketplace = mpCode;
+  /* v12.9.55: «Сравнение» (ALL) — это все пять моделей; конкретная площадка —
+     только её экономика (быстро и без лишней памяти). */
+  S.settings.calcSelectedMpOnly = mpCode !== 'ALL';
   refreshMarketplaceControls();
   UI2.saveSettings().catch(e => Toast.warn('Выбор площадки не сохранён', String(e.message || e)));
+  Toast.info(mpCode === 'ALL' ? 'Режим сравнения' : 'Расчёт одной площадки', mpCode === 'ALL'
+    ? 'Считаются все пять моделей — пересчёт и память в разы больше.'
+    : 'Считается только ' + mpCode + '. Сравнение площадок отключено, каталог обрабатывается быстрее.');
   // Единая проекция selectedEco → месячные агрегаты находится в computeEconomics.
   // Не копируем ₽/ед. в ₽/мес. вручную при переключении вкладок.
   for (const p of S.rows) {
     if (p.dimensionAnomalyBlocked) clearAnomalyEconomics(p); else computeEconomics(p);
   }
   ABCXYZ.calc();
+  /* v12.9.55: набор колонок зависит от области расчёта — пересобираем шапку. */
+  buildCols(); Table.head();
   bumpVersion(); Dash._agg = null; applyFilter(); Table.paint();
   const cur = location.hash.slice(1) || 'dashboard';
   if (cur === 'dashboard') Dash.render(); else if (cur === 'unit') UE.render(); else if (cur === 'ozon-advisor') OzonAdvisor.render();
