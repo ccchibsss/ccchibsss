@@ -43,6 +43,14 @@
   строки источника оставались пустыми до ручного «Обогатить сейчас».
   Переключатель «Обогащать связанные строки каталога из этого файла» в мастере
   импорта, по умолчанию включён; непустые значения не меняются.
+  v12.9.54 — импорт и запись крупного каталога: убраны неиспользуемые индексы в
+  IndexedDB (запись строки больше не обновляет article/brand/category/abcClass),
+  каталог пишется порциями по 2000 строк, кэш тарифов и воркер фильтра не сбрасываются
+  чаще раза в 10 секунд (раньше сброс шёл на каждой порции и следующий же SKU
+  пересобирал индекс заново), нормализация пути категории кэшируется по строке.
+  Точечный пересчёт после импорта и автосверки ОВХ пропускает неизменённые строки
+  целиком (на 217 000 SKU это сотни секунд), группы OE после подстановки ОВХ не
+  пересобираются. В журнал добавлены тайминги записи по этапам и размер heap.
   v12.9.53 — безубыток и рекомендуемая цена в калькуляторе Ozon считаются с учётом
   сегмента cap: сначала цена находится по текущему сегменту, затем флаги «нестандарт, %»
   и процентной сдачи ПВЗ пересчитываются на найденной цене и цена уточняется (закрытая
@@ -13386,7 +13394,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.53-client+audit.1';
+const APP_VERSION = '12.9.54-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13789,6 +13797,33 @@ db.version(3).upgrade(() => {});
    (и «воскрешать» удалённые SKU) в принципе нечего. */
 db.version(4).stores({ products_stage: '++id' });
 db.version(4).upgrade(() => {});
+/* v12.9.54 · СКОРОСТЬ ЗАПИСИ. Приложение нигде не выбирает товары по вторичным
+   индексам: чтение идёт по первичному ключу (bulkGet) или полным перебором
+   (toCollection). При этом каждая запись строки обновляла четыре индекса
+   (article, brand, category, abcClass). На 217 000 SKU это десятки мегабайт
+   лишних ключей и заметная доля времени записи каталога. */
+db.version(6).stores({
+  products: '++id',
+  products_stage: '++id',
+  meta: 'key',
+  imports: '++id, name, date',
+  tariffs: '++id, scope',
+  cats: '++id, name',
+  rules: '++id',
+  excs: '++id',
+  sups: '++id, name',
+  orders: '++id, po',
+  hist: '++id, ts, action',
+  snaps: '++id, name',
+  mprof: '++id, name',
+  eprof: '++id, name',
+  pnl: '++id, period',
+  hvcOe: '++id, &oeNorm',
+  hvcParts: '++id, &key',
+  hvcCross: '++id, &key',
+  hvcPrices: '++id, &key'
+});
+db.version(6).upgrade(() => {});
 
 /* ------------------------------- 2. КОНСТАНТЫ --------------------------- */
 const STD = [
@@ -17937,7 +17972,7 @@ const StorageCtl = {
       await db.meta.delete('incomplete');
     });
     this.acceptCatalog(committedCatalog);
-    S._cacheLastWrite = { mode: 'chunked', count: rowCount, written, deleted, partial: onlyChanged };
+    S._cacheLastWrite = { mode: 'chunked', count: rowCount, written, deleted, partial: onlyChanged, bytes: (S._cacheLastWrite && S._cacheLastWrite.bytes) || 0 };
   },
   jsonLine(row) {
     return JSON.stringify(row, function(key, value) {
@@ -18447,7 +18482,21 @@ function parseOfficialTariffDate(...parts) {
   if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return '';
   return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
+const _normPathCache = new Map();
+/* v12.9.54 · КЭШ НОРМАЛИЗАЦИИ. Путь категории — одна и та же строка у тысяч SKU,
+   а нормализация (NFKC + четыре регулярных выражения + toLocaleLowerCase)
+   занимала заметную долю пересчёта: tariffFor спрашивает кандидатов по каждой
+   строке. Функция чистая, поэтому кэш по исходной строке безопасен. */
 function normTariffPath(value) {
+  const src = String(value == null ? '' : value);
+  const hit = _normPathCache.get(src);
+  if (hit !== undefined) return hit;
+  const out = normTariffPathUncached(src);
+  if (_normPathCache.size >= 20000) _normPathCache.clear();
+  _normPathCache.set(src, out);
+  return out;
+}
+function normTariffPathUncached(value) {
   let text = String(value == null ? '' : value).normalize('NFKC').replace(/[\u00a0\u2007\u202f]/g, ' ').trim();
   if (!text) return '';
   text = text.replace(/[›→|/\\]+/g, '>').replace(/\s+[–—-]\s+/g, '>').replace(/\s*>\s*/g, '>');
@@ -19620,12 +19669,23 @@ const MemGuard = {
     this.relief(level, stage);
     return level;
   },
+  RELIEF_MIN_MS: 10000,   /* v12.9.54: минимальный интервал между разрушительными сбросами */
   relief(level, stage) {
     if (level <= this.level && level === 1) return;      /* мягкий — один раз до сброса уровня */
+    /* v12.9.54 · ЧАСТОТА СБРОСА. check() вызывается на каждой порции пересчёта и
+       записи. Сбрасывать кэш тарифов и воркер чаще, чем раз в 10 секунд,
+       бессмысленно: кэши уже пусты, а следующий же SKU пересобирает их заново.
+       На 200 000 строк это тысячи лишних пересборок индекса тарифов и
+       постоянные перезапуски воркера фильтра. Уровень 1 → 2 повышается всегда. */
+    const _reliefNow = Date.now();
+    if (this._lastActionAt && level <= this.level && (_reliefNow - this._lastActionAt) < this.RELIEF_MIN_MS) {
+      this._quiet = (this._quiet || 0) + 1;
+      return;
+    }
     const freed = [];
     try { clearTariffLookupCache(); freed.push('тарифы'); } catch (e) { }
     if (level >= 2) {
-      try { FWorker.release(); freed.push('воркер'); } catch (e) { }
+      try { if (!S._pipeActive) { FWorker.release(); freed.push('воркер'); } } catch (e) { }
       try { S.view = []; S.viewVer = -1; freed.push('срез таблицы'); } catch (e) { }
       try { if (S.pending && S.pending.body) { S.pending.body.length = 0; freed.push('файл импорта'); } } catch (e) { }
       try {
@@ -19636,6 +19696,7 @@ const MemGuard = {
       try { if (typeof MarkStatus !== 'undefined' && MarkStatus.unknown && MarkStatus.unknown.size > 5000) MarkStatus.unknown.clear(); } catch (e) { }
     }
     this.level = level;
+    this._lastActionAt = _reliefNow;
     /* v12.9.47: сброс памяти повторяется на каждой порции пересчёта — писать в
        консоль каждый раз бессмысленно и мешает читать журнал импорта. Сообщение
        выводится при изменении доли heap на 5 п.п. или раз в 30 секунд. */
@@ -20790,6 +20851,9 @@ function tariffFor(p, ignoreOffer) {
 const _pipelineYield = () => new Promise(r => setTimeout(r, 0));
 function runPipeline(full, options) {
   options = options || {};
+  /* v12.9.54: пока пайплайн идёт, воркер фильтра не освобождаем — иначе к концу
+     прохода каталог заново копируется в новый воркер целиком. */
+  S._pipeActive = (S._pipeActive || 0) + 1;
   if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.loadLocal();
   const shouldPersist = options.persist !== false;
   /* v12.9.7-mem: необязательный набор изменённых строк (WeakSet) — тяжёлая
@@ -20819,16 +20883,24 @@ function runPipeline(full, options) {
     /* v12.9.46: чанк меньше — прогресс и отрисовка обновляются чаще; на 94k SKU
        вкладка больше не выглядит зависшей на одном сообщении. */
     const CHUNK = Math.max(200, Math.min(3000, num(CONST.PIPE_CHUNK) || 600));
+    /* v12.9.54 · ДЕЛЬТА. Когда набор изменённых строк известен (импорт, автосверка
+       ОВХ), неизменённые строки не нужно ни нормализовать, ни упаковывать: их
+       поля посчитаны прошлыми проходами. Раньше такой «точечный» пересчёт всё
+       равно перебирал весь каталог — на 217 000 SKU это сотни секунд. */
+    const deltaFast = !!(changedRows && options.smallDelta === true);
     const total = S.rows.length;
     /* Группировка OE выполняется ДО обогащения и НЕ зависит от графа HVC:
        объединяем OE строк одной СВЯЗКИ Артикул+Бренд прямо из каталога. */
-    if (!preserveView && typeof HVC !== 'undefined') { try { HVC.groupOeByKeyFromRows(); } catch (e) { console.warn('[UC] groupOeByKey:', e); } }
+    /* v12.9.54: при точечной подстановке ОВХ ключи артикул+бренд и OE-номера не
+       меняются, поэтому пересборка OE-групп по всему каталогу не нужна. */
+    if (!preserveView && !(deltaFast && options.skipGroups) && typeof HVC !== 'undefined') { try { HVC.groupOeByKeyFromRows(); } catch (e) { console.warn('[UC] groupOeByKey:', e); } }
     for (let start = 0; start < total; start += CHUNK) {
       const end = Math.min(start + CHUNK, total);
       if (prog) prog(`расчёт SKU ${fmt(start + 1)}–${fmt(end)} из ${fmt(total)}`);
       _step(5 + (start / Math.max(total, 1)) * 70);
       for (let idx = start; idx < end; idx++) {
         const p = S.rows[idx];
+        if (deltaFast && !changedRows.has(p)) continue;
         try {
           /* Только дешёвая нормализация ключевых колонок. Тяжёлое HVC-обогащение
              выполняется один раз после импорта или по кнопке «Обогатить сейчас»,
@@ -20925,10 +20997,16 @@ function runPipeline(full, options) {
       if (typeof MemGuard !== 'undefined') MemGuard.check('пересчёт каталога');
       await _pipelineYield();
       /* компактная упаковка чанка: пик памяти ограничен одним чанком */
-      for (let i = start; i < end; i++) { const old = S.rows[i], compact = compactRowNumeric(internRowStrings(old)); if (old !== compact && changedRows && changedRows.has(old)) compactReplacement.set(old, compact); S.rows[i] = compact; }
+      for (let i = start; i < end; i++) {
+        const old = S.rows[i];
+        if (deltaFast && !changedRows.has(old)) continue;
+        const compact = compactRowNumeric(internRowStrings(old));
+        if (old !== compact && changedRows && changedRows.has(old)) compactReplacement.set(old, compact);
+        S.rows[i] = compact;
+      }
     }
     if (prog) prog('группировка по OE-номерам…'); _step(80);
-    if (!preserveView && !options.smallDelta) { try { await rebuildGroups(); } catch (e) { console.error('[UC] OE-группы:', e); Toast.err('Ошибка группировки OE', String(e.message || e).slice(0, 160)); } }
+    if (!preserveView && !options.smallDelta && !options.skipGroups) { try { await rebuildGroups(); } catch (e) { console.error('[UC] OE-группы:', e); Toast.err('Ошибка группировки OE', String(e.message || e).slice(0, 160)); } }
     await _pipelineYield();
     if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.finishQuarantine();
     if (prog) prog('расчёт ABC/XYZ…'); _step(87);
@@ -20974,7 +21052,10 @@ function runPipeline(full, options) {
     else if (options.showProgress === false) job = execute(() => {});
     else job = withProgress('Пайплайн данных', 'фильтры → категоризация → правила → экономика', execute);
   } catch (e) { RecommendedPriceScenario.pipelineEnd(); throw e; }
-  return Promise.resolve(job).finally(() => RecommendedPriceScenario.pipelineEnd());
+  return Promise.resolve(job).finally(() => {
+    RecommendedPriceScenario.pipelineEnd();
+    S._pipeActive = Math.max(0, (S._pipeActive || 1) - 1);
+  });
 }
 
 /* v12.9.6-mem: нехватка памяти не должна оставлять пустую вкладку без объяснения.
@@ -21803,9 +21884,13 @@ async function _persistNowImpl(changedList) {
      для IndexedDB). Перед ним освобождаем кэши/копии, если heap уже высокий. */
   try { if (typeof MemGuard !== 'undefined') MemGuard.check('сохранение каталога'); } catch (e) { }
     /* v12.9.46: чанк записи меньше — транзакция не растягивается на минуты и не
-       обрывается AbortError на больших каталогах. */
-    const CH = 1000;
+       обрывается AbortError на больших каталогах.
+       v12.9.54: 2000 строк на транзакцию — вдвое меньше фиксаций IndexedDB на
+       каталоге в сотни тысяч строк. Обрыв по-прежнему стоит одной порции: повтор
+       идёт порциями по 300 строк. */
+    const CH = 2000;
     const _tPersist = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    let _tWriteDone = _tPersist;
   /* v12.9.49: категории/правила и реестры Каталога V сохраняются ОТДЕЛЬНО и
      независимо от записи товаров. Раньше это происходило только после удачной
      записи каталога: если запись обрывалась, загруженный справочник
@@ -21827,7 +21912,16 @@ async function _persistNowImpl(changedList) {
       console.warn('[UC] categories/rules save:', e);
       Toast.err('Категории или правила не сохранены', 'Предыдущая запись не заменена. Проверьте место и сделайте экспорт; изменения остаются в памяти.');
     }
-    try { await HVC.save(); } catch (e) { console.warn('[UC] HVC save:', e); }
+    try {
+      /* v12.9.54: реестры Каталога V пишутся отдельной транзакцией и на большом
+         OE-графе занимают секунды — показываем это в журнале, чтобы было видно
+         вклад в общее время сохранения. */
+      const _tHvc = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      await HVC.save();
+      const _hvcMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _tHvc);
+      if (_hvcMs >= 1000) console.info('[UC] реестры Каталога V сохранены за ' + _hvcMs + ' мс');
+      if (typeof S !== 'undefined') S._lastHvcSaveMs = _hvcMs;
+    } catch (e) { console.warn('[UC] HVC save:', e); }
     StorageCtl.refresh();
   });
   /* v12.9.6-mem: строки каталога материализуются ПО ЧАНКАМ. Полный второй массив
@@ -21965,6 +22059,7 @@ async function _persistNowImpl(changedList) {
       });
       StorageCtl.acceptCatalog(committedCatalog);
     }
+    _tWriteDone = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     S.settings.lastPersistError = ''; S._cacheWriteError = '';
     if (S._volatileStorage) {
       S._cacheWriteError = 'IndexedDB недоступен: данные только в памяти вкладки';
@@ -21988,7 +22083,10 @@ async function _persistNowImpl(changedList) {
   try {
     console.info('[UC] запись каталога: ' + fmt(S.rows.length) + ' SKU · ' +
       Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _tPersist) + ' мс · режим ' + StorageCtl.mode() +
-      (S._cacheLastWrite ? ' · записано ' + fmt(S._cacheLastWrite.written || 0) : ''));
+      (S._cacheLastWrite ? ' · записано ' + fmt(S._cacheLastWrite.written || 0) : '') +
+      ' · каталог ' + Math.round(_tWriteDone - _tPersist) + ' мс · служебные таблицы ' +
+      Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _tWriteDone) + ' мс' +
+      (S._cacheLastWrite && S._cacheLastWrite.bytes ? ' · ' + (Math.round(S._cacheLastWrite.bytes / 1048576)) + ' МБ' : ''));
   } catch (e) { }
   StorageCtl.refresh(); return true;
 }
@@ -26235,7 +26333,10 @@ const Import = {
         .sort((a, b) => b[1] - a[1])
         .map(([k, ms]) => k + ' ' + (ms >= 1000 ? (ms / 1000).toFixed(1).replace('.', ',') + ' с' : Math.round(ms) + ' мс'))
         .join(' · ');
-      console.info('[UC] импорт: ' + fmt(_stageTotal) + ' мс всего' + (_stageText ? ' · ' + _stageText : ''));
+      console.info('[UC] импорт: ' + fmt(_stageTotal) + ' мс всего' + (_stageText ? ' · ' + _stageText : '') +
+        ' · кэш ' + Math.round(performance.memory ? performance.memory.usedJSHeapSize / 1048576 : 0) + ' МБ' +
+        (performance.memory && performance.memory.jsHeapSizeLimit ? ' (' + Math.round(100 * performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit) + '%)' : '') +
+        ' · на SKU ' + Math.round((performance.memory ? performance.memory.usedJSHeapSize : 0) / Math.max(1, S.rows.length) / 1024) + ' КБ');
       Toast[S._cacheWriteError || S._volatileStorage ? 'warn' : 'ok'](S._cacheWriteError || S._volatileStorage ? 'Импорт в памяти — сохранение не завершено' : 'Импорт завершён', `новых ${fmt(added)} · обновлено ${fmt(updated)} · пропущено ${fmt(skipped)} · колонок ${enabled.length}` +
         (mergedByArticle ? ` · сопоставлено по артикулу (без бренда в файле): ${fmt(mergedByArticle)}` : '') +
         (dedup ? ` · объединено дублей: ${fmt(dedup)}` : '') + ` · всего SKU: ${fmt(S.rows.length)}` +
@@ -41185,7 +41286,9 @@ const AnomalyOE = {
          импорта остальные строки уже пересчитаны; записываем лишь изменения,
          даже когда их больше прежнего двухпроцентного порога. */
       const small=changed.length<S.rows.length;
-      const opts={changedRows:new WeakSet(changed),smallDelta:small,persistChangedOnly:small,changedList:changed};
+      /* v12.9.54: меняются только весогабариты — ключи артикул+бренд и OE-группы не
+         зависят от ОВХ, пересобирать их на 200 000 строк незачем. */
+      const opts={changedRows:new WeakSet(changed),smallDelta:small,persistChangedOnly:small,changedList:changed,skipGroups:true};
       if(typeof options.onProgress==='function') opts.onProgress=options.onProgress;
       try { await runPipeline(true,opts); }
       catch(e) {
