@@ -43,6 +43,14 @@
   строки источника оставались пустыми до ручного «Обогатить сейчас».
   Переключатель «Обогащать связанные строки каталога из этого файла» в мастере
   импорта, по умолчанию включён; непустые значения не меняются.
+  v12.9.53 — безубыток и рекомендуемая цена в калькуляторе Ozon считаются с учётом
+  сегмента cap: сначала цена находится по текущему сегменту, затем флаги «нестандарт, %»
+  и процентной сдачи ПВЗ пересчитываются на найденной цене и цена уточняется (закрытая
+  форма была линейной и завышала рекомендацию до 0,5 % там, где cap срабатывает выше
+  текущей цены). Добавлены колонки 1-го прохода и сегментные доли/фиксированные части.
+  «Спецтариф FBS» и «Штрафы» больше не попадают в выгрузку чужой площадки — они
+  считаются из полей Яндекс Маркета (раньше оставались нулями без формулы), сводная
+  колонка логистики Ozon названа «итого (магистраль + выдача)».
   v12.9.52 — аудит формул выгрузок Excel/CSV: округление приведено к семантике
   Excel (половина от нуля, «грязное» произведение 31363.499999999996 больше не даёт
   −313.63 против −313.64 в формуле ROUND); «Наценка к закупке» и топ-10 в «Сводке»
@@ -13378,7 +13386,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.52-client+audit.1';
+const APP_VERSION = '12.9.53-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -31192,6 +31200,12 @@ const OzonExport = {
       ['netUnit','Чистая прибыль/ед, ₽ — формула',22],['margin','Маржа, % — формула',18],
       ['beApp','Безубыточность, ₽ — формула',22],
       ['targetApp','Рекомендуемая цена, ₽ — формула',23],
+      ['beFirst','Безубыточность, ₽ — 1-й проход (текущий сегмент)',26],
+      ['tgtFirst','Рекомендуемая цена, ₽ — 1-й проход (текущий сегмент)',28],
+      ['rateBe','Перем. расходы на цене безубытка, доля — формула',26],
+      ['fixedBe','Фикс. часть на цене безубытка, ₽ — формула',26],
+      ['rateTgt','Перем. расходы на рекомендованной цене, доля — формула',28],
+      ['fixedTgt','Фикс. часть на рекомендованной цене, ₽ — формула',26],
       ['solverBe','Безубыточность, ₽ — решатель приложения',24],
       ['solverTarget','Рекомендуемая цена, ₽ — решатель приложения',26],
       ['solverDiff','Δ рекомендуемой цены (формула − решатель), ₽',26],
@@ -31307,39 +31321,48 @@ const OzonExport = {
       const hvUnits = Math.max(1, keepZero(S.settings.ozonFbsUnitsPerShipment, 1));
       const hvPct = Math.max(0, keepZero(S.settings.ozonPvzPct, 2));
       const hvCapPerUnit = Math.max(0, keepZero(S.settings.ozonPvzCapRub, 45)) / hvUnits;
-      const nonStdVariable = `AND(${ref('nonStdPct')}>0,${ref('nonStdRub')}<${ref('nonStdCap')})`;
-      const nonStdCapped = `AND(${ref('nonStdPct')}>0,${ref('nonStdRub')}>=${ref('nonStdCap')})`;
-      const variableRate = `((${['commissionPct','transferPct','adsPct','cofinPct','lateShipPct'].map(k => ref(k)).join('+')}` +
-        `+IF(${nonStdVariable},${ref('nonStdPct')},0)` +
-        (handoverVariable ? `+IF(${ref('handover')}<${hvCapPerUnit},${hvPct},0)` : '') + `)/100)`;
-      const fixedPart = `(${['cost','logistics','lastMile','pack','transitPack','storage','returns','returnStorage','other'].map(k => ref(k)).join('+')}` +
-        `+${fixedPerUnit}+IF(${nonStdCapped},${ref('nonStdCap')},0)+` +
-        (handoverVariable ? `IF(${ref('handover')}>=${hvCapPerUnit},${hvCapPerUnit},0)` : ref('handover')) + `)`;
+      /* Флаги сегмента cap на текущей цене (колонка nonStdRub/сдача уже посчитаны
+         по текущей цене). */
+      const nonStdVarNow = `AND(${ref('nonStdPct')}>0,${ref('nonStdRub')}<${ref('nonStdCap')})`;
+      const nonStdCapNow = `AND(${ref('nonStdPct')}>0,${ref('nonStdRub')}>=${ref('nonStdCap')})`;
+      const hvVarNow = handoverVariable ? `(${ref('handover')}<${hvCapPerUnit})` : '';
+      const hvCapNow = handoverVariable ? `(${ref('handover')}>=${hvCapPerUnit})` : '';
+      /* Те же флаги, но на произвольной цене P. Пустая P (первый проход не сошёлся)
+         означает текущий сегмент — формулы остаются числовыми. */
+      const nonStdValAt = P => `IF(${P}="",${ref('nonStdRub')},${P}*${ref('nonStdPct')}/100)`;
+      const hvValAt = P => `IF(${P}="",${ref('handover')},${P}*${hvPct}/100)`;
+      const nonStdVarAt = P => `AND(${ref('nonStdPct')}>0,${nonStdValAt(P)}<${ref('nonStdCap')})`;
+      const nonStdCapAt = P => `AND(${ref('nonStdPct')}>0,${nonStdValAt(P)}>=${ref('nonStdCap')})`;
+      const hvVarAt = P => `(${hvValAt(P)}<${hvCapPerUnit})`;
+      const hvCapAt = P => `(${hvValAt(P)}>=${hvCapPerUnit})`;
       const vat5 = '5/105', vat7 = '7/107', vat22 = '22/122';
-      const incomeTaxRate = `IF(${regime}="usn_income_6",6/100,` +
-        `IF(OR(${regime}="usn_income_vat_5",${regime}="usn_income_7",${regime}="usn_income_vat_7"),` +
-          `IF(${regime}="usn_income_vat_5",${vat5}+(1-${vat5})*6/100,${vat7}+(1-${vat7})*6/100),` +
-        `IF(${regime}="self_employed_4",4/100,IF(${regime}="self_employed_6",6/100,${customPct}/100))))`;
-      const osnoCondition = `OR(${regime}="osno_20",${regime}="osno_22")`;
-      const expenseNoVat = `OR(${regime}="usn_income_expense_15",${regime}="custom_profit")`;
-      const rateFormula = `IF(${expenseNoVat},${variableRate},` +
-        `IF(${regime}="usn_income_expense_vat_5",${variableRate}+${vat5},` +
-        `IF(${regime}="usn_income_expense_vat_7",${variableRate}+${vat7},` +
-        `IF(${osnoCondition},${variableRate}+${vat22}-${vat22}*${ref('osnoShare')}/100*${variableRate},${variableRate}+${incomeTaxRate}))))`;
-      const fixedFormula = `IF(${osnoCondition},${fixedPart}*(1-${vat22}*${ref('osnoShare')}/100),${fixedPart})`;
-      const profitRateFormula = `IF(OR(${regime}="usn_income_expense_15",${regime}="usn_income_expense_vat_5",${regime}="usn_income_expense_vat_7"),15/100,` +
-        `IF(${osnoCondition},25/100,IF(${regime}="custom_profit",${customPct}/100,0)))`;
+      const incomeTaxRate = `IF(${regime}=\"usn_income_6\",6/100,` +
+        `IF(OR(${regime}=\"usn_income_vat_5\",${regime}=\"usn_income_7\",${regime}=\"usn_income_vat_7\"),` +
+          `IF(${regime}=\"usn_income_vat_5\",${vat5}+(1-${vat5})*6/100,${vat7}+(1-${vat7})*6/100),` +
+        `IF(${regime}=\"self_employed_4\",4/100,IF(${regime}=\"self_employed_6\",6/100,${customPct}/100))))`;
+      const osnoCondition = `OR(${regime}=\"osno_20\",${regime}=\"osno_22\")`;
+      const expenseNoVat = `OR(${regime}=\"usn_income_expense_15\",${regime}=\"custom_profit\")`;
+      /* Сборка «переменная доля цены» и «фиксированная часть» для заданного набора
+         флагов сегмента: одни и те же формулы используются и для текущего сегмента,
+         и для сегмента, в который попадает найденная цена. */
+      const variableRateOf = (nv, hv) => `((${['commissionPct','transferPct','adsPct','cofinPct','lateShipPct'].map(k => ref(k)).join('+')}` +
+        `+IF(${nv},${ref('nonStdPct')},0)` +
+        (handoverVariable ? `+IF(${hv},${hvPct},0)` : '') + `)/100)`;
+      const fixedPartOf = (nc, hc) => `(${['cost','logistics','lastMile','pack','transitPack','storage','returns','returnStorage','other'].map(k => ref(k)).join('+')}` +
+        `+${fixedPerUnit}+IF(${nc},${ref('nonStdCap')},0)+` +
+        (handoverVariable ? `IF(${hc},${hvCapPerUnit},0)` : ref('handover')) + `)`;
+      const rateOf = v => `IF(${expenseNoVat},${v},` +
+        `IF(${regime}=\"usn_income_expense_vat_5\",${v}+${vat5},` +
+        `IF(${regime}=\"usn_income_expense_vat_7\",${v}+${vat7},` +
+        `IF(${osnoCondition},${v}+${vat22}-${vat22}*${ref('osnoShare')}/100*${v},${v}+${incomeTaxRate}))))`;
+      const fixedOf = f => `IF(${osnoCondition},${f}*(1-${vat22}*${ref('osnoShare')}/100),${f})`;
+      const profitRateFormula = `IF(OR(${regime}=\"usn_income_expense_15\",${regime}=\"usn_income_expense_vat_5\",${regime}=\"usn_income_expense_vat_7\"),15/100,` +
+        `IF(${osnoCondition},25/100,IF(${regime}=\"custom_profit\",${customPct}/100,0)))`;
 
-      const nonStdIsVariable = values.nonStdPct > 0 && num(values.nonStdRub) < num(values.nonStdCap);
-      const nonStdIsCapped = values.nonStdPct > 0 && num(values.nonStdRub) >= num(values.nonStdCap);
-      const handoverIsVariable = handoverVariable && num(values.handover) < hvCapPerUnit;
-      let rateValue = (num(values.commissionPct) + num(values.transferPct) + num(values.adsPct) + num(values.cofinPct) + num(values.lateShipPct) +
-        (nonStdIsVariable ? num(values.nonStdPct) : 0) + (handoverIsVariable ? hvPct : 0)) / 100;
-      let fixedValue = ['cost','logistics','lastMile','pack','transitPack','storage','returns','returnStorage','other']
-        .reduce((sum,k) => sum + num(values[k]), 0) + (sales > 0 ? fixedMonth / sales : fixedMonth) +
-        (nonStdIsCapped ? num(values.nonStdCap) : 0) + (handoverVariable ? (num(values.handover) >= hvCapPerUnit ? hvCapPerUnit : 0) : num(values.handover));
+      /* Значения (JS) по тем же правилам. */
       const currentTaxRegime = String(values.taxRegime || '');
       const isOsno = currentTaxRegime === 'osno_20' || currentTaxRegime === 'osno_22';
+      const osnoSharePct = num(values.osnoShare);
       let incomeRateValue = num(values.customTaxPct) / 100;
       if (currentTaxRegime === 'usn_income_6') incomeRateValue = 0.06;
       else if (currentTaxRegime === 'usn_income_vat_5') incomeRateValue = 5/105 + (1-5/105)*0.06;
@@ -31350,23 +31373,68 @@ const OzonExport = {
       if (['usn_income_expense_15','usn_income_expense_vat_5','usn_income_expense_vat_7'].includes(currentTaxRegime)) profitRateValue = 0.15;
       else if (isOsno) profitRateValue = 0.25;
       else if (currentTaxRegime === 'custom_profit') profitRateValue = num(values.customTaxPct) / 100;
-      if (currentTaxRegime === 'usn_income_expense_vat_5') rateValue += 5/105;
-      else if (currentTaxRegime === 'usn_income_expense_vat_7') rateValue += 7/107;
-      else if (isOsno) {
-        rateValue += 22/122 - (22/122) * num(values.osnoShare) / 100 * rateValue;
-        fixedValue *= 1 - (22/122) * num(values.osnoShare) / 100;
-      } else if (!['usn_income_expense_15','custom_profit'].includes(currentTaxRegime)) rateValue += incomeRateValue;
-      const beDenominator = 1 - rateValue;
-      const beValue = beDenominator > 0 && Number.isFinite(fixedValue / beDenominator) ? Math.max(0, Math.ceil(fixedValue / beDenominator)) : '';
-      const targetDenominator = (1-profitRateValue) * (1-rateValue) - num(values.targetMarginPct) / 100;
-      const targetValue = beValue === '' || targetDenominator <= 0 ? '' : Math.max(beValue,
-        Math.ceil((1-profitRateValue) * fixedValue / targetDenominator));
-      setFormula('priceRate', rateFormula, rateValue);
-      setFormula('priceFixed', fixedFormula, fixedValue);
+      const baseFixed = ['cost','logistics','lastMile','pack','transitPack','storage','returns','returnStorage','other']
+        .reduce((sum,k) => sum + num(values[k]), 0) + (sales > 0 ? fixedMonth / sales : fixedMonth);
+      const rateNum = (nv, hv) => {
+        let r = (num(values.commissionPct) + num(values.transferPct) + num(values.adsPct) + num(values.cofinPct) + num(values.lateShipPct)
+          + (nv ? num(values.nonStdPct) : 0) + (hv ? hvPct : 0)) / 100;
+        if (currentTaxRegime === 'usn_income_expense_vat_5') r += 5/105;
+        else if (currentTaxRegime === 'usn_income_expense_vat_7') r += 7/107;
+        else if (isOsno) r += 22/122 - (22/122) * osnoSharePct / 100 * r;
+        else if (!['usn_income_expense_15','custom_profit'].includes(currentTaxRegime)) r += incomeRateValue;
+        return r;
+      };
+      const fixedNum = (nc, hc) => {
+        let F = baseFixed + (nc ? num(values.nonStdCap) : 0) +
+          (handoverVariable ? (hc ? hvCapPerUnit : 0) : num(values.handover));
+        if (isOsno) F *= 1 - (22/122) * osnoSharePct / 100;
+        return F;
+      };
+      /* Сегмент cap на цене P: при пустой P — текущий сегмент. */
+      const segAt = P => {
+        const nonStdPct = num(values.nonStdPct), cap = num(values.nonStdCap);
+        const at = P === '' || !Number.isFinite(Number(P)) ? null : Number(P);
+        const nonStdNow = at == null ? num(values.nonStdRub) : at * nonStdPct / 100;
+        const hvNow = at == null ? num(values.handover) : at * hvPct / 100;
+        const nv = nonStdPct > 0 && nonStdNow < cap;
+        const hv = handoverVariable && hvNow < hvCapPerUnit;
+        return { nv, hv, nc: nonStdPct > 0 && !nv, hc: handoverVariable && !hv };
+      };
+      const marginPct = num(values.targetMarginPct) / 100;
+      const beFrom = (rate, fixed) => (1 - rate) > 0 && Number.isFinite(fixed / (1 - rate)) && fixed >= 0
+        ? Math.max(0, Math.ceil(fixed / (1 - rate))) : '';
+      const tgtFrom = (be, rate, fixed) => {
+        const den = (1 - profitRateValue) * (1 - rate) - marginPct;
+        return be === '' || den <= 0 ? '' : Math.max(be, Math.ceil((1 - profitRateValue) * fixed / den));
+      };
+      const seg1 = segAt('');
+      const rate1 = rateNum(seg1.nv, seg1.hv), fixed1 = fixedNum(seg1.nc, seg1.hc);
+      /* Первый проход — по текущему сегменту (как в v12.9.52 и раньше). */
+      const beFirst = beFrom(rate1, fixed1);
+      const tgtFirst = tgtFrom(beFirst, rate1, fixed1);
+      /* Второй проход — флаги cap пересчитываются на найденной цене. Функция прибыли
+         выпукла и монотонна, поэтому одного шага достаточно: если цена перешла в
+         сегмент с cap, её линейная формула меняется именно на этом сегменте. */
+      const segBe = segAt(beFirst);
+      const rateBe = rateNum(segBe.nv, segBe.hv), fixedBe = fixedNum(segBe.nc, segBe.hc);
+      const beValue = beFrom(rateBe, fixedBe);
+      const segTgt = segAt(tgtFirst);
+      const rateTgt = rateNum(segTgt.nv, segTgt.hv), fixedTgt = fixedNum(segTgt.nc, segTgt.hc);
+      const targetValue = tgtFrom(beValue, rateTgt, fixedTgt);
+
+      setFormula('priceRate', rateOf(variableRateOf(nonStdVarNow, hvVarNow)), rate1);
+      setFormula('priceFixed', fixedOf(fixedPartOf(nonStdCapNow, hvCapNow)), fixed1);
       setFormula('profitTaxRate', profitRateFormula, profitRateValue);
-      setFormula('beApp', `IF(OR(${ref('priceRate')}>=1,${ref('priceFixed')}<0),"",MAX(0,ROUNDUP(${ref('priceFixed')}/(1-${ref('priceRate')}),0)))`, beValue);
-      setFormula('targetApp', `IF(${ref('beApp')}="","",IF((1-${ref('profitTaxRate')})*(1-${ref('priceRate')})-${ref('targetMarginPct')}/100<=0,"",` +
-        `MAX(${ref('beApp')},ROUNDUP((1-${ref('profitTaxRate')})*${ref('priceFixed')}/((1-${ref('profitTaxRate')})*(1-${ref('priceRate')})-${ref('targetMarginPct')}/100),0))))`, targetValue);
+      setFormula('beFirst', `IF(OR(${ref('priceRate')}>=1,${ref('priceFixed')}<0),"",MAX(0,ROUNDUP(${ref('priceFixed')}/(1-${ref('priceRate')}),0)))`, beFirst);
+      setFormula('tgtFirst', `IF(${ref('beFirst')}="","",IF((1-${ref('profitTaxRate')})*(1-${ref('priceRate')})-${ref('targetMarginPct')}/100<=0,"",` +
+        `MAX(${ref('beFirst')},ROUNDUP((1-${ref('profitTaxRate')})*${ref('priceFixed')}/((1-${ref('profitTaxRate')})*(1-${ref('priceRate')})-${ref('targetMarginPct')}/100),0))))`, tgtFirst);
+      setFormula('rateBe', rateOf(variableRateOf(nonStdVarAt(ref('beFirst')), hvVarAt(ref('beFirst')))), rateBe);
+      setFormula('fixedBe', fixedOf(fixedPartOf(nonStdCapAt(ref('beFirst')), hvCapAt(ref('beFirst')))), fixedBe);
+      setFormula('beApp', `IF(OR(${ref('rateBe')}>=1,${ref('fixedBe')}<0),"",MAX(0,ROUNDUP(${ref('fixedBe')}/(1-${ref('rateBe')}),0)))`, beValue);
+      setFormula('rateTgt', rateOf(variableRateOf(nonStdVarAt(ref('tgtFirst')), hvVarAt(ref('tgtFirst')))), rateTgt);
+      setFormula('fixedTgt', fixedOf(fixedPartOf(nonStdCapAt(ref('tgtFirst')), hvCapAt(ref('tgtFirst')))), fixedTgt);
+      setFormula('targetApp', `IF(${ref('beApp')}="","",IF((1-${ref('profitTaxRate')})*(1-${ref('rateTgt')})-${ref('targetMarginPct')}/100<=0,"",` +
+        `MAX(${ref('beApp')},ROUNDUP((1-${ref('profitTaxRate')})*${ref('fixedTgt')}/((1-${ref('profitTaxRate')})*(1-${ref('rateTgt')})-${ref('targetMarginPct')}/100),0))))`, targetValue);
       /* Сверка «формула ↔ решатель приложения» прямо в файле: решатель ищет цену
          целочисленно по прибыли, формула линейна по доле цены — расхождение в 1–2 ₽
          это округление, а не ошибка модели. */
@@ -31377,7 +31445,7 @@ const OzonExport = {
       if (i > 0 && i % 500 === 0) { if (prog) prog(`Ozon калькулятор: ${fmt(i + 1)} из ${fmt(rows.length)} SKU…`); await Exp._yield(); }
     }
     const inputFrom = XLSX.utils.encode_col(pos.price), inputTo = XLSX.utils.encode_col(pos.osnoShare);
-    const formulaFrom = XLSX.utils.encode_col(pos.commissionRub), formulaTo = XLSX.utils.encode_col(pos.targetApp), targetMarginCol = XLSX.utils.encode_col(pos.targetMarginPct);
+    const formulaFrom = XLSX.utils.encode_col(pos.commissionRub), formulaTo = XLSX.utils.encode_col(pos.profitTaxRate), targetMarginCol = XLSX.utils.encode_col(pos.targetMarginPct);
     const instructions = [
       ['Ozon — редактируемый калькулятор юнит-экономики'],
       ['Как пользоваться', `Изменяйте исходные значения в колонках ${inputFrom}:${inputTo} и целевую маржу в ${targetMarginCol}; результаты в ${formulaFrom}:${formulaTo} пересчитываются формулами Excel.`],
@@ -37104,8 +37172,13 @@ function exportMarketplaceOf(c) {
   return '';
 }
 const YM_EXPORT_ONLY_FIELDS = new Set(['returnLogK','returnPerKg','returnFixed','returnStorageDays','returnStoragePerDay','slaPenaltyPerUnit','tariffLastMileP','tariffCategoryPath','tariffSource','tariffQuality','tariffQuoteAgeDays','tariffQuoteReasons']);
+/* Колонки, которые считаются из полей Яндекс Маркета: «Спецтариф FBS» опирается
+   на cheapFbsFlag, «Штрафы» — на slaPenaltyPerUnit. В выгрузке другой площадки
+   эти поля не экспортируются, поэтому формула не строилась и в ячейке оставалась
+   константа 0. Правильнее не показывать такую колонку вовсе. */
+const YM_ONLY_EXPORT_FIELDS = new Set(['specialFee','penalties']);
 function exportColumnExcluded(c, activeMps) {
-  const mp = exportMarketplaceOf(c);
+  const mp = exportMarketplaceOf(c) || (c && YM_ONLY_EXPORT_FIELDS.has(c.k) ? 'YM' : '');
   if (mp) return !activeMps.has(mp);
   /* Эти поля являются именно сравнением площадок, а не расчётом выбранной. */
   return activeMps.size === 1 && ['bestMp','profitDiff','marketComparisonReasons'].includes(c && c.k);
@@ -37179,7 +37252,7 @@ function exportCatalog() {
     { g: 'calc', k: 'dropoffOzon', n: 'Сборка/Drop-off Ozon, ₽', w: 15, f: '#,##0.00', src: p => (p.mp?.OZON?.dropoffRub || p.mp?.OZON?.fboAssemblyRub || 0) },
     { g: 'calc', k: 'midMileOzon', n: 'Магистраль Ozon, ₽', w: 14, f: '#,##0.00', src: p => p.mp?.OZON?.middleMileRub || 0 },
     { g: 'calc', k: 'lastMileOzon', n: 'Доставка до выдачи Ozon, ₽', w: 16, f: '#,##0.00', src: p => p.mp?.OZON?.lastMileRub || 0 },
-    { g: 'calc', k: 'logOzon', n: 'Логистика Ozon, ₽', w: 15, f: '#,##0.00', src: p => (p.mp?.OZON?.logisticsRub || 0) + (p.mp?.OZON?.lastMileRub || 0) },
+    { g: 'calc', k: 'logOzon', n: 'Логистика Ozon, итого (магистраль + выдача), ₽', w: 16, f: '#,##0.00', src: p => (p.mp?.OZON?.logisticsRub || 0) + (p.mp?.OZON?.lastMileRub || 0) },
     { g: 'calc', k: 'realFbsServiceOzon', n: 'Ozon realFBS: сбор на ед., ₽', w: 26, f: '#,##0.00', src: p => p.mp?.OZON?.realFbsServiceRub ?? 0 },
     { g: 'calc', k: 'retOzon', n: 'Возврат Ozon, ₽', w: 14, f: '#,##0.00', src: p => p.mp?.OZON?.returnsRub ?? 0 },
     /* v12.9.17: сдача отправления FBS и обработка КГТ — отдельными колонками, чтобы эти
@@ -37326,7 +37399,9 @@ function exportCatalog() {
     { g: 'calc', k: 'tax', n: 'Налог, ₽', w: 12, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.taxUnit}${R}*${r.sales}${R},2)` },
     { g: 'calc', k: 'stockValue', n: 'Стоимость резерва, ₽', w: 16, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.stock}${R}*${r.cost}${R},2)` },
     { g: 'calc', k: 'costPerUnit', n: 'Все затраты на 1 ед., ₽', w: 21, f: '#,##0.00', xl: (R, r) => `=IF(${r.sales}${R}>0,ROUND(${r.effPrice}${R}-${r.netProfit}${R}/${r.sales}${R},2),ROUND(${r.effPrice}${R}-${r.contribution}${R}+${r.fixedTotal}${R},2))` },
-    { g: 'calc', k: 'netProfit', n: 'Чистая прибыль, ₽', w: 16, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=ROUND(${r.revenue}${R}-${r.cogs}${R}-${r.commission}${R}-${r.specialFee}${R}-${r.acquiring}${R}-${r.paymentTransfer}${R}-${r.lastMile}${R}-${r.boost}${R}-${r.logistics}${R}-${r.scDelivery}${R}-${r.packaging}${R}-${r.storage}${R}-${r.processing}${R}-${r.returns}${R}-${r.returnStorage}${R}-${r.penalties}${R}-${r.listing}${R}-${r.tax}${R}-${r.cofin}${R}-${r.nonStd}${R}-${r.lateShip}${R}-${r.fixedTotal}${R},2)` },
+    { g: 'calc', k: 'netProfit', n: 'Чистая прибыль, ₽', w: 16, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=ROUND(${['revenue','cogs','commission','specialFee','acquiring','paymentTransfer','lastMile','boost','logistics','scDelivery','packaging','storage','processing','returns','returnStorage','penalties','listing','tax','cofin','nonStd','lateShip','fixedTotal']
+      .filter(k => !r.__ymAbsent(k))
+      .map(k => r[k] + R).join('-')},2)` },
     { g: 'calc', k: 'perUnitNet', n: 'ЧП на 1 ед., ₽', w: 14, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=IF(${r.sales}${R}>0,ROUND(${r.netProfit}${R}/${r.sales}${R},2),ROUND(${r.contribution}${R}-${r.fixedTotal}${R},2))` },
     { g: 'calc', k: 'margin', n: 'Маржа, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.revenue}${R}*100,1),0)` },
     { g: 'calc', k: 'roi', n: 'ROI, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.cogs}${R}*100,1),0)` },
@@ -37351,7 +37426,8 @@ function exportCatalog() {
            Тогда наценка к закупке обязана быть пустой: иначе в файле формула даёт "",
            а кэш хранит число. */
         if (exportCellUnavailable(p, 'tgtPrice')) return '';
-        return !p.priceTargetUnavailable && c > 0 && t > 0 ? Math.round((t / c - 1) * 1000) / 10 : ''; },
+        /* round(), а не Math.round: ровно тот же результат, что даёт ROUND в файле. */
+        return !p.priceTargetUnavailable && c > 0 && t > 0 ? round((t / c - 1) * 100, 1) : ''; },
       xl: (R, r) => `=IFERROR(IF(${r.tgtPrice}${R}>0,ROUND((${r.tgtPrice}${R}/${r.costMult}${R}-1)*100,1),""),"")` },
     { g: 'calc', k: 'markupMargin', n: 'Наценка по марже, %', w: 17, f: '0.0', xl: (R, r) => `=IFERROR(ROUND((${r.price}${R}-${r.costMult}${R})/${r.costMult}${R}*100,1),0)` },
     { g: 'calc', k: 'markupProfit', n: 'Наценка по прибыли, %', w: 17, f: '0.0;[Red]-0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.cogs}${R}*100,1),0)` },
@@ -37856,6 +37932,10 @@ const Exp = {
     const sheetNames = allSheetNames.filter(name => selectedSheets.has(name));
     const x = Exp._xE, cx = Exp._cx, sty = Exp._sty;
     const ref = {}; cat.forEach((c, i) => { c.L = COL_LET(i); ref[c.k] = c.L; });
+    /* Колонки ЯМ, которые не попадают в выгрузку другой площадки, в формулах
+       считаются нулём: для выбранной площадки эти статьи не начисляются.
+       Шаблон спрашивает __ymAbsent(k) вместо обращения к отсутствующей колонке. */
+    ref.__ymAbsent = k => YM_ONLY_EXPORT_FIELDS.has(k) && !Object.prototype.hasOwnProperty.call(ref, k);
     const last = rows.length + 1;
     /* v10.8.7 (критич #3): строгая карта колонок для шаблонов формул.
        Обращение к колонке, которой нет в выгрузке, БРОСАЕТ исключение вместо
