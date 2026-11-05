@@ -43,6 +43,10 @@
   строки источника оставались пустыми до ручного «Обогатить сейчас».
   Переключатель «Обогащать связанные строки каталога из этого файла» в мастере
   импорта, по умолчанию включён; непустые значения не меняются.
+  v12.9.51 — ТН ВЭД стал колонкой обогащения: код приходит отдельным файлом и
+  переносится в пустое поле по OE-номеру или паре «артикул + бренд», хранится в
+  реестре частей и в OE-реестре, переживает перезагрузку и учитывается в
+  «Проверить весь каталог», «Обогатить сейчас» и в связанных строках импорта.
   Single-file application. The initial catalog is intentionally empty: records enter
   through user imports, IndexedDB persistence, or the authenticated GAS API.
   The gas-backend block is deployable Apps Script source and must be copied to the
@@ -7463,6 +7467,7 @@ html { -webkit-text-size-adjust: 100%; }
       <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enCol_analog_list"></div><span class="hint">Аналоги</span></div>
       <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enCol_group_articles"></div><span class="hint">Группа артикулов</span></div>
       <div style="display:flex;gap:5px;align-items:center"><div class="sw on" id="enCol_barcode"></div><span class="hint">Штрихкод</span></div>
+      <div style="display:flex;gap:5px;align-items:center" title="Код ТН ВЭД приходит отдельным файлом и переносится в пустое поле по OE-номеру или паре «артикул + бренд»"><div class="sw on" id="enCol_tnved"></div><span class="hint">ТН ВЭД</span></div>
     </div>
     <div class="pad" style="border-top:1px solid var(--line)">
       <label style="display:flex;gap:7px;align-items:center;cursor:pointer;font-size:11.5px;margin-bottom:6px">
@@ -13365,7 +13370,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.50-client+audit.1';
+const APP_VERSION = '12.9.51-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -22740,7 +22745,7 @@ const HVC = {
     if (k === 'name' || k === 'applicability' || k === 'category') return en[k] !== false;
     return true;
   },
-  EN_COLS: ['length', 'width', 'height', 'weight', 'name', 'applicability', 'category', 'oe_numbers', 'analog_list', 'group_articles', 'barcode'],
+  EN_COLS: ['length', 'width', 'height', 'weight', 'name', 'applicability', 'category', 'tnved', 'oe_numbers', 'analog_list', 'group_articles', 'barcode'],
   enabledColumns() { return HVC.EN_COLS.filter(k => HVC.enCol(k)); },
   /* Пустой ли у строки столбец обогащения — для панели «сколько SKU нужно заполнить». */
   colEmpty(p, k) {
@@ -22752,6 +22757,7 @@ const HVC = {
     if (k === 'analog_list') return txt(p.analog_list);
     if (k === 'group_articles') return txt(p.group_articles);
     if (k === 'barcode') return txt(p.barcode);
+    if (k === 'tnved') return txt(p.tnved);
     return !num(p[k]);
   },
   enrichCoverage() {
@@ -22777,13 +22783,14 @@ const HVC = {
      Один артикул без подтверждённого бренда не доказывает идентичность. */
   _abAgg(p) {
     const key = HVC.keyOf(p), pt = HVC.normalizeKey(p.article) && HVC.normalizeKey(p.brand) ? HVC.parts.get(key) : null;
-    const agg = { length: 0, width: 0, height: 0, weight: 0, dimensions_str: '', name: '', applicability: '', category: '' };
+    const agg = { length: 0, width: 0, height: 0, weight: 0, dimensions_str: '', name: '', applicability: '', category: '', tnved: '' };
     const recs = pt ? [pt] : [];
     const badCat = v => !v || ['без категории', 'разное', 'прочее', 'не определено'].includes(String(v).trim().toLowerCase());
     for (const q of recs) {
       if (!agg.name && q.name) agg.name = q.name;
       if (!agg.applicability && q.applicability) agg.applicability = q.applicability;
       if (badCat(agg.category) && !badCat(q.category)) agg.category = q.category;
+      if (!agg.tnved && q.tnved) agg.tnved = String(q.tnved).trim();
       for (const dim of ['length', 'width', 'height', 'weight']) {
         const v = HVC.safeNum(q[dim], true);
         if (v !== null && v > num(agg[dim])) agg[dim] = v;
@@ -22940,6 +22947,7 @@ const HVC = {
         category: String((p.category && !['Без категории','Разное'].includes(p.category)) ? p.category : (prev.category || p.category || '')).trim(),
         multiplicity: num(p.multiplicity) || prev.multiplicity || 1,
         barcode: p.barcode || prev.barcode || '',
+        tnved: String(p.tnved || prev.tnved || '').trim(),
         /* Пустой файл-дозагрузка не должен затереть уже известные габариты нулями. */
         length: (dimensionTrusted && HVC.safeNum(p.length, true)) || prev.length || 0, width: (dimensionTrusted && HVC.safeNum(p.width, true)) || prev.width || 0,
         height: (dimensionTrusted && HVC.safeNum(p.height, true)) || prev.height || 0, weight: (dimensionTrusted && HVC.safeNum(p.weight, true)) || prev.weight || 0,
@@ -22973,6 +22981,7 @@ const HVC = {
           ozon_category: ozonPair ? ozonPair.category : (oldOe.ozon_category || ''),
           ozon_type: ozonPair ? ozonPair.type : (oldOe.ozon_type || ''),
           ozon_conflict: oeOzonConflict,
+          tnved: oldOe.tnved || String(p.tnved || '').trim(),
           length: oldOe.length || (dimensionTrusted && HVC.safeNum(p.length, true)) || 0, width: oldOe.width || (dimensionTrusted && HVC.safeNum(p.width, true)) || 0,
           height: oldOe.height || (dimensionTrusted && HVC.safeNum(p.height, true)) || 0, weight: oldOe.weight || (dimensionTrusted && HVC.safeNum(p.weight, true)) || 0,
           dimensions_str: oldOe.dimensions_str || (dimensionTrusted && p.dimensions_str) || ''
@@ -23384,24 +23393,26 @@ const HVC = {
       return { value:'', source:'' };
     };
     const isOe = (mode || HVC.enrichMode()) === 'oe';
-    let nameVals, applVals, catVals, labels;
+    let nameVals, applVals, catVals, tnVals, labels;
     if (isOe) {
       const H = HVC._oeSetOf(p);             /* кэш: rep = прямой OE-реестр, agg = доноры по OE */
       const rep = H.rep || {}, ag = H.agg;
-      nameVals = [rep.name, ag.name]; applVals = [rep.applicability, ag.applicability]; catVals = [rep.category, ag.category];
+      nameVals = [rep.name, ag.name]; applVals = [rep.applicability, ag.applicability]; catVals = [rep.category, ag.category]; tnVals = [rep.tnved, ag.tnved];
       labels = ['OE-реестр', 'аналоги по OE'];
     } else {
       const ab = HVC._abAgg(p).agg;          /* доноры только по связке артикул + бренд */
-      nameVals = [ab.name]; applVals = [ab.applicability]; catVals = [ab.category];
+      nameVals = [ab.name]; applVals = [ab.applicability]; catVals = [ab.category]; tnVals = [ab.tnved];
       labels = ['Артикул + Бренд'];
     }
     const name = pick(nameVals, labels, false);
     const applicability = pick(applVals, labels, false);
     const category = pick(catVals, labels, true);
+    const tnved = pick(tnVals || [], labels, false);
     return {
       name: name.value, nameSource:name.source,
       applicability: applicability.value, applicabilitySource:applicability.source,
-      category: category.value, categorySource:category.source
+      category: category.value, categorySource:category.source,
+      tnved: tnved.value, tnvedSource: tnved.source
     };
   },
   /* Цена с наценкой: брендовая → глобальная; ограничения min/max */
@@ -23465,6 +23476,8 @@ const HVC = {
     if (HVC.enCol('name') && !wasName && t.name) { p.name = t.name; (p._sources = p._sources || {}).name = { file: srcTag + t.nameSource, date: nowISO() }; }
     if (HVC.enCol('applicability') && !wasAppl && t.applicability) { p.applicability = t.applicability; (p._sources = p._sources || {}).applicability = { file: srcTag + t.applicabilitySource, date: nowISO() }; }
     if (HVC.enCol('category') && !wasCat && t.category) { p.category = t.category; (p._sources = p._sources || {}).category = { file: srcTag + t.categorySource, date: nowISO() }; }
+    /* v12.9.51: ТН ВЭД приходит отдельным файлом — переносим только в пустое поле. */
+    if (HVC.enCol('tnved') && !String(p.tnved || '').trim() && t.tnved) { p.tnved = t.tnved; (p._sources = p._sources || {}).tnved = { file: srcTag + t.tnvedSource, date: nowISO() }; }
     const anyDim = HVC.enCol('length') || HVC.enCol('width') || HVC.enCol('height') || HVC.enCol('weight');
     const pt = HVC.parts.get(key);
     if (anyDim) {
@@ -23561,6 +23574,7 @@ const HVC = {
   _enrichFlags() {
     return {
       name: HVC.enCol('name'), applicability: HVC.enCol('applicability'), category: HVC.enCol('category'),
+      tnved: HVC.enCol('tnved'),
       dims: ['weight', 'length', 'width', 'height'].filter(k => HVC.enCol(k))
     };
   },
@@ -23597,6 +23611,7 @@ const HVC = {
       const badCat = v => !v || ['без категории', 'разное', 'прочее', 'не определено'].includes(String(v).trim().toLowerCase());
       if (badCat(p.category) && !badCat(pt.category)) return false;
     }
+    if (f.tnved && !String(p.tnved || '').trim() && String(pt.tnved || '').trim()) return false;
     for (let i = 0; i < f.dims.length; i++) {
       const k = f.dims[i];
       if (!(num(p[k]) > 0) && num(pt[k]) > 0) return false;
@@ -26223,6 +26238,7 @@ const Import = {
         const c = String(p.category || '').trim().toLowerCase();
         if (!c || c === 'без категории' || c === 'разное' || c === 'прочее' || c === 'не определено') return true;
       }
+      if (flags.tnved && !String(p.tnved || '').trim()) return true;
       for (let i = 0; i < flags.dims.length; i++) if (!(num(p[flags.dims[i]]) > 0)) return true;
       return false;
     };
@@ -26764,8 +26780,8 @@ SUP-SHK-710;RoadTech;Амортизатор подвески передний г
 const EnrichAudit = {
   LABELS: { length:'Длина, см', width:'Ширина, см', height:'Высота, см', weight:'Вес, кг',
     name:'Наименование', applicability:'Применимость', category:'Категория',
-    oe_numbers:'OE-номера', analog_list:'Аналоги', group_articles:'Группа артикулов', barcode:'Штрихкод' },
-  OTHER: { ozon_category:'Категория OZON', tnved:'ТН ВЭД', image_url:'Ссылка на фото', cost:'Себестоимость' },
+    oe_numbers:'OE-номера', analog_list:'Аналоги', group_articles:'Группа артикулов', barcode:'Штрихкод', tnved:'ТН ВЭД' },
+  OTHER: { ozon_category:'Категория OZON', image_url:'Ссылка на фото', cost:'Себестоимость' },
   _otherEmpty(p, k) {
     if (k === 'cost') return !(num(p.cost) > 0);
     if (k === 'ozon_category') return !String(p.ozon_category == null ? '' : p.ozon_category).trim();
@@ -43203,7 +43219,7 @@ function bindAll() {
   /* --- v12.9.9 · Обогащение: выбор способа (Артикул + Бренд / OE-номер) и колонок --- */
   const EN_LABEL = { length: 'Длина, см', width: 'Ширина, см', height: 'Высота, см', weight: 'Вес, кг',
     name: 'Наименование', applicability: 'Применимость', category: 'Категория',
-    oe_numbers: 'OE-номера', analog_list: 'Аналоги', group_articles: 'Группа артикулов', barcode: 'Штрихкод' };
+    oe_numbers: 'OE-номера', analog_list: 'Аналоги', group_articles: 'Группа артикулов', barcode: 'Штрихкод', tnved: 'ТН ВЭД' };
   const EN_GROUP = { dims: ['length', 'width', 'height', 'weight'], name: ['name'], applicability: ['applicability'], category: ['category'] };
   const EN_GROUP_LABEL = { dims: 'Весогабариты', name: 'Наименование', applicability: 'Применимость', category: 'Категория' };
   const ensureEnrichCols = () => {
