@@ -51,6 +51,13 @@
   Точечный пересчёт после импорта и автосверки ОВХ пропускает неизменённые строки
   целиком (на 217 000 SKU это сотни секунд), группы OE после подстановки ОВХ не
   пересобираются. В журнал добавлены тайминги записи по этапам и размер heap.
+  v12.9.59 — ВОЗВРАТ ИМПОРТА. Правка v12.9.57, удалявшая матрицу ABC/XYZ с дашборда,
+  задела соседний код: вместе с методом renderMatrix вырезались закрывающий блок объекта
+  Dash, заголовок раздела «Импорт / маппинг», демонстрационный набор DEMO_IMPORT_CSV,
+  объявление объекта Import и его метод pick(). Импорт падал с «Import is not defined».
+  В Dash.agg осталась строка накопления матрицы, обращавшаяся к удалённой переменной mc,
+  поэтому дашборд не строился («mc is not defined»). Оба места восстановлены, строка mc
+  удалена. Проверено: импорт 3 000 строк проходит за 4,0 с, Dash.agg() считает, синтаксис OK.
   v12.9.58 — ЧИСЛОВЫЕ ПОМОЩНИКИ. В профиле пересчёта 30 000 строк 42 % времени
   приходилось на две функции-однострочника: num() (разбор «числа» из любого поля) и
   round() (округление как в Excel). num теперь проверяет числовой тип первым — в
@@ -13393,7 +13400,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.58-client+audit.1';
+const APP_VERSION = '12.9.59-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -25520,7 +25527,6 @@ const Dash = {
       a.contrib += num(p.contribution) * s; a.fixed += p.fixedTotal || 0;
       const bc = a.byCat[p.category] || (a.byCat[p.category] = { rev: 0, net: 0, n: 0 });
       bc.rev += p.revenue || 0; bc.net += p.netProfit || 0; bc.n++;
-      mc.n++; mc.pr += p.netProfit || 0; mc.rev += p.revenue || 0; mc.q += s;
       for (const k in a.cost) a.cost[k] += p[k] || 0;
     }
     a.avgCover = a.actN ? a.coverSum / a.actN : 0;
@@ -25656,6 +25662,35 @@ const Dash = {
     $('#filesCount').textContent = S.imports.length + ' файлов';
     $('#dbFiles').innerHTML = '<thead><tr><th>Файл</th><th class="t-r">Строк</th><th class="t-r">+новые</th><th class="t-r">обновл.</th><th>Дата</th></tr></thead><tbody>' +
       (S.imports.length ? S.imports.slice(-14).reverse().map(f => `<tr><td title="${esc(f.cols || '')}" style="max-width:190px;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</td><td class="t-r mono">${fmt(f.rows)}</td><td class="t-r mono" style="color:var(--teal)">${fmt(f.added)}</td><td class="t-r mono" style="color:var(--blue)">${fmt(f.updated)}</td><td class="hint">${new Date(f.date).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td></tr>`).join('') : '<tr><td colspan="5" class="hint">Пока нет загруженных файлов — раздел 2 «Данные»</td></tr>') + '</tbody>';
+  }
+};
+
+/* ============================ 16. ИМПОРТ / МАППИНГ ======================== */
+/* Optional local demonstration import.
+ * This static dataset is never loaded during boot, never written to GAS, and never
+ * bypasses the normal mapping/import pipeline. It is available only after an
+ * explicit user click on the Data screen. */
+const DEMO_IMPORT_CSV = `Артикул;Ориг. артикул;Бренд;Название;OE-номера;Категория;Цена;Себестоимость;Вес, кг;Длина, см;Ширина, см;Высота, см;Остаток;Мин. остаток;Продажи;Видимость
+DEMO-FLT-001;FLT-001;NordFilter;Фильтр масляный;OE-FLT-001;Фильтры;890;410;0.32;12;12;16;48;8;22;да
+DEMO-FLT-002;FLT-002;NordFilter;Фильтр воздушный;OE-FLT-002;Фильтры;1240;620;0.58;28;22;8;31;6;14;да
+DEMO-BRK-001;BRK-001;AutoStop;Колодки тормозные передние;OE-BRK-001 / OE-BRK-002;Тормозная система;3650;1880;1.85;16;9;7;17;4;9;да
+DEMO-BRK-002;BRK-002;AutoStop;Диск тормозной передний;OE-BRK-003;Тормозная система;4980;2750;5.2;30;30;8;12;3;6;да
+DEMO-CLT-001;CLT-001;DriveLine;Комплект сцепления;OE-CLT-001;Сцепление;18700;11200;8.4;34;34;12;5;2;3;да
+DEMO-SUS-001;SUS-001;RoadTech;Стойка стабилизатора;OE-SUS-001;Подвеска;1780;760;0.72;28;8;8;26;5;11;да
+DEMO-SUS-002;SUS-002;RoadTech;Рычаг передней подвески;OE-SUS-002;Подвеска;6420;3250;3.1;42;18;14;9;3;4;да
+DEMO-ENG-001;ENG-001;MotorCore;Комплект прокладок двигателя;OE-ENG-001;Двигатель;9850;4900;2.2;38;28;6;7;2;3;да
+DEMO-ELC-001;ELC-001;VoltWorks;Датчик температуры охлаждающей жидкости;OE-ELC-001;Электрика и электроника;2160;980;0.18;9;6;6;19;4;8;да
+DEMO-LGT-001;LGT-001;BrightWay;Лампа головного света;OE-LGT-001;Освещение;760;290;0.12;14;8;8;64;10;31;да
+DEMO-OIL-001;OIL-001;FluidPro;Масло моторное 5W-30, 4 л;OE-OIL-001;Жидкости и масла;3290;2050;3.7;30;20;24;23;5;12;да
+DEMO-TRN-001;TRN-001;DriveLine;Шрус наружный;OE-TRN-001;Трансмиссия / КПП;7350;3820;2.65;24;18;18;8;2;4;да
+`;
+
+const Import = {
+  pick() {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.xlsx,.xls,.csv,.ods'; inp.multiple = false;
+    inp.onchange = async () => { const f=inp.files && inp.files[0]; if (f) await Import.read(f); };
+    inp.click();
   },
   demo() {
     if (S.rows.length && !confirm('Демо-набор будет добавлен через обычный импорт. Продолжить?')) return;
