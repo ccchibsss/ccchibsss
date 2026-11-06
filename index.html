@@ -92,6 +92,21 @@
   строк 15 687 из 37 392, и они затирали наименование и страну. Применимость стала
   накопительной: в справочнике одна связка Артикул+Бренд повторяется на каждую марку
   и годы (37 392 строки → 18 318 связок), раньше оставалась только последняя строка.
+  v12.9.66 — ПЕРВЫЙ ФАЙЛ ГРУЗИТСЯ БЫСТРЕЕ. Замер по журналу показал, где уходят
+  минуты: на прайсе 124 454 строки (122 930 SKU) импорт занимал 168 с, из них
+  151 с — пересчёт конвейера, а в нём 70 с computeEconomics, 36 с типизации Ozon
+  и 16 с вида категории. Три правки, не меняющие ни одного числа: (1) чистые
+  строковые функции кэшируются — normalize('NFKC') в CategoryTnved.norm,
+  разбор названия (30 замен) и стемминг в OzonAuto и CsvNameMatcher, нормализация
+  артикула (600 000 вызовов на файл); (2) при нулевых продажах месячные статьи
+  не вычисляются — ecoMonth(v,0) всегда 0, а вызывался 19 раз на каждый из
+  614 668 пробных объектов решателя; (3) каталог пишется порциями по 2 500 строк
+  вместо 1 000 — втрое меньше фиксаций IndexedDB на первом импорте, там же
+  браузер и обрывал порцию (BulkError). Итог замера: 168,0 → 131,9 с (−21,5 %),
+  computeEconomics 70,6 → 56,9 с, типизация Ozon 35,7 → 21,9 с. Сверка
+  контрольных полей до и после на 19 918 строках прайса и на 23 821 строке
+  после файла весогабаритов — 0 расхождений из ~80 полей на строку.
+  В журнал добавлена строка «запись каталога: N строк за X мс».
   v12.9.65 — ВСЁ СЧИТАЕТСЯ НА ЕДИНИЦУ ТОВАРА. Раньше в строке каталога лежали месячные
   суммы (выручка = цена × продажи), поэтому без продаж все денежные колонки были нулевыми,
   а выгрузка Excel умножала каждую статью на продажи. Теперь в строке — только ₽ за одну
@@ -13453,7 +13468,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.65-client+audit.1';
+const APP_VERSION = '12.9.66-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13494,7 +13509,19 @@ const escAttr = s => esc(s).replace(/\r/g, '&#13;').replace(/\n/g, '&#10;').repl
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const uid = p => (p || 'x') + '_' + Math.random().toString(36).slice(2, 10);
 const nowISO = () => new Date().toISOString();
-const normArticle = s => String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9А-ЯЁ]/g, '');
+/* v12.9.66: нормализация артикула — самая частая строка-операция: за импорт
+   122 930 SKU её вызывают больше 600 000 раз (конвейер, HVC.ensureNorm ×4,
+   ключи групп). Функция чистая, поэтому результат кэшируется по исходному
+   значению; кэш ограничен, при переполнении просто очищается. */
+const _normArticleCache = new Map();
+const normArticle = s => {
+  const hit = _normArticleCache.get(s);
+  if (hit !== undefined) return hit;
+  const v = String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9А-ЯЁ]/g, '');
+  if (_normArticleCache.size >= 60000) _normArticleCache.clear();
+  _normArticleCache.set(s, v);
+  return v;
+};
 /* Артикул — всегда текст. Если Excel отдал ячейку объектом Date (в файле у
    колонки стоял формат даты), не печатаем локальную дату браузера: получаем
    стабильную строку ДД.ММ.ГГГГ и отдельно предупреждаем о риске. */
@@ -17985,6 +18012,7 @@ const StorageCtl = {
     let fp = { count: rowCount, fp: '' }, oldFp = '';
     try { fp = catFp(S.rows); } catch (e) { console.warn('[UC] отпечаток каталога не посчитан:', e); }
     const started = nowISO();
+    const _tWriteStart = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     await db.transaction('rw', db.meta, async () => {
       const current = await this.assertCatalogFresh();
       oldFp = current && current.value && current.value.fp || '';
@@ -18044,7 +18072,12 @@ const StorageCtl = {
       await db.meta.delete('incomplete');
     });
     this.acceptCatalog(committedCatalog);
-    S._cacheLastWrite = { mode: 'chunked', count: rowCount, written, deleted, partial: onlyChanged, bytes: (S._cacheLastWrite && S._cacheLastWrite.bytes) || 0 };
+    /* v12.9.66: видно, сколько именно заняла запись каталога — в журнале импорта
+       это отдельный, самый «дисковый» этап. */
+    const _writeMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _tWriteStart);
+    console.info('[UC] запись каталога: ' + fmt(written) + ' строк за ' + _writeMs + ' мс · порций ' + fmt(Math.ceil(total / chunkRows)) + ' · удалено ' + fmt(deleted));
+    S._lastCatalogWriteMs = _writeMs;
+    S._cacheLastWrite = { mode: 'chunked', count: rowCount, written, deleted, partial: onlyChanged, ms: _writeMs, bytes: (S._cacheLastWrite && S._cacheLastWrite.bytes) || 0 };
   },
   jsonLine(row) {
     return JSON.stringify(row, function(key, value) {
@@ -19976,7 +20009,12 @@ function finalizeMarketplaceEco(eco, fixedTotal, solverOnly, invalidNoBuy) {
      сумма месячных расходов складывается тем же порядком, что Object.values,
      но без массива и reduce на каждый SKU. */
   const sales = Math.max(0, num(eco.sales));
-  const monthly = solverOnly ? null : {
+  /* v12.9.66: при нулевых продажах каждая месячная статья равна нулю
+     (ecoMonth(v,0) = round(0) = 0). Считать 19 произведений и потом складывать
+     их в ноль — чистая потеря: за импорт 122 930 SKU это ~2,6 млн лишних
+     round/num на пробных объектах решателя. Месячный объект тоже не строим —
+     ниже он заменяется на ZERO_ECO_MONTH. */
+  const monthly = (solverOnly || sales === 0) ? null : {
     commission: ecoMonth(eco.commissionRub, sales), specialFee: ecoMonth(eco.specialFeeRub, sales),
     acquiring: ecoMonth(eco.agencyFee, sales), paymentTransfer: ecoMonth(eco.paymentTransferRub, sales),
     lastMile: ecoMonth(eco.lastMileRub, sales), boost: ecoMonth(eco.adsRub, sales), cofin: ecoMonth(eco.cofinRub, sales),
@@ -19989,7 +20027,7 @@ function finalizeMarketplaceEco(eco, fixedTotal, solverOnly, invalidNoBuy) {
   };
   /* Порядок слагаемых повторяет Object.values(monthly), чтобы не менять
      округление и двоичную сумму в контрольных расчётах. */
-  const monthlyCosts = solverOnly
+  const monthlyCosts = sales === 0 ? 0 : solverOnly
     ? ecoMonth(eco.commissionRub, sales) + ecoMonth(eco.specialFeeRub, sales) + ecoMonth(eco.agencyFee, sales) +
       ecoMonth(eco.paymentTransferRub, sales) + ecoMonth(eco.lastMileRub, sales) + ecoMonth(eco.adsRub, sales) + ecoMonth(eco.cofinRub, sales) +
       ecoMonth(eco.logisticsRub, sales) + ecoMonth(eco.scDeliveryRub, sales) + ecoMonth(eco.packRub, sales) +
@@ -22122,7 +22160,11 @@ async function _persistNowImpl(changedList) {
     if (StorageCtl.mode() === 'economy') {
       const _writeArgs = { rowCount, chunk: CH, changedList, withId, slimChunk, fullWrite: _fullWrite };
       if (_fullWrite && _bigWrite) {
-        await StorageCtl.saveChunked(Object.assign({}, _writeArgs, { chunk: 1000 }));
+        /* v12.9.66: 1000 строк на транзакцию давало 123 фиксации IndexedDB на
+           первом импорте 122 930 SKU — и именно там браузер обрывал порцию
+           (BulkError). 2 500 строк на транзакцию: втрое меньше фиксаций, память
+           порции остаётся в норме, а обрыв по-прежнему стоит одной порции. */
+        await StorageCtl.saveChunked(Object.assign({}, _writeArgs, { chunk: 2500 }));
       } else try { await StorageCtl.saveDiffAtomic(_writeArgs); }
       catch (eWrite) {
         /* AbortError/BulkError на большом каталоге: один повтор уменьшенными
@@ -27219,7 +27261,17 @@ const CATEGORY_TNVED_ROWS = Object.freeze([["Детали двигателя","�
 const CategoryTnved = {
   source:'Категории12131.csv', revision:'27c9f36179956a484ead430e464a12784436ba65ad2c140769bf8aab47a194d1',
   _index:null, _cats:null,
-  norm(x) { return String(x == null ? '' : x).normalize('NFKC').trim().toLowerCase().replace(/ё/g,'е').replace(/\s+/g,' '); },
+  _normCache: new Map(),
+  /* v12.9.66: normalize('NFKC') — самая дорогая строковая операция в конвейере,
+     а категории и виды повторяются тысячами строк. Результат кэшируется. */
+  norm(x) {
+    const c = this._normCache, hit = c.get(x);
+    if (hit !== undefined) return hit;
+    const v = String(x == null ? '' : x).normalize('NFKC').trim().toLowerCase().replace(/ё/g,'е').replace(/\s+/g,' ');
+    if (c.size >= 40000) c.clear();
+    c.set(x, v);
+    return v;
+  },
   typeKey(k) { return /^(?:вид[\s_-]+категор(?:ии|изации)|тип[\s_-]+категории|подкатегория|category[\s_-]*type|sub[\s_-]*category)$/i.test(String(k).trim()); },
   codeKey(k) { return /^(?:тн[\s_-]*вэд(?:[\s_-]*(?:код|коды))?(?:[\s_-]*еаэс)?|код[\s_-]*тн[\s_-]*(?:вэд|вд)(?:[\s_-]*еаэс)?|тнвд(?:[\s_-]*еаэс)?|tnved(?:[\s_-]*eaes)?|hs[\s_-]*code)$/i.test(String(k).trim()); },
   index() {
@@ -29451,7 +29503,16 @@ const CsvNameMatcher = {
   stop:new Set(['и','или','для','под','над','на','к','по','от','без','с','из','в','the','and','of','for','авто','автомобильный','автомобильная','автомобильные','автомобилей','автомобиля','система','системы','систем','систему','новый','новая','новые','оригинал']),
   weak:/^(?:передн|задн|верхн|нижн|лев|прав|боков|внутрен|наружн|внешн|нов|оригин|универс|комплект|набор|установ|креплен|крепеж|детал|запчаст|шт|размер|сторон|сбор|штуч|бренд|модел|компонент)/,
     sensitive:new Set(['клапан','форсунк','кронштей','крышк','заглушк','пробк','втулк','шестерн','пружин','трубк','патрубк','датчик','кольц','вал','вентилят','мотор','опор','подушк','пыльник','муфт','шкив','поршень','ремкомпл','накладк','решетк','реле','радиатор','насос','фильтр','шланг','тяга','тяг','рычаг','ролик','ламп','стекл']),
+  _scache:new Map(),
   stem(word) {
+    const key=String(word||''), hit=this._scache.get(key);
+    if(hit!==undefined) return hit;
+    const v=this.stemRaw(word);
+    if(this._scache.size>=60000)this._scache.clear();
+    this._scache.set(key,v);
+    return v;
+  },
+  stemRaw(word) {
     let w=String(word||'').toLowerCase().replace(/ё/g,'е'); w=OzonAuto.ALIASES[w]||w;
     if (/^рем(?:ень|ен[ьяюем]|н(?:и|я|ей|ями|ях|ю|ем))$/.test(w)) return 'ремень';
     if (/^порш(?:ень|ен[ьяюем]|н(?:и|я|ей|ями|ях|ю|ем))$/.test(w)) return 'поршень';
@@ -29473,7 +29534,16 @@ const CsvNameMatcher = {
     if (/^(?:поликлинов|ручейков)/.test(w)) return 'ручейк';
     return OzonAuto._stem(w);
   },
+  _wcache:new Map(),
   words(v) {
+    const key=String(v||''), hit=this._wcache.get(key);
+    if (hit!==undefined) return hit.slice();
+    const arr=this.wordsRaw(v);
+    if(this._wcache.size>=40000)this._wcache.clear();
+    this._wcache.set(key,arr);
+    return arr.slice();
+  },
+  wordsRaw(v) {
     const s=String(v||'').normalize('NFKC').toLowerCase().replace(/ё/g,'е')
       .replace(/ремонтн[а-я]*\s+комплект[а-я]*/g,'ремкомплект').replace(/[^a-zа-я0-9]+/g,' ');
     return s.split(/\s+/).filter(w=>w.length>=2 && !/^\d+$/.test(w) && !this.stop.has(w));
@@ -36833,7 +36903,23 @@ const OzonAuto = {
   STOP: new Set(['для','или','под','над','без','при','как','the','and','на','по','of','из','в','с','a','авто']),
   ALIASES: { filter:'фильтр', oil:'масляный', air:'воздушный', cabin:'салонный', fuel:'топливный', water:'водяной', brake:'тормозной', pads:'колодки', pad:'колодки', disc:'диск', pump:'насос', headlight:'фара' },
   _idx: null, _cache: new Map(),
+  /* v12.9.66: разбор названия (30 регулярных замен) выполняется несколько раз
+     на одну и ту же строку: _tokens для поиска, _tokens с лексиконом,
+     _nameLead. Кэш по исходной строке убирает повторную работу. */
+  _mem: { exp:new Map(), stem:new Map(), tok:new Map(), lit:new Map() },
+  _memo(map, key, cap, make) {
+    const hit = map.get(key);
+    if (hit !== undefined) return hit;
+    const v = make();
+    if (map.size >= cap) map.clear();
+    map.set(key, v);
+    return v;
+  },
   _expand(v) {
+    const key = String(v || ''), m = this._mem.exp;
+    return this._memo(m, key, 60000, () => this._expandRaw(key));
+  },
+  _expandRaw(v) {
     let text = String(v || '');
     if (/водян[а-я]*/i.test(text)) text = text.replace(/(^|[^a-zа-я0-9])помп[а-я]*(?=$|[^a-zа-я0-9])/gi,'$1насос');
     if (/сальник[а-я]*\s+(?:коленвал|распредвал)/i.test(text)) text += ' двигателя';
@@ -36867,6 +36953,11 @@ const OzonAuto = {
       .replace(/(^|[^a-zа-я0-9])timing\s+chains?(?=$|[^a-zа-я0-9])/gi,'$1цепь грм');
   },
   _tokens(v, product) {
+    const key = (product ? '1' : '0') + '\u001f' + String(v || '');
+    /* Копия: вызывающий код (CsvNameMatcher.guess) делает shift() у результата. */
+    return this._memo(this._mem.tok, key, 60000, () => this._tokensRaw(v, product)).slice();
+  },
+  _tokensRaw(v, product) {
     const text = this._expand(product ? OzonNameLexicon.rewrite(v) : v).toLowerCase().replace(/ё/g,'е')
       .replace(/ремонтн[а-я]*\s+комплект[а-я]*/g, 'ремкомплект')
       .replace(/[^a-zа-я0-9]+/g, ' ');
@@ -36876,12 +36967,18 @@ const OzonAuto = {
   /* Для сравнения буквального имени не применяем даже старые замены _expand:
      иначе «помпа водяная» и «насос водяной» становятся неразличимы. */
   _literalTokens(v) {
+    return this._memo(this._mem.lit, String(v || ''), 40000, () => this._literalTokensRaw(v)).slice();
+  },
+  _literalTokensRaw(v) {
     const text=String(v || '').toLowerCase().replace(/ё/g,'е')
       .replace(/ремонтн[а-я]*\s+комплект[а-я]*/g,'ремкомплект').replace(/[^a-zа-я0-9]+/g,' ');
     return text.split(/\s+/).filter(w=>w.length>=2 && !this.STOP.has(w) &&
       !/^автомобил/.test(w) && !/^легков/.test(w) && !/^машин/.test(w));
   },
   _stem(w) {
+    return this._memo(this._mem.stem, String(w == null ? '' : w), 80000, () => this._stemRaw(w));
+  },
+  _stemRaw(w) {
     let x = w;
     if (/^[а-я]+$/.test(x)) {
       x = x.replace(/(?:иями|ями|ами|ого|его|ому|ему|ыми|ими|иях|иях|ий|ый|ой|ая|яя|ое|ее|ые|ие|ых|их|ую|юю|ов|ев|ей|ам|ям|ах|ях)$/,'');
