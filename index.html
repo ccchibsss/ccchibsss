@@ -87,6 +87,11 @@
   создавать» в мастере импорта, по умолчанию включён. Файлы с ценой, себестоимостью или
   остатком создают новые SKU всегда. На сегодняшних файлах это убрало бы 52 600 пустых
   строк из файла категорий (55 239 артикулов, из них 2 639 есть в каталоге).
+  v12.9.63 — СПРАВОЧНИК НЕ ЗАТИРАЕТ КАРТОЧКУ. Заглушки Excel и поставщика («#Н/Д»,
+  «н/д», «#N/A») больше не записываются как значение: в файле «Основные данные» таких
+  строк 15 687 из 37 392, и они затирали наименование и страну. Применимость стала
+  накопительной: в справочнике одна связка Артикул+Бренд повторяется на каждую марку
+  и годы (37 392 строки → 18 318 связок), раньше оставалась только последняя строка.
   v12.9.58 — ЧИСЛОВЫЕ ПОМОЩНИКИ. В профиле пересчёта 30 000 строк 42 % времени
   приходилось на две функции-однострочника: num() (разбор «числа» из любого поля) и
   round() (округление как в Excel). num теперь проверяет числовой тип первым — в
@@ -13430,7 +13435,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.62-client+audit.1';
+const APP_VERSION = '12.9.63-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19423,6 +19428,14 @@ const priceForMargin = (fixedPart, pctOfPrice, marginPct) => ((Number(pctOfPrice
  *  «Статус» считалась только по min_stock и показывала «Норма»/«Готов к
  *  отгрузке» для SKU, скрытых с витрины — пользователь видел позицию
  *  активной, хотя витрина уже скрыта. Порядок веток = приоритет. */
+/* v12.9.63: заглушки Excel и поставщика вместо значения. В файле «Основные данные»
+   15 687 строк несут «#Н/Д» в наименовании и стране — такие ячейки не должны
+   затирать уже известное значение карточки. */
+function isMissingCellValue(v) {
+  const t = String(v == null ? '' : v).trim();
+  if (!t) return true;
+  return /^#?(?:н\/д|n\/a|null|nan|undefined|знач|дело\/0)$/i.test(t);
+}
 function hasShippingData(p) {
   if (p && p.dimensionAnomalyBlocked) return false;
   return num(p && p.weight) > 0 && num(p && p.length) > 0 && num(p && p.width) > 0 && num(p && p.height) > 0;
@@ -26190,6 +26203,23 @@ const Import = {
             } else if (cm.target) {
               // A matching update never rewrites the manufacturer's stored source SKU.
               if (cm.target === 'article' && existing) continue;
+              /* v12.9.63: «#Н/Д» и подобные заглушки не считаются значением. */
+              if (typeof val === 'string' && isMissingCellValue(val)) continue;
+              if (cm.target === 'applicability') {
+                /* Применимость накопительная: в справочнике одна связка повторяется
+                   на каждую марку и годы (37 392 строки → 18 318 связок). Раньше
+                   оставалась только последняя строка файла. */
+                const add = String(val == null ? '' : val).trim();
+                const cur = String(p.applicability || '');
+                const parts = cur ? cur.split(';').map(x => x.trim()).filter(Boolean) : [];
+                const seen = new Set(parts.map(x => x.toLowerCase()));
+                if (add && !seen.has(add.toLowerCase()) && parts.length < 80) {
+                  parts.push(add);
+                  const joined = parts.join('; ');
+                  if (joined !== cur) { p.applicability = joined; rowChanged = true; }
+                }
+                continue;
+              }
               if (p[cm.target] !== val) rowChanged = true;
               p[cm.target] = val;
               if (cm.target === 'category_type' && String(val == null ? '' : val).trim()) {
