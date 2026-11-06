@@ -51,6 +51,65 @@
   Точечный пересчёт после импорта и автосверки ОВХ пропускает неизменённые строки
   целиком (на 217 000 SKU это сотни секунд), группы OE после подстановки ОВХ не
   пересобираются. В журнал добавлены тайминги записи по этапам и размер heap.
+  v12.9.59 — ВОЗВРАТ ИМПОРТА. Правка v12.9.57, удалявшая матрицу ABC/XYZ с дашборда,
+  задела соседний код: вместе с методом renderMatrix вырезались закрывающий блок объекта
+  Dash, заголовок раздела «Импорт / маппинг», демонстрационный набор DEMO_IMPORT_CSV,
+  объявление объекта Import и его метод pick(). Импорт падал с «Import is not defined».
+  В Dash.agg осталась строка накопления матрицы, обращавшаяся к удалённой переменной mc,
+  поэтому дашборд не строился («mc is not defined»). Оба места восстановлены, строка mc
+  удалена. Проверено: импорт 3 000 строк проходит за 4,0 с, Dash.agg() считает, синтаксис OK.
+  v12.9.60 — ОБОГАЩЕНИЕ ПРАЙСА И ГОРЯЧАЯ СТРОКА. Прайс поставщика сам не обогащается:
+  если в файле нет ни одного поля-источника (весогабариты, объём, OE-номера, категория,
+  применимость), шаги «обогащение», «стандартные ОВХ» и «связанные строки» пропускаются
+  с записью в журнал — данные придут следующим файлом (весогабариты / OE-кроссы) и
+  разойдутся по каталогу из справочника. На файле 124 454 строк (122 930 SKU) это убрало
+  ложное «заполнено 7 из 122 930». Вторая правка — кэш OzonReference.strictKey и заранее
+  посчитанные ключи типа/категории в записях справочника Ozon: нормализация названий
+  занимала 28,9 % пересчёта (поиск типа по каждому кандидату на каждую строку).
+  Итог на том же файле: применение импорта 341,7 с → 163,1 с, «пересчёт и запись»
+  320,9 с → 144,0 с; 26 полей на 2 995 строках совпали с прежней версией полностью.
+  v12.9.61 — КРОССЫ OE НАКАПЛИВАЮТСЯ. Файл кроссов (Артикул; Бренд; OE) содержит одну
+  связку Артикул+Бренд на каждый OE — в среднем 5 раз, до тысяч. Предварительная проверка
+  конфликтов считала такие повторы «разными данными с одним ключом» и выбрасывала весь
+  артикул: из 486 692 строк применялось 47 180, и у строки оставался ровно один OE.
+  Теперь в подписи данных не участвуют поля-накопители (OE-номера, применимость) и
+  пользовательские колонки («Марка авто»): повторы одного SKU сливаются, OE складываются
+  через mergeCodeLists. Итог на том же файле: OE получили 97 056 SKU вместо 44 272,
+  в справочнике 238 331 уникальный OE вместо 37 166 (в файле 239 405), максимум 3 278 OE
+  на артикул, у 5 222 строк 10 и более. Время импорта кроссов 85 с → 255 с: теперь
+  обрабатываются все строки файла, а не 10 %.
+  v12.9.62 — КРОССЫ БЫСТРЕЕ И СТРОЖЕ К КАТАЛОГУ. Накопление OE больше не пересобирает
+  список на каждой строке: исходный список разбирается один раз на SKU, каждый новый
+  код дописывается к строке. На файле кроссов 486 692 строки этап «строки файла»
+  71,8 с → 14,4 с, весь импорт 255 с → 195 с. Второе: справочный файл (весогабариты,
+  OE-кроссы, категории, ТН ВЭД, названия) обогащает существующие SKU и не создаёт новых
+  строк каталога — переключатель «Справочный файл: только обогащать, новых SKU не
+  создавать» в мастере импорта, по умолчанию включён. Файлы с ценой, себестоимостью или
+  остатком создают новые SKU всегда. На сегодняшних файлах это убрало бы 52 600 пустых
+  строк из файла категорий (55 239 артикулов, из них 2 639 есть в каталоге).
+  v12.9.63 — СПРАВОЧНИК НЕ ЗАТИРАЕТ КАРТОЧКУ. Заглушки Excel и поставщика («#Н/Д»,
+  «н/д», «#N/A») больше не записываются как значение: в файле «Основные данные» таких
+  строк 15 687 из 37 392, и они затирали наименование и страну. Применимость стала
+  накопительной: в справочнике одна связка Артикул+Бренд повторяется на каждую марку
+  и годы (37 392 строки → 18 318 связок), раньше оставалась только последняя строка.
+  v12.9.65 — ВСЁ СЧИТАЕТСЯ НА ЕДИНИЦУ ТОВАРА. Раньше в строке каталога лежали месячные
+  суммы (выручка = цена × продажи), поэтому без продаж все денежные колонки были нулевыми,
+  а выгрузка Excel умножала каждую статью на продажи. Теперь в строке — только ₽ за одну
+  штуку: цена единицы, себестоимость единицы, размещение, доставка, упаковка, хранение,
+  налог, штрафы и чистая прибыль единицы. Месячные суммы не потеряны — они лежат в
+  m*-полях (mRevenue, mCogs, mCommission, mLogistics, mTax, mNetProfit) и используются там,
+  где нужен период (прогноз, сверка с финансовым отчётом). В выгрузке Excel убрано
+  умножение на продажи, подписи переименованы в «₽/ед.», колонка «Чистая прибыль» стала
+  «ЧП на 1 ед.», а контрольная колонка осталась под именем «ЧП на 1 ед. (контроль)».
+  На дашборде вместо «Выручка / мес» и «Чистая прибыль» — «Средняя цена, ₽/ед.» и
+  «ЧП на 1 ед., ₽».
+  v12.9.64 — ЭКОНОМИКА НА ЕДИНИЦУ БЕЗ ПРОДАЖ. Продажи за месяц не нужны: колонка
+  «Продажи, шт/мес» больше не числится отсутствующим столбцом в качестве данных
+  (раньше строка несла «ПРОВЕРИТЬ: добавить столбцы — … Продажи, шт/мес»).
+  Маржа и ROI без продаж считаются на единицу: прибыль единицы к цене и к закупке
+  (было 0 % у всех строк). Те же формулы — в выгрузке Excel. Чистая прибыль и выручка
+  остаются месячными: без продаж они нулевые, а прибыль единицы видна в колонке
+  «ЧП на 1 ед., ₽».
   v12.9.58 — ЧИСЛОВЫЕ ПОМОЩНИКИ. В профиле пересчёта 30 000 строк 42 % времени
   приходилось на две функции-однострочника: num() (разбор «числа» из любого поля) и
   round() (округление как в Excel). num теперь проверяет числовой тип первым — в
@@ -6973,7 +7032,7 @@ html { -webkit-text-size-adjust: 100%; }
   <div class="ops" id="fbsOps"></div>
   <div class="grid3" style="margin-bottom:13px">
     <div class="card" style="grid-column:span 2">
-      <div class="cardtop"><i class="fa-solid fa-chart-column" style="color:var(--amber)"></i><h3>Выручка и чистая прибыль по категориям</h3><div class="sp"></div><span class="hint">топ-12 категорий</span></div>
+      <div class="cardtop"><i class="fa-solid fa-chart-column" style="color:var(--amber)"></i><h3>Цена и ЧП на единицу по категориям</h3><div class="sp"></div><span class="hint">топ-12 категорий</span></div>
       <div class="pad" style="height:250px"><canvas id="chCat"></canvas></div>
     </div>
     <div class="card">
@@ -8933,6 +8992,7 @@ try {
       <div style="display:flex;gap:6px;align-items:center;height:28px"><div class="sw on" id="impOe"></div><span class="hint">объединять группы по OE (транзитивно)</span></div>
       <label style="display:flex;gap:6px;align-items:center;max-width:270px" title="Не скрывает из-за цены/остатка во время импорта; явная видимость, политики и общее автоскрытие после запуска продолжают действовать"><input id="impKeepVisibility" type="checkbox" style="width:auto"><span class="hint">Не скрывать автоматически при импорте</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:360px" title="Источник — тот же артикул и бренд или схожий OE-номер. Из допустимых полных записей выбирается меньший комплект вес + три стороны, проверенный по лимитам категории. Старые значения сохраняются; товар остаётся в карантине до проверки."><input id="impAnomOeAuto" type="checkbox" style="width:auto"><span class="hint">Автосверка аномальных ОВХ по OE · с проверкой</span></label>
+      <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Справочный файл (весогабариты, OE-кроссы, категории, ТН ВЭД, названия) обогащает уже загруженные SKU и не создаёт новых строк каталога. Файлы с ценой, себестоимостью или остатком всегда создают новые SKU."><input id="impEnrichOnly" type="checkbox" style="width:auto"><span class="hint">Справочный файл: только обогащать, новых SKU не создавать</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Файлы, загружаемые после источника (весогабариты, OE-кроссы, названия), сразу расходятся по уже загруженному каталогу: строки, связанные тем же артикулом или общим OE-номером, получают недостающие поля и стандартные весогабариты. Пустые поля заполняются, существующие значения не меняются."><input id="impEnrichRelated" type="checkbox" style="width:auto"><span class="hint">Обогащать связанные строки каталога из этого файла</span></label>
       <div style="display:flex;gap:10px;align-items:center;height:28px;flex-wrap:wrap">
         <span class="hint" style="letter-spacing:.08em;text-transform:uppercase">Обогащать по OE:</span>
@@ -13393,7 +13453,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.58-client+audit.1';
+const APP_VERSION = '12.9.65-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -18254,12 +18314,12 @@ const TCOLS = [
   { k: 'sel', n: '', w: 30, nosort: 1 },
   { k: 'article', n: 'Артикул', w: 118 },
   { k: 'bestMp', n: 'Лучший МП', w: 105 },
-  { k: 'profitDiff', n: 'Разброс ЧП МП, ₽', w: 120, r: 1 },
-  { k: 'profitWB', n: 'ЧП WB, ₽', w: 105, r: 1 },
-  { k: 'profitOzon', n: 'ЧП Ozon, ₽', w: 105, r: 1 },
-  { k: 'profitYM', n: 'ЧП ЯМ, ₽', w: 105, r: 1 },
-  { k: 'profitMM', n: 'ЧП ММ, ₽', w: 105, r: 1 },
-  { k: 'profitAvito', n: 'ЧП Авито, ₽', w: 105, r: 1 },
+  { k: 'profitDiff', n: 'Разброс ЧП МП, ₽/ед.', w: 120, r: 1 },
+  { k: 'profitWB', n: 'ЧП WB, ₽/ед.', w: 105, r: 1 },
+  { k: 'profitOzon', n: 'ЧП Ozon, ₽/ед.', w: 105, r: 1 },
+  { k: 'profitYM', n: 'ЧП ЯМ, ₽/ед.', w: 105, r: 1 },
+  { k: 'profitMM', n: 'ЧП ММ, ₽/ед.', w: 105, r: 1 },
+  { k: 'profitAvito', n: 'ЧП Авито, ₽/ед.', w: 105, r: 1 },
   { k: 'marginWB', n: 'Маржа WB, %', w: 90, r: 1 },
   { k: 'marginOzon', n: 'Маржа Ozon, %', w: 95, r: 1 },
   { k: 'marginYM', n: 'Маржа ЯМ, %', w: 90, r: 1 },
@@ -19386,6 +19446,14 @@ const priceForMargin = (fixedPart, pctOfPrice, marginPct) => ((Number(pctOfPrice
  *  «Статус» считалась только по min_stock и показывала «Норма»/«Готов к
  *  отгрузке» для SKU, скрытых с витрины — пользователь видел позицию
  *  активной, хотя витрина уже скрыта. Порядок веток = приоритет. */
+/* v12.9.63: заглушки Excel и поставщика вместо значения. В файле «Основные данные»
+   15 687 строк несут «#Н/Д» в наименовании и стране — такие ячейки не должны
+   затирать уже известное значение карточки. */
+function isMissingCellValue(v) {
+  const t = String(v == null ? '' : v).trim();
+  if (!t) return true;
+  return /^#?(?:н\/д|n\/a|null|nan|undefined|знач|дело\/0)$/i.test(t);
+}
 function hasShippingData(p) {
   if (p && p.dimensionAnomalyBlocked) return false;
   return num(p && p.weight) > 0 && num(p && p.length) > 0 && num(p && p.width) > 0 && num(p && p.height) > 0;
@@ -20530,10 +20598,13 @@ function calcMarketplacesEconomics(p, ov, meta) {
     p.marketComparisonReasons=shareEcoText(comparisonBlocked.join('; '));
   }
   // A best of only some marketplaces is not a best of all marketplaces.
+  /* v12.9.65: лидер и разница площадок — по прибыли на единицу товара */
+  const ecoUnitNet = e => num(e.netProfitUnit);
+  const ecoUnitMargin = e => num(e.effPrice) > 0 ? round(num(e.netProfitUnit) / num(e.effPrice) * 100, 1) : 0;
   let best = (scopeMp === 'ALL' && !p.marketComparisonIncomplete) ? (comparableMps[0] || null) : null, worst = best;
   for (let i = 1; best && i < comparableMps.length; i++) {
-    if (comparableMps[i].eco.netProfit > best.eco.netProfit) best = comparableMps[i];
-    if (comparableMps[i].eco.netProfit < worst.eco.netProfit) worst = comparableMps[i];
+    if (ecoUnitNet(comparableMps[i].eco) > ecoUnitNet(best.eco)) best = comparableMps[i];
+    if (ecoUnitNet(comparableMps[i].eco) < ecoUnitNet(worst.eco)) worst = comparableMps[i];
   }
   /* v12.9.55: в p.mp попадают только посчитанные площадки. Плоские поля
      нерассчитанных площадок — null (а не 0), чтобы интерфейс и выгрузка
@@ -20544,8 +20615,8 @@ function calcMarketplacesEconomics(p, ov, meta) {
   if (ymEco) p.mp.YM = packEco(ymEco);
   if (mmEco) p.mp.MM = packEco(mmEco);
   if (avitoEco) p.mp.AVITO = packEco(avitoEco);
-  p.bestMp = best ? best.code : ''; p.bestMpName = best ? best.name : ''; p.bestMpProfit = best ? best.eco.netProfit : 0;
-  p.bestMpMargin = best ? best.eco.margin : 0; p.profitDiff = best && worst ? round(best.eco.netProfit - worst.eco.netProfit) : 0;
+  p.bestMp = best ? best.code : ''; p.bestMpName = best ? best.name : ''; p.bestMpProfit = best ? ecoUnitNet(best.eco) : 0;
+  p.bestMpMargin = best ? ecoUnitMargin(best.eco) : 0; p.profitDiff = best && worst ? round(ecoUnitNet(best.eco) - ecoUnitNet(worst.eco), 2) : 0;
   /* v12.9.56: четыре поля площадки пишутся прямо в числовой массив строки —
      через прототип это 20 обращений к сеттеру на SKU. Имена полей предвычислены. */
   const flatMp = (fields, eco, withUnavailable) => {
@@ -20554,8 +20625,8 @@ function calcMarketplacesEconomics(p, ov, meta) {
        (интерфейс показывает «—», выгрузка оставляет ячейку пустой). */
     if (!eco) { setRowNum(p, fields[0], undefined); setRowNum(p, fields[1], undefined); setRowNum(p, fields[2], undefined); setRowNum(p, fields[3], undefined); return; }
     const blocked = eco.returnRateInvalid || (withUnavailable && eco.inputUnavailable);
-    setRowNum(p, fields[0], blocked ? 0 : eco.netProfit);
-    setRowNum(p, fields[1], blocked ? 0 : eco.margin);
+    setRowNum(p, fields[0], blocked ? 0 : ecoUnitNet(eco));
+    setRowNum(p, fields[1], blocked ? 0 : ecoUnitMargin(eco));
     setRowNum(p, fields[2], blocked ? 0 : eco.breakEvenPrice);
     setRowNum(p, fields[3], blocked ? 0 : eco.tgtPrice);
   };
@@ -20581,7 +20652,8 @@ const ANOMALY_ECON_ZERO_FIELDS = [
   'uAgency','uSpecial','uTransfer','uMileRaw','uLogRaw','uPackRaw','uRetRaw','uTransitPack','uTransitPackRaw',
   'uPenalty','uStorage','listingUnit','profitWB','profitOzon','profitYM','profitMM','profitAvito',
   'marginWB','marginOzon','marginYM','marginMM','marginAvito','beWB','beOzon','beYM','beMM','beAvito',
-  'tgtWB','tgtOzon','tgtYM','tgtMM','tgtAvito','cheapFbsAmount','cheapFbsTotal'
+  'tgtWB','tgtOzon','tgtYM','tgtMM','tgtAvito','cheapFbsAmount','cheapFbsTotal',
+  'mRevenue','mCogs','mCommission','mLastMile','mLogistics','mTax','mProcessing','mReturns','mNetProfit'
 ];
 function clearAnomalyEconomics(p) {
   if (!p) return p;
@@ -20724,21 +20796,29 @@ function computeEconomics(p, ov) {
   const unit = key => num(selectedEco[key]);
   const sales = Math.max(0, num(p.sales));
 
-  // В агрегатах и на главном листе Excel — месячные суммы. Сырые ₽/ед. хранятся
-  // отдельно в u*-полях, поэтому формулы больше не смешивают единицы и месяц.
-  p.revenue = selectedEco.revenue; p.cogs = selectedEco.cogs;
-  p.commission = num(m.commission); p.specialFee = num(m.specialFee);
-  p.acquiring = num(m.acquiring); p.paymentTransfer = num(m.paymentTransfer);
-  p.logistics = num(m.logistics); p.lastMile = num(m.lastMile);
-  p.scDelivery = num(m.scDelivery); p.packaging = num(m.packaging);
-  p.processing = num(m.processing); p.returns = num(m.returns);
-  p.returnStorage = num(m.returnStorage); p.penalties = num(m.penalties);
-  p.boost = num(m.boost); p.cofin = num(m.cofin); p.tax = num(m.tax);
-  p.storage = num(m.storage); p.listing = num(m.listing);
-  p.nonStd = num(m.nonStd); p.lateShip = num(m.lateShip);
-  p.netProfit = selectedEco.netProfit;
-  // При нулевых фактических продажах маржа и ROI не определены; гипотетическая
-  // маржа солвера остаётся только внутри selectedEco и не идёт в Excel/KPI.
+  /* v12.9.65: ВСЕ рублёвые величины строки — НА ОДНУ ЕДИНИЦУ товара:
+     выручка = цена за штуку, себестоимость = закупка за штуку, каждая статья
+     расходов = ₽ за штуку, чистая прибыль = прибыль одной единицы.
+     Месячные суммы (если продажи введены) остаются в m*-полях — для отчётов,
+     которым нужен период. */
+  p.mRevenue = selectedEco.revenue; p.mCogs = selectedEco.cogs;
+  p.mCommission = num(m.commission); p.mLastMile = num(m.lastMile);
+  p.mLogistics = num(m.logistics); p.mTax = num(m.tax);
+  p.mProcessing = num(m.processing); p.mReturns = num(m.returns);
+  p.mNetProfit = selectedEco.netProfit;
+  p.revenue = num(selectedEco.effPrice) || effPrice;
+  p.cogs = num(selectedEco.cost);
+  p.commission = unit('commissionRub'); p.specialFee = unit('specialFeeRub');
+  p.acquiring = unit('agencyFee'); p.paymentTransfer = unit('paymentTransferRub');
+  p.logistics = unit('logisticsRub'); p.lastMile = unit('lastMileRub');
+  p.scDelivery = unit('scDeliveryRub'); p.packaging = unit('packRub');
+  p.processing = round(unit('transitPackRub') + unit('processingRub'), 2);
+  p.returns = unit('returnsRub'); p.returnStorage = unit('returnStorageRub');
+  p.penalties = unit('penaltiesRub'); p.boost = unit('adsRub');
+  p.cofin = unit('cofinRub'); p.tax = unit('taxRub');
+  p.storage = unit('storageRub'); p.listing = unit('listingRub');
+  p.nonStd = unit('nonStdRub'); p.lateShip = unit('lateShipRub');
+  p.netProfit = num(selectedEco.netProfitUnit);
   p.margin = p.revenue > 0 ? round(p.netProfit / p.revenue * 100, 1) : 0;
   p.roi = p.cogs > 0 ? round(p.netProfit / p.cogs * 100, 1) : 0;
   p.breakEvenPrice = selectedEco.breakEvenPrice; p.tgtPrice = selectedEco.tgtPrice;
@@ -21526,7 +21606,9 @@ function enrichColumnsText(p) {
   if (num(p.price) <= 0 && num(p.cost) <= 0) out.push(...econSpecOf('price').columns);
   if (num(p.cost) <= 0) out.push(...econSpecOf('cost').columns);
   if (num(p.weight) <= 0 && !(num(p.length) > 0 && num(p.width) > 0 && num(p.height) > 0)) out.push(...econSpecOf('dims').columns);
-  if (num(p.sales) <= 0) out.push(...econSpecOf('sales').columns);
+  /* v12.9.64: продажи за месяц не обязательны. Экономика считается на единицу
+     (ЧП на 1 ед., безубыточная и целевая цена), поэтому «добавьте столбец
+     Продажи» больше не выводится. */
   return out.join('; ');
 }
 
@@ -25498,14 +25580,14 @@ const Dash = {
           if (p.mp[k] && a.mps[k]) {
             if (!p.mp[k].comparisonEligible) a.mps[k].incompleteN=(a.mps[k].incompleteN || 0)+1;
             if (p.mp[k].returnRateInvalid || p.mp[k].inputUnavailable) continue;
-            const mpSales = Math.max(0,num(p.sales));
+            /* v12.9.65: сравнение площадок — тоже на единицу товара */
             a.mps[k].econN = (a.mps[k].econN || 0) + 1;
-            a.mps[k].rev += p.mp[k].revenue || 0;
-            a.mps[k].net += p.mp[k].netProfit || 0;
-            a.mps[k].cogs += p.mp[k].cogs || 0;
-            a.mps[k].comm += (p.mp[k].commissionRub || 0) * mpSales;
-            a.mps[k].log += ((p.mp[k].logisticsRub || 0) + (p.mp[k].lastMileRub || 0)) * mpSales;
-            a.mps[k].ret += (p.mp[k].returnsRub || 0) * mpSales;
+            a.mps[k].rev += num(p.effPrice ?? p.price);
+            a.mps[k].net += num(p.mp[k].netProfitUnit);
+            a.mps[k].cogs += num(p.mp[k].cost);
+            a.mps[k].comm += num(p.mp[k].commissionRub);
+            a.mps[k].log += num(p.mp[k].logisticsRub) + num(p.mp[k].lastMileRub);
+            a.mps[k].ret += num(p.mp[k].returnsRub);
             if (isBelowBe(p.effPrice ?? p.price, p.mp[k].breakEvenPrice)) a.mps[k].belowBe++;
           }
         }
@@ -25520,7 +25602,6 @@ const Dash = {
       a.contrib += num(p.contribution) * s; a.fixed += p.fixedTotal || 0;
       const bc = a.byCat[p.category] || (a.byCat[p.category] = { rev: 0, net: 0, n: 0 });
       bc.rev += p.revenue || 0; bc.net += p.netProfit || 0; bc.n++;
-      mc.n++; mc.pr += p.netProfit || 0; mc.rev += p.revenue || 0; mc.q += s;
       for (const k in a.cost) a.cost[k] += p[k] || 0;
     }
     a.avgCover = a.actN ? a.coverSum / a.actN : 0;
@@ -25534,8 +25615,8 @@ const Dash = {
     const sp = (base, amp) => spark(i => base * (1 + amp * Math.sin(i / 2.1) + i * 0.006));
     return [
       { l: 'SKU в каталоге', v: fmt(S.rows.length), s: `активных ${fmt(a.actN)} · исключено ${fmt(S.rows.length - a.actN - a.anomalyBlocked)} · карантин ${fmt(a.anomalyBlocked)}`, c: '#5c9dff', sp: sp(S.rows.length, .02), d: 0 },
-      { l: 'Выручка / мес', v: a.econN ? money(a.rev) : 'нет расчёта', s: `${fmt(a.sales)} шт · AoB ${fmtP(a.cogs ? a.rev / a.cogs * 100 - 100 : 0, 0)}`, c: '#f7b32b', sp: sp(a.rev, .16), d: 6.4 },
-      { l: 'Чистая прибыль', v: a.econN ? money(a.net) : 'нет расчёта', s: `рентабельность ${fmtP(a.rev ? a.net / a.rev * 100 : 0)}`, c: a.net > 0 ? '#2fd6a3' : '#ff5f6d', sp: sp(Math.abs(a.net), .3), d: a.net > 0 ? 1 : -1 },
+      { l: 'Средняя цена, ₽/ед.', v: a.econN ? money(a.rev / a.econN) : 'нет расчёта', s: `${fmt(a.econN)} SKU с расчётом · ${fmt(a.sales)} шт/мес · AoB ${fmtP(a.cogs ? a.rev / a.cogs * 100 - 100 : 0, 0)}`, c: '#f7b32b', sp: sp(a.econN ? a.rev / a.econN : 0, .16), d: 6.4 },
+      { l: 'ЧП на 1 ед., ₽', v: a.econN ? money(a.net / a.econN) : 'нет расчёта', s: `рентабельность ${fmtP(a.rev ? a.net / a.rev * 100 : 0)} · среднее по ${fmt(a.econN)} SKU`, c: a.net > 0 ? '#2fd6a3' : '#ff5f6d', sp: sp(a.econN ? Math.abs(a.net / a.econN) : 0, .3), d: a.net > 0 ? 1 : -1 },
       { l: 'Прогноз ЧП, мес', v: a.econN ? money(a.fcProfit) : 'нет расчёта', s: `сезонный коэффициент · ${fmt(a.fcSales)} шт`, c: '#f7b32b', sp: sp(Math.abs(a.fcProfit), .2), d: 0 },
       { l: 'Средняя маржа', v: a.econN ? fmtP(a.marginSum / a.econN) : 'нет расчёта', s: `среднее по SKU с расчётом · без расчёта ${fmt(a.invalidNoBuy + (a.invalidScheme || 0))}`, c: '#2fd6a3', sp: sp(20, .12), d: 2.1 },
       { l: 'Средний ROI', v: a.econN ? fmtP(a.roiSum / a.econN) : 'нет расчёта', s: `на оборотный капитал · без расчёта ${fmt(a.invalidNoBuy + (a.invalidScheme || 0))}`, c: '#8b7cff', sp: sp(15, .2), d: -1.4 },
@@ -25599,9 +25680,9 @@ const Dash = {
               <span><i class="fa-solid fa-store"></i> ${m.name}</span>
               ${isAct ? '<span class="tag" style="background:#2fd6a3;color:#0b0e1a;font-size:9px">АКТИВЕН</span>' : ''}
             </div>
-            <div class="mp-kpi-val" style="color:${m.net >= 0 ? '#2fd6a3' : '#ff5f6d'}">${m.econN ? money(m.net) : 'нет расчёта'}</div>
+            <div class="mp-kpi-val" style="color:${m.net >= 0 ? '#2fd6a3' : '#ff5f6d'}">${m.econN ? money(m.net / m.econN) : 'нет расчёта'}</div>
             <div class="mp-kpi-sub">
-              <div>Маржа: <b>${m.econN ? fmtP(margin) : '—'}</b> · Выручка: <b>${m.econN ? money(m.rev) : '—'}</b>${m.incompleteN ? ` <span style="color:#f7b32b">· предварительно: ${fmt(m.incompleteN)} SKU</span>` : ''}</div>
+              <div>Маржа: <b>${m.econN ? fmtP(margin) : '—'}</b> · Цена: <b>${m.econN ? money(m.rev / m.econN) : '—'}</b>${m.incompleteN ? ` <span style="color:#f7b32b">· предварительно: ${fmt(m.incompleteN)} SKU</span>` : ''}</div>
               <div style="margin-top:3px;display:flex;justify-content:space-between">
                 <span>Лидер: <b style="color:#2fd6a3">${fmt(m.bestCount)} SKU</b></span>
                 ${!m.econN ? '<span>Нет расчёта</span>' : m.belowBe > 0 ? `<span style="color:#ff9f43" title="Ниже устойчивого порога модели; на тарифном скачке отдельные более низкие цены могут быть прибыльны">Ниже ориентира: <b>${fmt(m.belowBe)}</b></span>` : m.incompleteN ? '<span style="color:#f7b32b">Проверьте тарифы</span>' : '<span style="color:#2fd6a3">Все выше ориентира</span>'}
@@ -25623,7 +25704,7 @@ const Dash = {
     if (ops) ops.innerHTML = [
       ['Готовы к отгрузке', ready + ' / ' + act.length, ready === act.length ? '#2fd6a3' : '#f7b32b'],
       ['Покрытие резерва', fmt(avgCover, 0) + ' дн', avgCover < 14 ? '#ff5f6d' : '#2fd6a3'],
-      ['Невыкупы / мес', money(unred), '#f471b5'],
+      ['Возвраты / невыкуп, ₽', money(unred), '#f471b5'],
       ['Отдельный штраф объёма', 'нет оценки', '#8b95b4'],
       ['Доставка до СЦ', money(scCost), '#5c9dff'],
       ['Отгрузок / мес', fmt(toShip) + ' шт', '#8b7cff']
@@ -25632,10 +25713,10 @@ const Dash = {
     Chart.defaults.color = '#8b95b4'; Chart.defaults.font.family = 'IBM Plex Sans'; Chart.defaults.borderColor = '#ffffff10';
     const mk = (id, cfg) => { const el = $('#' + id); if (!el) return; if (Dash.charts[id]) { try { Dash.charts[id].destroy(); } catch (e) { } } if (S.charts[id]) { try { S.charts[id].destroy(); } catch (e) { } } Dash.charts[id] = new Chart(el, cfg); };
     mk('chCat', {
-      type: 'bar', data: { labels: top.map(t => t[0]), datasets: [{ label: 'Выручка, ₽', data: top.map(t => round(t[1].rev)), backgroundColor: '#5c9dffcc', borderRadius: 5, yAxisID: 'y' }, { label: 'Чистая прибыль, ₽', data: top.map(t => round(t[1].net)), backgroundColor: top.map(t => t[1].net >= 0 ? '#2fd6a3' : '#ff5f6d'), borderRadius: 5, yAxisID: 'y' }] },
+      type: 'bar', data: { labels: top.map(t => t[0]), datasets: [{ label: 'Цена, ₽ (сумма по SKU)', data: top.map(t => round(t[1].rev)), backgroundColor: '#5c9dffcc', borderRadius: 5, yAxisID: 'y' }, { label: 'ЧП на 1 ед., ₽ (сумма по SKU)', data: top.map(t => round(t[1].net)), backgroundColor: top.map(t => t[1].net >= 0 ? '#2fd6a3' : '#ff5f6d'), borderRadius: 5, yAxisID: 'y' }] },
       options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index' }, plugins: { legend: { labels: { boxWidth: 9, usePointStyle: true } } }, scales: { x: { ticks: { maxRotation: 45, minRotation: 30, font: { size: 9 } } }, y: { ticks: { callback: v => fmt(v / 1000) + 'k' } } } }
     });
-    const costKeys = [['cogs', 'Себестоимость'], ['commission', 'Размещение'], ['specialFee', 'Спецтариф FBS'], ['acquiring', 'Приём платежа'], ['paymentTransfer', 'Перевод выплаты'], ['lastMile', 'Доставка покупателю'], ['boost', 'Продвижение'], ['logistics', 'Средняя миля'], ['scDelivery', 'До СЦ (продавец)'], ['packaging', 'Упаковка'], ['storage', 'Хранение'], ['processing', 'Тара и обработка'], ['returns', 'Возврат / невыкуп'], ['returnStorage', 'Хранение возвратов'], ['penalties', 'Штрафы'], ['nonStd', 'Нестандартный товар'], ['lateShip', 'Поздняя отгрузка'], ['listing', 'Размещение объявлений'], ['tax', 'Налог продавца'], ['cofin', 'Софин. акций'], ['fixedTotal', 'Фикс. расходы']];
+    const costKeys = [['cogs', 'Себестоимость'], ['commission', 'Размещение'], ['specialFee', 'Спецтариф FBS'], ['acquiring', 'Приём платежа'], ['paymentTransfer', 'Перевод выплаты'], ['lastMile', 'Доставка покупателю'], ['boost', 'Продвижение'], ['logistics', 'Средняя миля'], ['scDelivery', 'До СЦ (продавец)'], ['packaging', 'Упаковка'], ['storage', 'Хранение'], ['processing', 'Тара и обработка'], ['returns', 'Возврат / невыкуп'], ['returnStorage', 'Хранение возвратов'], ['penalties', 'Штрафы'], ['nonStd', 'Нестандартный товар'], ['lateShip', 'Поздняя отгрузка'], ['listing', 'Размещение объявлений'], ['tax', 'Налог продавца'], ['cofin', 'Софин. акций']];
     const sums = costKeys.map(k => agg.cost[k[0]]);
     mk('chCost', {
       type: 'doughnut', data: { labels: costKeys.map(k => k[1]), datasets: [{ data: sums.map(v => round(v)), backgroundColor: ['#8b7cff', '#f7b32b', '#fb923c', '#5c9dff', '#38bdf8', '#f471b5', '#ff9f43', '#2fd6a3', '#4fd1c5', '#a3e635', '#f0abfc', '#d8b4fe', '#fb7185', '#ef4444', '#f59e0b', '#fdba74', '#fca5a5', '#a78bfa', '#f472b6', '#94a3b8', '#64748b'], borderWidth: 0, hoverOffset: 8 }] },
@@ -25656,6 +25737,35 @@ const Dash = {
     $('#filesCount').textContent = S.imports.length + ' файлов';
     $('#dbFiles').innerHTML = '<thead><tr><th>Файл</th><th class="t-r">Строк</th><th class="t-r">+новые</th><th class="t-r">обновл.</th><th>Дата</th></tr></thead><tbody>' +
       (S.imports.length ? S.imports.slice(-14).reverse().map(f => `<tr><td title="${esc(f.cols || '')}" style="max-width:190px;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</td><td class="t-r mono">${fmt(f.rows)}</td><td class="t-r mono" style="color:var(--teal)">${fmt(f.added)}</td><td class="t-r mono" style="color:var(--blue)">${fmt(f.updated)}</td><td class="hint">${new Date(f.date).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td></tr>`).join('') : '<tr><td colspan="5" class="hint">Пока нет загруженных файлов — раздел 2 «Данные»</td></tr>') + '</tbody>';
+  }
+};
+
+/* ============================ 16. ИМПОРТ / МАППИНГ ======================== */
+/* Optional local demonstration import.
+ * This static dataset is never loaded during boot, never written to GAS, and never
+ * bypasses the normal mapping/import pipeline. It is available only after an
+ * explicit user click on the Data screen. */
+const DEMO_IMPORT_CSV = `Артикул;Ориг. артикул;Бренд;Название;OE-номера;Категория;Цена;Себестоимость;Вес, кг;Длина, см;Ширина, см;Высота, см;Остаток;Мин. остаток;Продажи;Видимость
+DEMO-FLT-001;FLT-001;NordFilter;Фильтр масляный;OE-FLT-001;Фильтры;890;410;0.32;12;12;16;48;8;22;да
+DEMO-FLT-002;FLT-002;NordFilter;Фильтр воздушный;OE-FLT-002;Фильтры;1240;620;0.58;28;22;8;31;6;14;да
+DEMO-BRK-001;BRK-001;AutoStop;Колодки тормозные передние;OE-BRK-001 / OE-BRK-002;Тормозная система;3650;1880;1.85;16;9;7;17;4;9;да
+DEMO-BRK-002;BRK-002;AutoStop;Диск тормозной передний;OE-BRK-003;Тормозная система;4980;2750;5.2;30;30;8;12;3;6;да
+DEMO-CLT-001;CLT-001;DriveLine;Комплект сцепления;OE-CLT-001;Сцепление;18700;11200;8.4;34;34;12;5;2;3;да
+DEMO-SUS-001;SUS-001;RoadTech;Стойка стабилизатора;OE-SUS-001;Подвеска;1780;760;0.72;28;8;8;26;5;11;да
+DEMO-SUS-002;SUS-002;RoadTech;Рычаг передней подвески;OE-SUS-002;Подвеска;6420;3250;3.1;42;18;14;9;3;4;да
+DEMO-ENG-001;ENG-001;MotorCore;Комплект прокладок двигателя;OE-ENG-001;Двигатель;9850;4900;2.2;38;28;6;7;2;3;да
+DEMO-ELC-001;ELC-001;VoltWorks;Датчик температуры охлаждающей жидкости;OE-ELC-001;Электрика и электроника;2160;980;0.18;9;6;6;19;4;8;да
+DEMO-LGT-001;LGT-001;BrightWay;Лампа головного света;OE-LGT-001;Освещение;760;290;0.12;14;8;8;64;10;31;да
+DEMO-OIL-001;OIL-001;FluidPro;Масло моторное 5W-30, 4 л;OE-OIL-001;Жидкости и масла;3290;2050;3.7;30;20;24;23;5;12;да
+DEMO-TRN-001;TRN-001;DriveLine;Шрус наружный;OE-TRN-001;Трансмиссия / КПП;7350;3820;2.65;24;18;18;8;2;4;да
+`;
+
+const Import = {
+  pick() {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.xlsx,.xls,.csv,.ods'; inp.multiple = false;
+    inp.onchange = async () => { const f=inp.files && inp.files[0]; if (f) await Import.read(f); };
+    inp.click();
   },
   demo() {
     if (S.rows.length && !confirm('Демо-набор будет добавлен через обычный импорт. Продолжить?')) return;
@@ -25712,6 +25822,7 @@ const Dash = {
       const guess = advisorTemplate ? null : Import.guessProfile(file.name, headers);
       const keepVis = $('#impKeepVisibility'); if (keepVis) keepVis.checked = true;
       const relSw = $('#impEnrichRelated'); if (relSw) relSw.checked = S.settings.enrichRelatedOnImport !== false;
+      const eoSw = $('#impEnrichOnly'); if (eoSw) eoSw.checked = S.settings.importEnrichOnly !== false;
       if ($('#impMode')) $('#impMode').value = 'upsert';
       Import.syncPriceIsCost();
       if (advisorTemplate) {
@@ -25893,12 +26004,30 @@ const Dash = {
       const brandMap = mapped.find(x => x.target === 'brand');
       const volumeExplicitCol = headers.findIndex(h => /^(?:объ[её]м\s+задан\s+вручную|volume\s+explicit)$/i.test(String(h || '').trim()));
       const visibilityTrigger = mapped.some(x => x.target === 'price' || x.target === 'stock');
+      /* v12.9.62: справочный файл (весогабариты, OE-кроссы, категории, ТН ВЭД)
+         обогащает каталог, а не раздувает его: строки, которых нет среди SKU,
+         не создаются. Файл с ценой/себестоимостью/остатком всегда создаёт SKU. */
+      const commerceCols = mapped.some(x => x.target === 'price' || x.target === 'cost' || x.target === 'stock');
+      const eoEl = $('#impEnrichOnly');
+      const enrichOnlyOn = eoEl ? !!eoEl.checked : (S.settings.importEnrichOnly !== false);
+      S.settings.importEnrichOnly = enrichOnlyOn;
+      const enrichOnlyRef = enrichOnlyOn && !commerceCols;
+      let enrichOnlySkipped = 0;
       const keyMode = S.settings.keyMode;
       // Detect collisions in the whole file first: do not import the first variant
       // before discovering another literal with the same normalized key.
       const sourceVariants=new Map(), sourceConflicts=new Set();
       const importDataSignature=r=>JSON.stringify(mapped.map(cm=>{
         if(cm.target==='article'||cm.target==='brand')return '';
+        /* v12.9.61: OE-номера и применимость — поля-накопители. В файле кроссов
+           одна связка Артикул+Бренд повторяется на каждый OE (в среднем 5 раз,
+           до тысяч), и такие повторы не конфликт, а накопление списка через
+           mergeCodeLists. Раньше сигнатура считала их разными данными и весь
+           артикул отбрасывался как «разные SKU с одним ключом»: из 486 692 строк
+           кроссов применялось 47 180, у строки оставался ровно один OE. */
+        if(cm.target==='oe_numbers'||cm.target==='oe_list'||cm.target==='oe'||cm.target==='applicability')return '';
+        /* Пользовательские колонки (например «Марка авто») тоже не делают SKU другим. */
+        if(!STD.find(s=>s.k===cm.target))return '';
         const raw=cm.m.virtual?(cm.m.def||''):r[cm.col];return raw==null?'':String(raw).trim();
       }));
       for(const r of body) {
@@ -25924,6 +26053,10 @@ const Dash = {
       const keep = mode === 'replace' ? new Set() : null;
       const touched = []; // объекты для Каталога V (OE-реестр, кроссы, цены)
       const importTupleStates = new WeakMap(); // для авто-OE доказываем полный комплект из одной входной строки
+      /* v12.9.62: накопитель OE по строке. Раньше каждая строка файла кроссов
+         заново разбирала уже собранный список (mergeCodeLists), и для артикула
+         с 3 000 OE это давало O(n²): 71,8 с на этапе «строки файла». */
+      const oeAcc = new Map();
       const visibilityUpdates = [];
       const ambiguousProtected = [];
       if (duplicatePair.size) {
@@ -26009,6 +26142,7 @@ const Dash = {
           }
           const existing = !!p;
           if (!p) {
+            if (enrichOnlyRef) { skipped++; enrichOnlySkipped++; continue; }
             p = { article: rawArt, originalArticle: rawArt, brand: '', name: '', custom: {}, _sources: {}, oe_numbers: '', group_articles: art, visible: true, salesSeries: [] };
             S.rows.push(p); idx.set(kk, p);
             if (idxArt.has(art)) duplicateArt.add(art); else idxArt.set(art, p);
@@ -26083,11 +26217,41 @@ const Dash = {
               if (rawOeCell) { p.oeSource = rawOeCell; rawOeInputs.push(rawOeCell); }
               /* Повторяющиеся строки одной СВЯЗКИ Артикул+Бренд с разными OE не
                  перезаписывают поле, а накапливают уникальный список: OE1 / OE2 / OE3. */
-              p.oe_numbers = mergeCodeLists(p.oe_numbers, val);
-              p.oe_list = p.oe_numbers;
+              let acc = oeAcc.get(p);
+              if (!acc) {
+                const seen = new Set(), list = [];
+                for (const code of codeList(p.oe_numbers || '')) { const k = normArticle(code); if (!k || seen.has(k)) continue; seen.add(k); list.push(code); }
+                acc = { seen, joined: list.join(OE_DELIMITERS[oeMode()].join) };
+                oeAcc.set(p, acc);
+              }
+              const oeSep = OE_DELIMITERS[oeMode()].join;
+              let oeAdded = false;
+              for (const code of codeList(String(val == null ? '' : val))) {
+                const k = normArticle(code);
+                if (!k || acc.seen.has(k)) continue;
+                acc.seen.add(k); acc.joined = acc.joined ? acc.joined + oeSep + code : code; oeAdded = true;
+              }
+              if (oeAdded) { p.oe_numbers = acc.joined; p.oe_list = acc.joined; }
             } else if (cm.target) {
               // A matching update never rewrites the manufacturer's stored source SKU.
               if (cm.target === 'article' && existing) continue;
+              /* v12.9.63: «#Н/Д» и подобные заглушки не считаются значением. */
+              if (typeof val === 'string' && isMissingCellValue(val)) continue;
+              if (cm.target === 'applicability') {
+                /* Применимость накопительная: в справочнике одна связка повторяется
+                   на каждую марку и годы (37 392 строки → 18 318 связок). Раньше
+                   оставалась только последняя строка файла. */
+                const add = String(val == null ? '' : val).trim();
+                const cur = String(p.applicability || '');
+                const parts = cur ? cur.split(';').map(x => x.trim()).filter(Boolean) : [];
+                const seen = new Set(parts.map(x => x.toLowerCase()));
+                if (add && !seen.has(add.toLowerCase()) && parts.length < 80) {
+                  parts.push(add);
+                  const joined = parts.join('; ');
+                  if (joined !== cur) { p.applicability = joined; rowChanged = true; }
+                }
+                continue;
+              }
               if (p[cm.target] !== val) rowChanged = true;
               p[cm.target] = val;
               if (cm.target === 'category_type' && String(val == null ? '' : val).trim()) {
@@ -26189,6 +26353,11 @@ const Dash = {
         }
         await Exp._yield();
       }
+      oeAcc.clear();
+      if (enrichOnlySkipped) {
+        Prog.msg('справочный файл: новых SKU не создаём, обогащено существующих');
+        console.info('[UC] справочный файл: ' + fmt(enrichOnlySkipped) + ' строк без SKU в каталоге — новые не создавались');
+      }
       Prog.step(62);
       _mark('строки файла');
       if (mode === 'replace' && keep && !keepVisibility) {
@@ -26256,12 +26425,24 @@ const Dash = {
         if (prog) prog('Каталог V: OE-индекс и группировка артикулов…');
         HVC.rebuildIndex(S.rows);
         _mark('индекс OE');
-        await HVC.enrichAsync(touchedUnique, prog);
+        /* v12.9.60: prajs postavshchika sam ne obogashchaetsya. Esli v fajle net ni
+           odnogo polya-istochnika (vesogabaritы, obъem, OE-nomera, kategoriya,
+           primenimost), obogashchat ne chem: dannye pridut sleduyushchim fajlom
+           (vesogabaritы / OE-krossy) i razojdutsya po katalogu iz spravochnika. */
+        const enrichSrc = new Set(['weight','net_weight','length','width','height','volume','oe_numbers','oe_list','oe','category','subcategory','applicability']);
+        const fileHasSources = enabled.some(m => m.enabled !== false && enrichSrc.has(m.field));
+        if (fileHasSources) {
+          await HVC.enrichAsync(touchedUnique, prog);
+        } else {
+          S._enrichSkipped = touchedUnique.length;
+          if (prog) prog('обогащение пропущено: в файле нет весогабаритов, OE и категорий');
+          console.info('[UC] обогащение пропущено: ' + fmt(touchedUnique.length) + ' строк · в файле нет полей-источников');
+        }
         _mark('обогащение');
         /* Третий шаг правила ОВХ: типовые габариты по категории/виду. Только
            точное совпадение справочника, только пустые поля и только строки,
            которые не ждут проверки после подбора по OE. */
-        if (S.settings.autoStdDims !== false && typeof StdDims !== 'undefined') {
+        if (fileHasSources && S.settings.autoStdDims !== false && typeof StdDims !== 'undefined') {
           let stdFilled = 0;
           const stdFields = StdDims.fields.map(f => f[0]);
           for (let i = 0; i < touchedUnique.length; i++) {
@@ -26288,7 +26469,7 @@ const Dash = {
         const relSwEl = $('#impEnrichRelated');
         const relOn = relSwEl ? !!relSwEl.checked : (S.settings.enrichRelatedOnImport !== false);
         S.settings.enrichRelatedOnImport = relOn;
-        if (relOn) {
+        if (relOn && fileHasSources) {
           let relRows = [];
           try { relRows = Import._relatedRows(touchedUnique, new Set(touchedUnique), idx, idxArt); }
           catch (eRel) { console.warn('[UC] связанные строки:', eRel); }
@@ -32419,7 +32600,7 @@ const RecommendedPriceScenario = {
       {l:'Δ ЧП / мес к текущей цене',v:r.comparable?money(r.comparableScenario-r.base):'нет сравнения',c:r.comparableScenario-r.base>=0?'#2fd6a3':'#ff5f6d',s:'одинаковый набор: '+fmt(r.comparable)+' SKU'},
       {l:'Текущая ЧП / мес',v:r.comparable?money(r.base):'нет сравнения',c:'#94a3b8',s:'только сопоставимые '+fmt(r.comparable)+' SKU'},
       {l:'Рекоменд. ЧП на том же наборе',v:r.comparable?money(r.comparableScenario):'нет сравнения',c:'#5c9dff',s:'только сопоставимые '+fmt(r.comparable)+' SKU'},
-      {l:'Выручка / мес',v:r.calculated?money(r.revenue):'нет расчёта',c:'#f7b32b',s:'по рекомендованной цене · продажи без изменения'},
+      {l:'Цена, ₽ / SKU (сумма)',v:r.calculated?money(r.revenue):'нет расчёта',c:'#f7b32b',s:'сумма рекомендованных цен по рассчитанным SKU'},
       {l:'Средняя маржа',v:r.calculated?fmtP(r.marginSum/r.calculated):'нет расчёта',c:'#8b7cff',s:'средняя по рассчитанным SKU; убыточных '+fmt(r.loss)},
       {l:'Прогноз ЧП / мес',v:r.calculated?money(r.forecast):'нет расчёта',c:r.forecast>=0?'#2fd6a3':'#ff5f6d',s:'по рекомендованной цене · продажи × сезонность'}
     ];
@@ -32435,7 +32616,7 @@ const RecommendedPriceScenario = {
       r.missingSamples.map(x=>`<tr><td class="mono">${esc(x.p.article||'—')}<br><span class="hint">${esc(x.p.brand||'—')}</span></td><td class="t-r mono">${(x.p.promo&&num(x.p.promoPrice)>0)||num(x.p.price)>0?RecommendedPrice.format(x.p.promo&&num(x.p.promoPrice)>0?x.p.promoPrice:x.p.price):'—'}</td><td class="t-r">—</td><td colspan="${all?9:10}" class="hint">${esc(x.status)} · не включён в сценарные итоги</td><td class="hint">нет расчёта</td></tr>`).join('')+
       r.failedSamples.map(x=>`<tr><td class="mono">${esc(x.p.article||'—')}<br><span class="hint">${esc(x.p.brand||'—')}</span></td><td class="t-r mono">${x.eff>0?RecommendedPrice.format(x.eff):'—'}</td><td class="t-r mono">${RecommendedPrice.format(x.rec)}</td><td class="t-r mono">${x.base===null?'нет расчёта':money(x.base)}</td><td colspan="${all?8:9}" class="hint">${esc(x.status)} · не включён в сценарные итоги</td><td class="hint">нет расчёта</td></tr>`).join('') || `<tr><td colspan="${all?13:14}" class="hint">Нет товаров для сценарного расчёта. Загрузите прайс и проверьте сопоставление.</td></tr>`)+'</tbody>';
     const cats=[...r.cats.entries()].sort((a,b)=>b[1].revenue-a[1].revenue).slice(0,40);
-    $('#ueCategoryTable').innerHTML='<thead><tr><th>Категория</th><th class="t-r">SKU</th><th class="t-r">Продажи, шт</th><th class="t-r">Выручка, ₽</th><th class="t-r">ЧП, ₽</th><th class="t-r">Маржа</th><th class="t-r">Точные / оценка</th><th class="t-r">Убыточные</th></tr></thead><tbody>'+(cats.map(([name,g])=>`<tr><td>${esc(name)}</td><td class="t-r mono">${fmt(g.sku)}</td><td class="t-r mono">${fmt(g.sales)}</td><td class="t-r mono">${money(g.revenue)}</td><td class="t-r mono">${money(g.net)}</td><td class="t-r mono">${g.revenue?fmtP(g.net/g.revenue*100):'—'}</td><td class="t-r mono">${fmt(g.exact)} / ${fmt(g.approx)}</td><td class="t-r mono">${fmt(g.loss)}</td></tr>`).join('')||'<tr><td colspan="8" class="hint">Нет рассчитанных SKU.</td></tr>')+'</tbody>';
+    $('#ueCategoryTable').innerHTML='<thead><tr><th>Категория</th><th class="t-r">SKU</th><th class="t-r">Продажи, шт</th><th class="t-r">Цена, ₽</th><th class="t-r">ЧП/ед., ₽</th><th class="t-r">Маржа</th><th class="t-r">Точные / оценка</th><th class="t-r">Убыточные</th></tr></thead><tbody>'+(cats.map(([name,g])=>`<tr><td>${esc(name)}</td><td class="t-r mono">${fmt(g.sku)}</td><td class="t-r mono">${fmt(g.sales)}</td><td class="t-r mono">${money(g.revenue)}</td><td class="t-r mono">${money(g.net)}</td><td class="t-r mono">${g.revenue?fmtP(g.net/g.revenue*100):'—'}</td><td class="t-r mono">${fmt(g.exact)} / ${fmt(g.approx)}</td><td class="t-r mono">${fmt(g.loss)}</td></tr>`).join('')||'<tr><td colspan="8" class="hint">Нет рассчитанных SKU.</td></tr>')+'</tbody>';
     const expenses=[['Себестоимость','cogs','#8b7cff'],['Размещение','commission','#f7b32b'],['Спецтариф FBS','specialFee','#fb923c'],['Приём платежа','acquiring','#5c9dff'],['Перевод выплаты','paymentTransfer','#38bdf8'],['Доставка покупателю','lastMile','#f471b5'],['Средняя миля','logistics','#2fd6a3'],['Поставщик → СЦ','scDelivery','#4fd1c5'],['Упаковка товара','packaging','#a3e635'],['Хранение','storage','#a78bfa'],['Транзитная тара / обработка','processing','#84cc16'],['Возврат / невыкуп','returns','#f0abfc'],['Хранение возвратов','returnStorage','#d8b4fe'],['Продвижение','boost','#ff9f43'],['Софинансирование акций','cofin','#fb923c'],['Размещение объявлений','listing','#f472b6'],['Налог продавца','tax','#ef4444'],['Штрафы','penalties','#fb7185'],['Нестандартный товар','nonStd','#fb923c'],['Поздняя отгрузка','lateShip','#f472b6'],['Фикс. расходы','fixedTotal','#94a3b8']];
     const max=Math.max(1,...expenses.map(x=>num(r.expense[x[1]])));
     $('#fbsWaterfall').innerHTML=r.calculated ? expenses.map(x=>`<div class="ln"><span>${esc(x[0])}</span><div class="bar"><i style="width:${(num(r.expense[x[1]])/max*100).toFixed(1)}%;background:${x[2]}"></i></div><b class="mono" style="text-align:right">${money(num(r.expense[x[1]]))}</b></div>`).join('') : '<div class="hint">Нет рассчитанных SKU: расходы сценария не определены.</div>';
@@ -32619,7 +32800,7 @@ const UE = {
         { l: actMp === 'OZON' ? 'Прогноз прибыли Ozon' : 'Чистая прибыль канала', v: actCalculated.length ? money(netTotal) : 'нет расчёта', c: netTotal >= 0 ? '#2fd6a3' : '#ff5f6d', s: `по модели; без расчёта ${fmt(act.length - actCalculated.length)} SKU` },
         { l: 'Средняя маржа', v: actCalculated.length ? fmtP(actCalculated.reduce((s, p) => s + num(p.margin), 0) / actCalculated.length) : 'нет расчёта', c: '#2fd6a3', s: 'целевая маржа: ' + (S.settings.tgtMargin ?? 20) + '%; без расчёта ' + fmt(act.length - actCalculated.length) + ' SKU' },
         { l: 'Ниже безубыточности', v: fmt(neg), c: neg ? '#ff5f6d' : '#2fd6a3', s: actMp === 'OZON' ? 'по модели; проверьте входные данные' : (neg ? 'есть позиции ниже ориентира модели' : 'по рассчитанным SKU; не гарантия прибыли') },
-        { l: 'Выручка канала', v: actCalculated.length ? money(act.reduce((s, p) => s + num(p.revenue), 0)) : 'нет расчёта', c: '#2fd6a3', s: 'оборот при текущих продажах' },
+        { l: 'Цена канала, ₽', v: actCalculated.length ? money(act.reduce((s, p) => s + num(p.revenue), 0)) : 'нет расчёта', c: '#2fd6a3', s: 'сумма цен рассчитанных SKU' },
         { l: 'Прогноз ЧП / мес', v: actCalculated.length ? money(fcNet) : 'нет расчёта', c: fcNet >= 0 ? '#2fd6a3' : '#ff5f6d', s: `текущие продажи × сезонность; без расчёта ${fmt(act.length - actCalculated.length)} SKU` }
       ].map(k => `<div class="kpi"><div class="glow" style="background:${k.c}"></div><div class="lbl">${k.l}</div><div class="val" style="color:${k.c};font-size:16px">${k.v}</div><div class="sub">${esc(k.s)}</div></div>`).join('');
     }
@@ -32731,7 +32912,7 @@ const UE = {
     }
     const categoryRows = [...byCat.entries()].sort((a,b) => b[1].revenue - a[1].revenue).slice(0, 40);
     const totalNetForShare = act.reduce((sum,p) => sum + num(p.netProfit), 0);
-    $('#ueCategoryTable').innerHTML = '<thead><tr><th>Категория</th><th class="t-r">SKU</th><th class="t-r">Продажи, шт</th><th class="t-r">Выручка, ₽</th><th class="t-r">ЧП, ₽</th><th class="t-r">Маржа</th><th class="t-r">Точные / оценка</th><th class="t-r">Убыточные SKU</th></tr></thead><tbody>' +
+    $('#ueCategoryTable').innerHTML = '<thead><tr><th>Категория</th><th class="t-r">SKU</th><th class="t-r">Продажи, шт</th><th class="t-r">Цена, ₽</th><th class="t-r">ЧП/ед., ₽</th><th class="t-r">Маржа</th><th class="t-r">Точные / оценка</th><th class="t-r">Убыточные SKU</th></tr></thead><tbody>' +
       (categoryRows.length ? categoryRows.map(([name,g]) => `<tr><td>${esc(name)}</td><td class="t-r mono">${fmt(g.sku)}</td><td class="t-r mono">${fmt(g.sales)}</td><td class="t-r mono">${money(g.revenue)}</td><td class="t-r mono" style="color:${g.net>=0?'#2fd6a3':'#ff5f6d'}">${money(g.net)}</td><td class="t-r mono">${fmtP(g.revenue ? g.net/g.revenue*100 : 0)}</td><td class="t-r mono" title="без ставки: ${g.missing}">${fmt(g.exact)} / ${fmt(g.approximate + g.missing)}</td><td class="t-r mono" style="color:${g.loss?'#ff5f6d':'#2fd6a3'}">${fmt(g.loss)}</td></tr>`).join('') : '<tr><td colspan="8" class="hint">Загрузите товары, чтобы увидеть категорийную аналитику.</td></tr>') + '</tbody>';
 
     const noPrice = act.filter(p => num(p.effPrice || p.price) <= 0).length;
@@ -33338,7 +33519,7 @@ const Products = {
       return `<div><label class="f">${label}</label><input data-p="${k}" type="${type || 'text'}"${step}${list} value="${esc(value)}" style="width:100%"></div>`;
     };
     const unavailable=!!(p.modelReviewRequired || p.missingTariffBlocked || p.noBuyInconsistent);
-    const economicLabels=new Set(['Выручка','Себестоимость общ.','Размещение','Спецтариф FBS','Приём платежа','Перевод выплаты','Доставка покупателю','Средняя миля','Продавец → СЦ','Упаковка / тара','Обработка / сортировка','Возвраты / невыкуп','Хранение возвратов','Фиксированные расходы','Чистая прибыль','Маржа','ROI','Цена безубыточности','Наценка по марже','Наценка по прибыли','Точка безубыточности']);
+    const economicLabels=new Set(['Выручка','Себестоимость общ.','Выручка / ед.','Себестоимость / ед.','Размещение','Спецтариф FBS','Приём платежа','Перевод выплаты','Доставка покупателю','Средняя миля','Продавец → СЦ','Упаковка / тара','Обработка / сортировка','Возвраты / невыкуп','Хранение возвратов','Фиксированные расходы','Чистая прибыль','Маржа','ROI','Цена безубыточности','Наценка по марже','Наценка по прибыли','Точка безубыточности']);
     const calc = (label, v, color) => `<div class="kv"><span>${label}</span><b style="color:${color || '#e8ecf7'}">${unavailable && economicLabels.has(label) ? 'нет расчёта' : v}</b></div>`;
     const cmp = (mp,value,kind) => { const e=p.mp && p.mp[mp]; if (!e || e.inputUnavailable || e.returnRateInvalid) return 'нет расчёта'; if (kind==='price' && num(value)>=10000000) return 'не найдена'; return kind==='pct' ? fmtP(value) : money(value); };
     const marketNames={WB:'Wildberries',OZON:'Ozon',YM:'Яндекс Маркет',MM:'Мегамаркет',AVITO:'Авито'};
@@ -33391,7 +33572,7 @@ const Products = {
       <div>
         <div class="hint" style="letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px">Расчёт · ${esc(marketNames[economicScope()] || economicScope())}</div>
         ${p.modelReviewRequired ? '<div class="oz-ad-notice"><b>Нет расчёта:</b> выберите FBS или FBO.</div>' : p.missingTariffBlocked ? '<div class="oz-ad-notice"><b>Нет расчёта:</b> '+esc(p.missingTariffBlocked)+'.</div>' : p.noBuyInconsistent ? '<div class="oz-ad-notice"><b>Нет расчёта:</b> невыкуп 100%; показатели прибыли и цены недоступны.</div>' : ''}
-        ${calc('Выручка', money(p.revenue))}${calc('Себестоимость общ.', money(p.cogs))}
+        ${calc('Выручка / ед.', money(p.revenue))}${calc('Себестоимость / ед.', money(p.cogs))}
         ${calc('Размещение', money(p.commission), '#f7b32b')}${calc('Спецтариф FBS', money(p.specialFee), '#fb923c')}
         ${calc('Приём платежа', money(p.acquiring), '#5c9dff')}${calc('Перевод выплаты', money(p.paymentTransfer), '#38bdf8')}
         ${calc('Доставка покупателю', money(p.lastMile), '#f471b5')}${calc('Средняя миля', money(p.logistics), '#2fd6a3')}
@@ -34084,7 +34265,7 @@ const PL = {
       },
       {
         name: 'Топ SKU', widths: [20, 16, 42, 14, 15, 16, 16, 12, 13, 22],
-        aoa: [['Артикул', 'Бренд', 'Название', 'Продажи, шт', 'Цена, ₽', 'Выручка, ₽', 'Прибыль, ₽', 'Маржа, %', 'Остаток, шт', 'Статус']].concat(productRows),
+        aoa: [['Артикул', 'Бренд', 'Название', 'Продажи, шт', 'Цена, ₽', 'Цена, ₽/ед.', 'ЧП, ₽/ед.', 'Маржа, %', 'Остаток, шт', 'Статус']].concat(productRows),
         conditionalFormatting: productRows.length ? [
           { range: `D2:D${productRows.length + 1}`, type: 'dataBar', color: 'FF2FD6A3' },
           { range: `E2:E${productRows.length + 1}`, type: 'dataBar', color: 'FF8B7CFF' },
@@ -36128,11 +36309,21 @@ if (typeof globalThis !== 'undefined') globalThis.DictIO = DictIO;
 const OZON_NAME_RULES_VERSION = 'keyword-v6-csv-name|';
 const OzonReference = {
   _ref: null, _idx: null,
+  /* v12.9.60: normalization is the hottest line of the import (pyat tysyach strok
+     -> ~120 000 vyzovov strictKey: podbor tipa Ozon po kazhdomu kandidatu).
+     Funkciya chistaya, poetomu rezultat keshiruetsya po iskhodnoy stroke. */
+  _skCache: new Map(),
   hasData() { return !!(this._ref && ((Array.isArray(this._ref.items) && this._ref.items.length) || (Array.isArray(this._ref.allItems) && this._ref.allItems.length))); },
   scope() { return typeof S !== 'undefined' && S.settings && S.settings.ozonReferenceScope==='all' ? 'all' : 'auto'; },
   version() { return this.hasData() ? 'tree:' + this._ref.revision + ':' + this.scope() : 'historical:' + OzonCat.TYPES.length; },
   strictKey(s) {
-    return String(s == null ? '' : s).normalize('NFC').toLowerCase().replace(/\s+/gu, ' ').trim();
+    const src = s == null ? '' : String(s);
+    const hit = this._skCache.get(src);
+    if (hit !== undefined) return hit;
+    const out = src.normalize('NFC').toLowerCase().replace(/\s+/gu, ' ').trim();
+    if (this._skCache.size >= 50000) this._skCache.clear();
+    this._skCache.set(src, out);
+    return out;
   },
   looseKey(s) {
     return this.strictKey(s).normalize('NFKC').replace(/ё/g, 'е')
@@ -36760,6 +36951,9 @@ const OzonAuto = {
       const literalWords=this._literalTokens(type), literalNeeds=[...new Set(literalWords.map(w=>this._stem(w)).filter(x=>x.length>=2))];
       const literalHead=this._head(literalWords,null) || literalNeeds[0] || '';
       const entry = { cat, type, head, needs, literalHead, literalNeeds, path:t.path || [], catId:t.catId || '', typeId:t.typeId || '', score:needs.length * 1000 + needs.reduce((n,x) => n + Math.min(x.length,8),0) };
+      /* v12.9.60: klyuchi schitayutsya odin raz na zapis spravochnika, a ne na
+         kazhduyu stroku importa (ranee eto bylo 28,9 % vremeni pereschyota). */
+      entry.typeKey = OzonReference.strictKey(type); entry.catNorm = CategoryTnved.norm(cat);
       idx.entries.push(entry); idx.heads.add(head);
       for (const k of needs) { if (!idx.byWord.has(k)) idx.byWord.set(k, []); idx.byWord.get(k).push(entry); }
       const kindKey=this._kindKey(type);
@@ -36793,15 +36987,16 @@ const OzonAuto = {
     for (const k of new Set([...keys,...rawKeys])) { const list = index.byWord.get(k); if (list) for (const t of list) candidates.add(t); }
     let matches = []; const rawMatches=new Set(), aliasMatches=new Set();
     for (const t of candidates) {
-      if (OzonReference.strictKey(t.type) === 'ключ автомобильный' && /(?:гаечн|рожков|накидн|торцев|динамометр|фильтр|съ[её]мн|шестигран|свечн|колесн|болт|гайк|трещотк)/i.test(name)) continue;
-      if (OzonReference.strictKey(t.type) === 'насос автомобильный' && /(?:омывател|топлив|масл|охлаж|водян|гидро|тормоз|откач|перекач|ручн|abs|абс|гур)/i.test(name)) continue;
+      const tKey = t.typeKey || OzonReference.strictKey(t.type);
+      if (tKey === 'ключ автомобильный' && /(?:гаечн|рожков|накидн|торцев|динамометр|фильтр|съ[её]мн|шестигран|свечн|колесн|болт|гайк|трещотк)/i.test(name)) continue;
+      if (tKey === 'насос автомобильный' && /(?:омывател|топлив|масл|охлаж|водян|гидро|тормоз|откач|перекач|ручн|abs|абс|гур)/i.test(name)) continue;
       /* Mechanical hose/exhaust mounts are not silently treated as a generic
          interior accessory holder. More specific tree types may still match. */
-      if (OzonReference.strictKey(t.type) === 'держатель автомобильный' &&
+      if (tKey === 'держатель автомобильный' &&
           /(?:тормоз|шланг|труб|выхлоп|глушител|топлив|амортизатор|двигател|подвеск|насос|радиатор|трансмисс|стартер|суппорт|шрус)/i.test(name)) continue;
       /* A cabin pillow is not a suspension/radiator/engine mounting pad or
          an airbag. A part name can still have a more specific valid type. */
-      if (OzonReference.strictKey(t.type) === 'подушка автомобильная' &&
+      if (tKey === 'подушка автомобильная' &&
           /(?:амортизатор|радиатор|двигател|мотора|двс|подвеск|подрамник|рессор|редуктор|кпп|коробк[аиуы]?\s+передач|глушител|рулев|руля|безопасност|airbag|эйрб[еэ]г|аэрб[еэ]г)/i.test(name)) continue;
       if (/(?:мотоцикл|скутер|мопед|снегоход|квадроцикл|(?:^|\s)мото(?=\s|$))/i.test(name) &&
           !/(?:мото|снегоход|квадроцикл)/i.test([t.cat,t.type].concat(t.path || []).join(' '))) continue;
@@ -36813,7 +37008,7 @@ const OzonAuto = {
       /^(?:\s*)(?:комплект|набор)(?=\s|$)/i.test(name.replace(/ё/g,'е'));
     if (multiple) {
       const distinctHeads = [...new Set(matches.map(t => t.head))];
-      const distinctTypes = [...new Set(matches.map(t => OzonReference.strictKey(t.type)))];
+      const distinctTypes = [...new Set(matches.map(t => t.typeKey || OzonReference.strictKey(t.type)))];
       /* A set joined by 'and' can contain a second product even if that
          product is absent from this tree (e.g. fuel and oil filters). */
       const joinedSet = /^\s*(?:комплект|набор)(?=\s|$)/i.test(name) && /(?:\sи\s|\s\+\s|\s&\s)/i.test(name);
@@ -36890,8 +37085,9 @@ const OzonAuto = {
     if (!allowed.has(CategoryTnved.norm(preferred))) return null;
     const typeKey = OzonReference.strictKey(type);
     const matches = (knownMatches || this._index().entries).filter(x =>
-      OzonReference.strictKey(x.type) === typeKey && allowed.has(CategoryTnved.norm(x.cat)));
-    const selected = matches.filter(x => CategoryTnved.norm(x.cat) === CategoryTnved.norm(preferred));
+      (x.typeKey || OzonReference.strictKey(x.type)) === typeKey && allowed.has(x.catNorm || CategoryTnved.norm(x.cat)));
+    const preferredNorm = CategoryTnved.norm(preferred);
+    const selected = matches.filter(x => (x.catNorm || CategoryTnved.norm(x.cat)) === preferredNorm);
     if (!selected.length) return null;
     const pairs = new Set(selected.map(x => x.catId && x.typeId
       ? JSON.stringify([x.catId, x.typeId]) : JSON.stringify([x.cat, x.type])));
@@ -37371,7 +37567,7 @@ function exportCatalog() {
     { g: 'ozn', k: 'ozon_type_src', n: 'Источник типа OZON', w: 24, src: p => p.ozon_type_src==='keyword' && p.ozon_type_basis==='category_dictionary' ? 'по виду категории · проверить' : (({ auto: 'OE/применимость', manual: 'вручную', import: 'из файла · проверить', keyword:'по названию · проверить', fallback: 'по категории', none: 'не определён' })[p.ozon_type_src] || '—') },
     { g: 'ozn', k: 'ozon_type_conf', n: 'Уверенность OZON', w: 14 },
     { g: 'calc', k: 'bestMp', n: 'Лучший маркетплейс', w: 18, src: p => p.bestMpName || p.bestMp || '—' },
-    { g: 'calc', k: 'profitWB', n: 'ЧП Wildberries, ₽', w: 16, f: '#,##0', src: p => p.profitWB },
+    { g: 'calc', k: 'profitWB', n: 'ЧП WB, ₽/ед.', w: 16, f: '#,##0', src: p => p.profitWB },
     { g: 'calc', k: 'marginWB', n: 'Маржа WB, %', w: 12, f: '0.0', src: p => p.marginWB },
     { g: 'calc', k: 'beWB', n: 'Безубыток WB, ₽', w: 14, f: '#,##0', src: p => p.noBuyInconsistent || num(p.beWB) >= 10000000 ? '' : p.beWB },
     { g: 'calc', k: 'tgtWB', n: 'Реком. цена WB, ₽', w: 16, f: '#,##0', src: p => p.noBuyInconsistent || num(p.tgtWB) >= 10000000 ? '' : p.tgtWB },
@@ -37379,17 +37575,17 @@ function exportCatalog() {
     { g: 'calc', k: 'marginOzon', n: 'Маржа Ozon, %', w: 12, f: '0.0', src: p => p.marginOzon },
     { g: 'calc', k: 'beOzon', n: 'Безубыток Ozon, ₽', w: 14, f: '#,##0', src: p => p.noBuyInconsistent || num(p.beOzon) >= 10000000 ? '' : p.beOzon },
     { g: 'calc', k: 'tgtOzon', n: 'Реком. цена Ozon, ₽', w: 16, f: '#,##0', src: p => p.noBuyInconsistent || num(p.tgtOzon) >= 10000000 ? '' : p.tgtOzon },
-    { g: 'calc', k: 'profitYM', n: 'ЧП Я.Маркет, ₽', w: 16, f: '#,##0', src: p => p.profitYM },
+    { g: 'calc', k: 'profitYM', n: 'ЧП Я.Маркет, ₽/ед.', w: 16, f: '#,##0', src: p => p.profitYM },
     { g: 'calc', k: 'marginYM', n: 'Маржа ЯМ, %', w: 12, f: '0.0', src: p => p.marginYM },
     { g: 'calc', k: 'beYM', n: 'Безубыток ЯМ, ₽', w: 14, f: '#,##0', src: p => p.noBuyInconsistent || num(p.beYM) >= 10000000 ? '' : p.beYM },
     { g: 'calc', k: 'tgtYM', n: 'Реком. цена ЯМ, ₽', w: 16, f: '#,##0', src: p => p.noBuyInconsistent || num(p.tgtYM) >= 10000000 ? '' : p.tgtYM },
-    { g: 'calc', k: 'profitMM', n: 'ЧП Мегамаркет, ₽', w: 16, f: '#,##0', src: p => p.profitMM },
+    { g: 'calc', k: 'profitMM', n: 'ЧП Мегамаркет, ₽/ед.', w: 16, f: '#,##0', src: p => p.profitMM },
     { g: 'calc', k: 'marginMM', n: 'Маржа ММ, %', w: 12, f: '0.0', src: p => p.marginMM },
     { g: 'calc', k: 'profitAvito', n: 'ЧП Авито, ₽', w: 16, f: '#,##0', src: p => p.profitAvito },
     { g: 'calc', k: 'marginAvito', n: 'Маржа Авито, %', w: 12, f: '0.0', src: p => p.marginAvito },
     { g: 'calc', k: 'beAvito', n: 'Безубыток Авито, ₽', w: 14, f: '#,##0', src: p => p.noBuyInconsistent || num(p.beAvito) >= 10000000 ? '' : p.beAvito },
     { g: 'calc', k: 'tgtAvito', n: 'Реком. цена Авито, ₽', w: 16, f: '#,##0', src: p => p.noBuyInconsistent || num(p.tgtAvito) >= 10000000 ? '' : p.tgtAvito },
-    { g: 'calc', k: 'profitDiff', n: 'Разброс прибыли МП, ₽', w: 16, f: '#,##0', src: p => p.profitDiff || 0 },
+    { g: 'calc', k: 'profitDiff', n: 'Разброс ЧП МП, ₽/ед.', w: 16, f: '#,##0', src: p => p.profitDiff || 0 },
     { g: 'calc', k: 'commWB', n: 'Комиссия WB, %', w: 13, f: '0.0', src: p => p.mp?.WB?.commissionPct ?? S.settings.wbCommissionPct ?? 15 },
     { g: 'calc', k: 'logWB', n: 'Логистика WB, ₽', w: 14, f: '#,##0.00', src: p => p.mp?.WB?.logisticsRub ?? 0 },
     { g: 'calc', k: 'retWB', n: 'Возврат WB, ₽', w: 13, f: '#,##0.00', src: p => p.mp?.WB?.returnsRub ?? 0 },
@@ -37519,42 +37715,42 @@ function exportCatalog() {
       /* Formula mirrors skuStatus() including exclusion, pending deletion, compliance and dispatch readiness.
          If a dependency is omitted from an export profile, strictRef falls back to the JS snapshot. */
       `=IF(OR(${r.weight}${R}<=0,${r.length}${R}<=0,${r.width}${R}<=0,${r.height}${R}<=0),"Заблокировано системой",IF(${r.excluded}${R}="да","Исключён",IF(${r.deletePending}${R}="да","На удаление",IF(AND(${r.markRequired}${R}="да",${r.markCompliant}${R}="нет"),"Ошибка маркировки",IF(${r.visible}${R}="нет",IF(OR(${r.visibleReason}${R}="virtual_stock_low",${r.visibleReason}${R}="min_stock_threshold"),"Скрыт (мало остатка)","Скрыт (витрина)"),IF(${r.deficit}${R}<0,"Дефицит",IF(${r.shipReady}${R}="да","Готов к отгрузке","Норма")))))))` },
-    { g: 'calc', k: 'revenue', n: 'Выручка, ₽', w: 14, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.effPrice}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'cogs', n: 'Себестоимость общ., ₽', w: 17, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.costMult}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'commission', n: 'Размещение, ₽', w: 15, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.commPct}${R}/100,2)*${r.sales}${R},2)` },
-    { g: 'calc', k: 'specialFee', n: 'Спецтариф FBS, ₽', w: 16, f: '#,##0.00', xl: (R, r) => `=IF(${r.cheapFbsFlag}${R}="да",ROUND(ROUND(${r.effPrice}${R}*${r.cheapFbsRate}${R}/100,2)*${r.sales}${R},2),0)` },
-    { g: 'calc', k: 'acquiring', n: 'Приём платежа, ₽', w: 16, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.agencyFeePerSku}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'paymentTransfer', n: 'Перевод выплаты, ₽', w: 16, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.acqPct}${R}/100,2)*${r.sales}${R},2)` },
-    { g: 'calc', k: 'lastMile', n: 'Доставка покупателю, ₽', w: 19, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.buyerDeliveryUnit}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'boost', n: 'Продвижение, ₽', w: 13, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.boostPct}${R}/100,2)*${r.sales}${R},2)` },
-    { g: 'calc', k: 'cofin', n: 'Софинансирование, ₽', w: 15, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.cofinPct}${R}/100,2)*${r.sales}${R},2)` },
-    { g: 'calc', k: 'logistics', n: 'Средняя миля FBS, ₽', w: 18, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uLog}${R}*${r.sales}${R},2)` },
+    { g: 'calc', k: 'revenue', n: 'Цена, ₽/ед.', w: 14, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.effPrice}${R},2)` },
+    { g: 'calc', k: 'cogs', n: 'Себестоимость, ₽/ед.', w: 17, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.costMult}${R},2)` },
+    { g: 'calc', k: 'commission', n: 'Размещение, ₽/ед.', w: 15, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.commPct}${R}/100,2),2)` },
+    { g: 'calc', k: 'specialFee', n: 'Спецтариф FBS, ₽/ед.', w: 16, f: '#,##0.00', xl: (R, r) => `=IF(${r.cheapFbsFlag}${R}="да",ROUND(ROUND(${r.effPrice}${R}*${r.cheapFbsRate}${R}/100,2),2),0)` },
+    { g: 'calc', k: 'acquiring', n: 'Приём платежа, ₽/ед.', w: 16, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.agencyFeePerSku}${R},2)` },
+    { g: 'calc', k: 'paymentTransfer', n: 'Перевод выплаты, ₽/ед.', w: 16, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.acqPct}${R}/100,2),2)` },
+    { g: 'calc', k: 'lastMile', n: 'Доставка покупателю, ₽/ед.', w: 19, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.buyerDeliveryUnit}${R},2)` },
+    { g: 'calc', k: 'boost', n: 'Продвижение, ₽/ед.', w: 13, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.boostPct}${R}/100,2),2)` },
+    { g: 'calc', k: 'cofin', n: 'Софинансирование, ₽/ед.', w: 15, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.cofinPct}${R}/100,2),2)` },
+    { g: 'calc', k: 'logistics', n: 'Средняя миля FBS, ₽/ед.', w: 18, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uLog}${R},2)` },
     { g: 'in', k: 'daysCover', n: 'Покрытие резерва, дн', w: 14, f: '0.0', src: p => p.daysCover },
-    { g: 'calc', k: 'scDelivery', n: 'Доставка до СЦ, ₽', w: 15, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uSc}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'packaging', n: 'Упаковка, ₽', w: 12, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uPack}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'storage', n: 'Хранение, ₽', w: 13, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.storageUnit}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'processing', n: 'Транзитная тара и обработка, ₽', w: 24, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.sales}${R}*(${r.uTransitPack}${R}+${r.prUnit}${R}),2)` },
-    { g: 'calc', k: 'returnStorage', n: 'Хранение возвратов, ₽', w: 18, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.returnStorageUnit}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'penalties', n: 'Штрафы, ₽', w: 13, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.slaPenaltyPerUnit}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'nonStd', n: 'Нестандартная обработка, ₽/мес', w: 25, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.nonStdUnit}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'lateShip', n: 'Поздняя отгрузка, ₽/мес', w: 24, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.lateShipUnit}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'listing', n: 'Размещение объявлений, ₽', w: 18, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.listingUnit}${R}*${r.sales}${R},2)` },
+    { g: 'calc', k: 'scDelivery', n: 'Доставка до СЦ, ₽/ед.', w: 15, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uSc}${R},2)` },
+    { g: 'calc', k: 'packaging', n: 'Упаковка, ₽/ед.', w: 12, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uPack}${R},2)` },
+    { g: 'calc', k: 'storage', n: 'Хранение, ₽/ед.', w: 13, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.storageUnit}${R},2)` },
+    { g: 'calc', k: 'processing', n: 'Транзитная тара и обработка, ₽/ед.', w: 24, f: '#,##0.00', xl: (R, r) => `=ROUND((${r.uTransitPack}${R}+${r.prUnit}${R}),2)` },
+    { g: 'calc', k: 'returnStorage', n: 'Хранение возвратов, ₽/ед.', w: 18, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.returnStorageUnit}${R},2)` },
+    { g: 'calc', k: 'penalties', n: 'Штрафы, ₽/ед.', w: 13, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.slaPenaltyPerUnit}${R},2)` },
+    { g: 'calc', k: 'nonStd', n: 'Нестандартная обработка, ₽/ед.', w: 25, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.nonStdUnit}${R},2)` },
+    { g: 'calc', k: 'lateShip', n: 'Поздняя отгрузка, ₽/ед.', w: 24, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.lateShipUnit}${R},2)` },
+    { g: 'calc', k: 'listing', n: 'Размещение объявлений, ₽/ед.', w: 18, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.listingUnit}${R},2)` },
     /* v10.6.2 (fix #2): формула возвратов с явной проверкой наличия колонок на стороне JS.
        Если пользователь снял «Возврат ₽/кг», «Возврат фикс ₽» или любую другую опорную колонку
        в профиле экспорта — не генерируем формулу вообще (пишется только JS-кэш значения),
        вместо того чтобы получить в Excel #NAME? из-за ISREF(undefined2)/undefinedR. */
-    { g: 'calc', k: 'returns', n: 'Возвраты/невыкуп, ₽', w: 20, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uRet}${R}*${r.sales}${R},2)` },
-    { g: 'calc', k: 'tax', n: 'Налог, ₽', w: 12, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.taxUnit}${R}*${r.sales}${R},2)` },
+    { g: 'calc', k: 'returns', n: 'Возвраты/невыкуп, ₽/ед.', w: 20, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uRet}${R},2)` },
+    { g: 'calc', k: 'tax', n: 'Налог, ₽/ед.', w: 12, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.taxUnit}${R},2)` },
     { g: 'calc', k: 'stockValue', n: 'Стоимость резерва, ₽', w: 16, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.stock}${R}*${r.cost}${R},2)` },
-    { g: 'calc', k: 'costPerUnit', n: 'Все затраты на 1 ед., ₽', w: 21, f: '#,##0.00', xl: (R, r) => `=IF(${r.sales}${R}>0,ROUND(${r.effPrice}${R}-${r.netProfit}${R}/${r.sales}${R},2),ROUND(${r.effPrice}${R}-${r.contribution}${R}+${r.fixedTotal}${R},2))` },
-    { g: 'calc', k: 'netProfit', n: 'Чистая прибыль, ₽', w: 16, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=ROUND(${['revenue','cogs','commission','specialFee','acquiring','paymentTransfer','lastMile','boost','logistics','scDelivery','packaging','storage','processing','returns','returnStorage','penalties','listing','tax','cofin','nonStd','lateShip','fixedTotal']
+    { g: 'calc', k: 'costPerUnit', n: 'Все затраты на 1 ед., ₽', w: 21, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.effPrice}${R}-${r.netProfit}${R},2)` },
+    { g: 'calc', k: 'netProfit', n: 'ЧП на 1 ед., ₽', w: 16, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=ROUND(${['revenue','cogs','commission','specialFee','acquiring','paymentTransfer','lastMile','boost','logistics','scDelivery','packaging','storage','processing','returns','returnStorage','penalties','listing','tax','cofin','nonStd','lateShip']
       .filter(k => !r.__ymAbsent(k))
       .map(k => r[k] + R).join('-')},2)` },
-    { g: 'calc', k: 'perUnitNet', n: 'ЧП на 1 ед., ₽', w: 14, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=IF(${r.sales}${R}>0,ROUND(${r.netProfit}${R}/${r.sales}${R},2),ROUND(${r.contribution}${R}-${r.fixedTotal}${R},2))` },
-    { g: 'calc', k: 'margin', n: 'Маржа, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.revenue}${R}*100,1),0)` },
-    { g: 'calc', k: 'roi', n: 'ROI, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.cogs}${R}*100,1),0)` },
+    { g: 'calc', k: 'perUnitNet', n: 'ЧП на 1 ед. (контроль), ₽', w: 20, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=ROUND(${r.netProfit}${R},2)` },
+    { g: 'calc', k: 'margin', n: 'Маржа, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(IF(${r.revenue}${R}>0,${r.netProfit}${R}/${r.revenue}${R}*100,IFERROR(${r.perUnitNet}${R}/${r.price}${R}*100,0)),1),0)` },
+    { g: 'calc', k: 'roi', n: 'ROI, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(IF(${r.cogs}${R}>0,${r.netProfit}${R}/${r.cogs}${R}*100,IFERROR(${r.perUnitNet}${R}/${r.cost}${R}*100,0)),1),0)` },
     { g: 'calc', k: 'tgtPrice', n: 'Цена для маржи, ₽', w: 14, f: '#,##0', src: p => p.noBuyInconsistent || p.priceTargetUnavailable ? '' : p.tgtPrice },
-    { g: 'calc', k: 'fcProfit', n: 'Прогноз ЧП, ₽', w: 14, f: '#,##0;[Red]-#,##0', src: p => p.fcProfit },
+    { g: 'calc', k: 'fcProfit', n: 'Прогноз ЧП / мес, ₽', w: 16, f: '#,##0;[Red]-#,##0', src: p => p.fcProfit },
     { g: 'calc', k: 'breakEvenPrice', n: 'Цена безубыточности, ₽', w: 18, f: '#,##0.00', src: p => p.noBuyInconsistent || p.priceBreakEvenUnavailable ? '' : p.breakEvenPrice },
     { g: 'calc', k: 'priceToSet', n: 'Цена к установке, ₽', w: 16, f: '#,##0.00', src: p => p.noBuyInconsistent || p.priceModelUnavailable ? '' : (p.priceToSet ?? '') },
     { g: 'calc', k: 'costMult', n: 'Закупка с кратностью, ₽', w: 22, f: '#,##0.00',
@@ -38331,7 +38527,7 @@ const Exp = {
     const softGreen = { bg: 'FFE5F7EE', fg: 'FF136B43' }, softRed = { bg: 'FFFFE8E8', fg: 'FFB42318' }, softAmber = { bg: 'FFFFF4D6', fg: 'FF8C5A00' }, softBlue = { bg: 'FFEAF2FF', fg: 'FF2457A7' };
     const threeScale = ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6'];
     /* Категории: COUNTIF/SUMIF по главному листу */
-    smallSheet('xl/worksheets/sheet2.xml', [['n', 'Категория', 26], ['s', 'SKU', 9], ['r', 'Выручка, ₽', 15], ['p', 'Прибыль, ₽', 15], ['m', 'Маржа, %', 11], ['d', 'Доля прибыли, %', 15]], add => {
+    smallSheet('xl/worksheets/sheet2.xml', [['n', 'Категория', 26], ['s', 'SKU', 9], ['r', 'Цена, ₽/ед.', 15], ['p', 'ЧП, ₽/ед.', 15], ['m', 'Маржа, %', 11], ['d', 'Доля прибыли, %', 15]], add => {
       const byCat = Object.create(null); let incomplete = false;
       rows.forEach(p => { const category = p.category == null ? '' : String(p.category); const g = byCat[category] || (byCat[category] = { n: 0, rev: 0, net: 0, unavailable: false }); g.n++; if (genericEconExportUnavailable(p)) { g.unavailable = true; incomplete = true; } else { g.rev += num(p.revenue); g.net += num(p.netProfit); } });
       const totNet = Object.values(byCat).reduce((s2, g) => s2 + g.net, 0);
@@ -38502,7 +38698,7 @@ const Exp = {
       let R = 2;
       add(R, [['Unit-control — сводка экспорта (одна книга)']]); R++;
       add(R, [['Режим тарифов'], [S.tariffs.mode === 'api' ? 'API Яндекс Маркет' : 'ЛОКАЛЬНЫЙ EXCEL (СИМУЛЯЦИЯ)']]); R++;
-      const sums = [['revenue', 'Выручка, ₽'], ['cogs', 'Себестоимость, ₽'], ['commission', 'Комиссия, ₽'], ['logistics', 'Логистика, ₽'], ['storage', 'Хранение, ₽'], ['processing', 'Обработка, ₽'], ['returns', 'Возвраты, ₽'], ['tax', 'Налог, ₽'], ['fixedTotal', 'Фикс. расходы, ₽'], ['netProfit', 'Чистая прибыль, ₽']];
+      const sums = [['revenue', 'Цена, ₽ (сумма по SKU)'], ['cogs', 'Себестоимость, ₽ (сумма по SKU)'], ['commission', 'Комиссия, ₽ (сумма по SKU)'], ['logistics', 'Логистика, ₽ (сумма по SKU)'], ['storage', 'Хранение, ₽ (сумма по SKU)'], ['processing', 'Обработка, ₽ (сумма по SKU)'], ['returns', 'Возвраты, ₽ (сумма по SKU)'], ['tax', 'Налог, ₽ (сумма по SKU)'], ['fixedTotal', 'Фикс. расходы за SKU, ₽/мес'], ['netProfit', 'ЧП на 1 ед., ₽ (сумма по SKU)']];
       const reportableRows = [];
       rows.forEach((p, i) => { if (!genericEconExportUnavailable(p)) reportableRows.push({p, excelRow:i + 2}); });
       const incomplete = reportableRows.length !== rows.length;
@@ -42097,7 +42293,7 @@ const FinanceRecon = {
     }
     const eligible=S.rows.filter(p=>!p.excluded && !p.dimensionAnomalyBlocked && !p.noBuyInconsistent && !p.modelReviewRequired && !p.missingTariffBlocked);
     if (!eligible.length) { $('#finDelta').textContent='Нет пригодной модели ЯМ для сопоставления.'; return; }
-    const forecastRev=eligible.reduce((sum,p)=>sum+num(p.revenue),0), forecastComm=eligible.reduce((sum,p)=>sum+num(p.commission),0);
+    const forecastRev=eligible.reduce((sum,p)=>sum+num(p.mRevenue ?? num(p.revenue)*num(p.sales)),0), forecastComm=eligible.reduce((sum,p)=>sum+num(p.mCommission ?? num(p.commission)*num(p.sales)),0);
     $('#finDelta').innerHTML=`Модель за месяц: выручка <b>${money(forecastRev)}</b> · загружено за 30 дней <b>${money(rev)}</b> · разница ${money(rev-forecastRev)}<br>Комиссия: модель ${money(forecastComm)} · загружено ${money(comm)} · разница ${money(comm-forecastComm)}<br>Логистика в файле: ${show(log)} · штрафы: ${show(fines)}<br><span class="hint">Ориентировочное сравнение: проверьте источник, периоды, определения показателей, возвраты и состав расходов. Это не бухгалтерская сверка.</span>`;
     FinanceRecon.renderChart();
   },
