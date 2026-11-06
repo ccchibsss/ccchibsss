@@ -58,6 +58,16 @@
   В Dash.agg осталась строка накопления матрицы, обращавшаяся к удалённой переменной mc,
   поэтому дашборд не строился («mc is not defined»). Оба места восстановлены, строка mc
   удалена. Проверено: импорт 3 000 строк проходит за 4,0 с, Dash.agg() считает, синтаксис OK.
+  v12.9.60 — ОБОГАЩЕНИЕ ПРАЙСА И ГОРЯЧАЯ СТРОКА. Прайс поставщика сам не обогащается:
+  если в файле нет ни одного поля-источника (весогабариты, объём, OE-номера, категория,
+  применимость), шаги «обогащение», «стандартные ОВХ» и «связанные строки» пропускаются
+  с записью в журнал — данные придут следующим файлом (весогабариты / OE-кроссы) и
+  разойдутся по каталогу из справочника. На файле 124 454 строк (122 930 SKU) это убрало
+  ложное «заполнено 7 из 122 930». Вторая правка — кэш OzonReference.strictKey и заранее
+  посчитанные ключи типа/категории в записях справочника Ozon: нормализация названий
+  занимала 28,9 % пересчёта (поиск типа по каждому кандидату на каждую строку).
+  Итог на том же файле: применение импорта 341,7 с → 163,1 с, «пересчёт и запись»
+  320,9 с → 144,0 с; 26 полей на 2 995 строках совпали с прежней версией полностью.
   v12.9.58 — ЧИСЛОВЫЕ ПОМОЩНИКИ. В профиле пересчёта 30 000 строк 42 % времени
   приходилось на две функции-однострочника: num() (разбор «числа» из любого поля) и
   round() (округление как в Excel). num теперь проверяет числовой тип первым — в
@@ -13400,7 +13410,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.59-client+audit.1';
+const APP_VERSION = '12.9.60-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26291,12 +26301,24 @@ const Import = {
         if (prog) prog('Каталог V: OE-индекс и группировка артикулов…');
         HVC.rebuildIndex(S.rows);
         _mark('индекс OE');
-        await HVC.enrichAsync(touchedUnique, prog);
+        /* v12.9.60: prajs postavshchika sam ne obogashchaetsya. Esli v fajle net ni
+           odnogo polya-istochnika (vesogabaritы, obъem, OE-nomera, kategoriya,
+           primenimost), obogashchat ne chem: dannye pridut sleduyushchim fajlom
+           (vesogabaritы / OE-krossy) i razojdutsya po katalogu iz spravochnika. */
+        const enrichSrc = new Set(['weight','net_weight','length','width','height','volume','oe_numbers','oe_list','oe','category','subcategory','applicability']);
+        const fileHasSources = enabled.some(m => m.enabled !== false && enrichSrc.has(m.field));
+        if (fileHasSources) {
+          await HVC.enrichAsync(touchedUnique, prog);
+        } else {
+          S._enrichSkipped = touchedUnique.length;
+          if (prog) prog('обогащение пропущено: в файле нет весогабаритов, OE и категорий');
+          console.info('[UC] обогащение пропущено: ' + fmt(touchedUnique.length) + ' строк · в файле нет полей-источников');
+        }
         _mark('обогащение');
         /* Третий шаг правила ОВХ: типовые габариты по категории/виду. Только
            точное совпадение справочника, только пустые поля и только строки,
            которые не ждут проверки после подбора по OE. */
-        if (S.settings.autoStdDims !== false && typeof StdDims !== 'undefined') {
+        if (fileHasSources && S.settings.autoStdDims !== false && typeof StdDims !== 'undefined') {
           let stdFilled = 0;
           const stdFields = StdDims.fields.map(f => f[0]);
           for (let i = 0; i < touchedUnique.length; i++) {
@@ -26323,7 +26345,7 @@ const Import = {
         const relSwEl = $('#impEnrichRelated');
         const relOn = relSwEl ? !!relSwEl.checked : (S.settings.enrichRelatedOnImport !== false);
         S.settings.enrichRelatedOnImport = relOn;
-        if (relOn) {
+        if (relOn && fileHasSources) {
           let relRows = [];
           try { relRows = Import._relatedRows(touchedUnique, new Set(touchedUnique), idx, idxArt); }
           catch (eRel) { console.warn('[UC] связанные строки:', eRel); }
@@ -36163,11 +36185,21 @@ if (typeof globalThis !== 'undefined') globalThis.DictIO = DictIO;
 const OZON_NAME_RULES_VERSION = 'keyword-v6-csv-name|';
 const OzonReference = {
   _ref: null, _idx: null,
+  /* v12.9.60: normalization is the hottest line of the import (pyat tysyach strok
+     -> ~120 000 vyzovov strictKey: podbor tipa Ozon po kazhdomu kandidatu).
+     Funkciya chistaya, poetomu rezultat keshiruetsya po iskhodnoy stroke. */
+  _skCache: new Map(),
   hasData() { return !!(this._ref && ((Array.isArray(this._ref.items) && this._ref.items.length) || (Array.isArray(this._ref.allItems) && this._ref.allItems.length))); },
   scope() { return typeof S !== 'undefined' && S.settings && S.settings.ozonReferenceScope==='all' ? 'all' : 'auto'; },
   version() { return this.hasData() ? 'tree:' + this._ref.revision + ':' + this.scope() : 'historical:' + OzonCat.TYPES.length; },
   strictKey(s) {
-    return String(s == null ? '' : s).normalize('NFC').toLowerCase().replace(/\s+/gu, ' ').trim();
+    const src = s == null ? '' : String(s);
+    const hit = this._skCache.get(src);
+    if (hit !== undefined) return hit;
+    const out = src.normalize('NFC').toLowerCase().replace(/\s+/gu, ' ').trim();
+    if (this._skCache.size >= 50000) this._skCache.clear();
+    this._skCache.set(src, out);
+    return out;
   },
   looseKey(s) {
     return this.strictKey(s).normalize('NFKC').replace(/ё/g, 'е')
@@ -36795,6 +36827,9 @@ const OzonAuto = {
       const literalWords=this._literalTokens(type), literalNeeds=[...new Set(literalWords.map(w=>this._stem(w)).filter(x=>x.length>=2))];
       const literalHead=this._head(literalWords,null) || literalNeeds[0] || '';
       const entry = { cat, type, head, needs, literalHead, literalNeeds, path:t.path || [], catId:t.catId || '', typeId:t.typeId || '', score:needs.length * 1000 + needs.reduce((n,x) => n + Math.min(x.length,8),0) };
+      /* v12.9.60: klyuchi schitayutsya odin raz na zapis spravochnika, a ne na
+         kazhduyu stroku importa (ranee eto bylo 28,9 % vremeni pereschyota). */
+      entry.typeKey = OzonReference.strictKey(type); entry.catNorm = CategoryTnved.norm(cat);
       idx.entries.push(entry); idx.heads.add(head);
       for (const k of needs) { if (!idx.byWord.has(k)) idx.byWord.set(k, []); idx.byWord.get(k).push(entry); }
       const kindKey=this._kindKey(type);
@@ -36828,15 +36863,16 @@ const OzonAuto = {
     for (const k of new Set([...keys,...rawKeys])) { const list = index.byWord.get(k); if (list) for (const t of list) candidates.add(t); }
     let matches = []; const rawMatches=new Set(), aliasMatches=new Set();
     for (const t of candidates) {
-      if (OzonReference.strictKey(t.type) === 'ключ автомобильный' && /(?:гаечн|рожков|накидн|торцев|динамометр|фильтр|съ[её]мн|шестигран|свечн|колесн|болт|гайк|трещотк)/i.test(name)) continue;
-      if (OzonReference.strictKey(t.type) === 'насос автомобильный' && /(?:омывател|топлив|масл|охлаж|водян|гидро|тормоз|откач|перекач|ручн|abs|абс|гур)/i.test(name)) continue;
+      const tKey = t.typeKey || OzonReference.strictKey(t.type);
+      if (tKey === 'ключ автомобильный' && /(?:гаечн|рожков|накидн|торцев|динамометр|фильтр|съ[её]мн|шестигран|свечн|колесн|болт|гайк|трещотк)/i.test(name)) continue;
+      if (tKey === 'насос автомобильный' && /(?:омывател|топлив|масл|охлаж|водян|гидро|тормоз|откач|перекач|ручн|abs|абс|гур)/i.test(name)) continue;
       /* Mechanical hose/exhaust mounts are not silently treated as a generic
          interior accessory holder. More specific tree types may still match. */
-      if (OzonReference.strictKey(t.type) === 'держатель автомобильный' &&
+      if (tKey === 'держатель автомобильный' &&
           /(?:тормоз|шланг|труб|выхлоп|глушител|топлив|амортизатор|двигател|подвеск|насос|радиатор|трансмисс|стартер|суппорт|шрус)/i.test(name)) continue;
       /* A cabin pillow is not a suspension/radiator/engine mounting pad or
          an airbag. A part name can still have a more specific valid type. */
-      if (OzonReference.strictKey(t.type) === 'подушка автомобильная' &&
+      if (tKey === 'подушка автомобильная' &&
           /(?:амортизатор|радиатор|двигател|мотора|двс|подвеск|подрамник|рессор|редуктор|кпп|коробк[аиуы]?\s+передач|глушител|рулев|руля|безопасност|airbag|эйрб[еэ]г|аэрб[еэ]г)/i.test(name)) continue;
       if (/(?:мотоцикл|скутер|мопед|снегоход|квадроцикл|(?:^|\s)мото(?=\s|$))/i.test(name) &&
           !/(?:мото|снегоход|квадроцикл)/i.test([t.cat,t.type].concat(t.path || []).join(' '))) continue;
@@ -36848,7 +36884,7 @@ const OzonAuto = {
       /^(?:\s*)(?:комплект|набор)(?=\s|$)/i.test(name.replace(/ё/g,'е'));
     if (multiple) {
       const distinctHeads = [...new Set(matches.map(t => t.head))];
-      const distinctTypes = [...new Set(matches.map(t => OzonReference.strictKey(t.type)))];
+      const distinctTypes = [...new Set(matches.map(t => t.typeKey || OzonReference.strictKey(t.type)))];
       /* A set joined by 'and' can contain a second product even if that
          product is absent from this tree (e.g. fuel and oil filters). */
       const joinedSet = /^\s*(?:комплект|набор)(?=\s|$)/i.test(name) && /(?:\sи\s|\s\+\s|\s&\s)/i.test(name);
@@ -36925,8 +36961,9 @@ const OzonAuto = {
     if (!allowed.has(CategoryTnved.norm(preferred))) return null;
     const typeKey = OzonReference.strictKey(type);
     const matches = (knownMatches || this._index().entries).filter(x =>
-      OzonReference.strictKey(x.type) === typeKey && allowed.has(CategoryTnved.norm(x.cat)));
-    const selected = matches.filter(x => CategoryTnved.norm(x.cat) === CategoryTnved.norm(preferred));
+      (x.typeKey || OzonReference.strictKey(x.type)) === typeKey && allowed.has(x.catNorm || CategoryTnved.norm(x.cat)));
+    const preferredNorm = CategoryTnved.norm(preferred);
+    const selected = matches.filter(x => (x.catNorm || CategoryTnved.norm(x.cat)) === preferredNorm);
     if (!selected.length) return null;
     const pairs = new Set(selected.map(x => x.catId && x.typeId
       ? JSON.stringify([x.catId, x.typeId]) : JSON.stringify([x.cat, x.type])));
