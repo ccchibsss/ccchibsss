@@ -92,6 +92,13 @@
   строк 15 687 из 37 392, и они затирали наименование и страну. Применимость стала
   накопительной: в справочнике одна связка Артикул+Бренд повторяется на каждую марку
   и годы (37 392 строки → 18 318 связок), раньше оставалась только последняя строка.
+  v12.9.64 — ЭКОНОМИКА НА ЕДИНИЦУ БЕЗ ПРОДАЖ. Продажи за месяц не нужны: колонка
+  «Продажи, шт/мес» больше не числится отсутствующим столбцом в качестве данных
+  (раньше строка несла «ПРОВЕРИТЬ: добавить столбцы — … Продажи, шт/мес»).
+  Маржа и ROI без продаж считаются на единицу: прибыль единицы к цене и к закупке
+  (было 0 % у всех строк). Те же формулы — в выгрузке Excel. Чистая прибыль и выручка
+  остаются месячными: без продаж они нулевые, а прибыль единицы видна в колонке
+  «ЧП на 1 ед., ₽».
   v12.9.58 — ЧИСЛОВЫЕ ПОМОЩНИКИ. В профиле пересчёта 30 000 строк 42 % времени
   приходилось на две функции-однострочника: num() (разбор «числа» из любого поля) и
   round() (округление как в Excel). num теперь проверяет числовой тип первым — в
@@ -13435,7 +13442,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.63-client+audit.1';
+const APP_VERSION = '12.9.64-client+audit.1';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -20787,10 +20794,15 @@ function computeEconomics(p, ov) {
   p.storage = num(m.storage); p.listing = num(m.listing);
   p.nonStd = num(m.nonStd); p.lateShip = num(m.lateShip);
   p.netProfit = selectedEco.netProfit;
-  // При нулевых фактических продажах маржа и ROI не определены; гипотетическая
-  // маржа солвера остаётся только внутри selectedEco и не идёт в Excel/KPI.
-  p.margin = p.revenue > 0 ? round(p.netProfit / p.revenue * 100, 1) : 0;
-  p.roi = p.cogs > 0 ? round(p.netProfit / p.cogs * 100, 1) : 0;
+  /* v12.9.64: без продаж за месяц маржа и ROI считаются на единицу товара:
+     прибыль единицы к её цене и к закупке. Раньше обе колонки показывали 0.
+     При наличии продаж остаются месячные значения. */
+  const noMonthlySales = !(num(p.sales) > 0);
+  const unitNet = num(p.perUnitNet);
+  p.margin = p.revenue > 0 ? round(p.netProfit / p.revenue * 100, 1)
+    : (noMonthlySales && unitNet && num(p.price) > 0 ? round(unitNet / num(p.price) * 100, 1) : 0);
+  p.roi = p.cogs > 0 ? round(p.netProfit / p.cogs * 100, 1)
+    : (noMonthlySales && unitNet && num(p.cost) > 0 ? round(unitNet / num(p.cost) * 100, 1) : 0);
   p.breakEvenPrice = selectedEco.breakEvenPrice; p.tgtPrice = selectedEco.tgtPrice;
   p.costPerUnit = selectedEco.totalCostPerUnit; p.contribution = selectedEco.contribution;
   p.perUnitNet = selectedEco.netProfitUnit;
@@ -21576,7 +21588,9 @@ function enrichColumnsText(p) {
   if (num(p.price) <= 0 && num(p.cost) <= 0) out.push(...econSpecOf('price').columns);
   if (num(p.cost) <= 0) out.push(...econSpecOf('cost').columns);
   if (num(p.weight) <= 0 && !(num(p.length) > 0 && num(p.width) > 0 && num(p.height) > 0)) out.push(...econSpecOf('dims').columns);
-  if (num(p.sales) <= 0) out.push(...econSpecOf('sales').columns);
+  /* v12.9.64: продажи за месяц не обязательны. Экономика считается на единицу
+     (ЧП на 1 ед., безубыточная и целевая цена), поэтому «добавьте столбец
+     Продажи» больше не выводится. */
   return out.join('; ');
 }
 
@@ -37715,8 +37729,8 @@ function exportCatalog() {
       .filter(k => !r.__ymAbsent(k))
       .map(k => r[k] + R).join('-')},2)` },
     { g: 'calc', k: 'perUnitNet', n: 'ЧП на 1 ед., ₽', w: 14, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=IF(${r.sales}${R}>0,ROUND(${r.netProfit}${R}/${r.sales}${R},2),ROUND(${r.contribution}${R}-${r.fixedTotal}${R},2))` },
-    { g: 'calc', k: 'margin', n: 'Маржа, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.revenue}${R}*100,1),0)` },
-    { g: 'calc', k: 'roi', n: 'ROI, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.cogs}${R}*100,1),0)` },
+    { g: 'calc', k: 'margin', n: 'Маржа, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(IF(${r.revenue}${R}>0,${r.netProfit}${R}/${r.revenue}${R}*100,IFERROR(${r.perUnitNet}${R}/${r.price}${R}*100,0)),1),0)` },
+    { g: 'calc', k: 'roi', n: 'ROI, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(IF(${r.cogs}${R}>0,${r.netProfit}${R}/${r.cogs}${R}*100,IFERROR(${r.perUnitNet}${R}/${r.cost}${R}*100,0)),1),0)` },
     { g: 'calc', k: 'tgtPrice', n: 'Цена для маржи, ₽', w: 14, f: '#,##0', src: p => p.noBuyInconsistent || p.priceTargetUnavailable ? '' : p.tgtPrice },
     { g: 'calc', k: 'fcProfit', n: 'Прогноз ЧП, ₽', w: 14, f: '#,##0;[Red]-#,##0', src: p => p.fcProfit },
     { g: 'calc', k: 'breakEvenPrice', n: 'Цена безубыточности, ₽', w: 18, f: '#,##0.00', src: p => p.noBuyInconsistent || p.priceBreakEvenUnavailable ? '' : p.breakEvenPrice },
