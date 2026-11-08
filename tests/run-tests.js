@@ -56,9 +56,9 @@ assert(app.includes("$AY"), 'Ozon XLSX: маркер автоподстанов�
 assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: жёлтая заливка автоподстановки');
 // автоподстановка — только в пустые поля; файл — главный источник
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
-assert(app.includes('if (HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved)'), 'Каталог V: ТН ВЭД только в пустое поле');
+assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.68-client+autofill-mark'), 'версия клиента обновлена');
+assert(app.includes('12.9.68-client+autofill-mark') || app.includes('12.9.69-client+enrich-catmode'), 'версия клиента обновлена');
 assert(!app.includes('OFFICIAL_ALL_MP_TARIFFS_2026 = ['), 'мёртвый справочник тарифов удалён');
 assert(app.includes('p.profitEstimate = p.priceInputsIncomplete'), 'прибыль помечается оценкой');
 assert(app.includes('ОЦЕНКА по '), 'KPI показывает долю оценочной прибыли');
@@ -79,4 +79,45 @@ for (const r of rows) {
   let sum = 0; for (let i = 14; i <= 31; i++) sum += n(r[i]);
   assert(Math.abs(sum - tot) < 0.02, r[0] + ': сумма статей != итогу');
 }
+// v12.9.69: раздельный режим категории/ТН ВЭД + единогласие OE-доноров (функционально, на HVC)
+assert(app.includes('function autoFillFields'), 'маркеры автоподстановки категорий/ТН ВЭД');
+assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
+assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
+assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
+assert(app.includes('12.9.69-client+enrich-catmode'), 'версия клиента обновлена');
+{
+  const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
+  const c2 = {
+    console, Set, Map, WeakMap, WeakSet, JSON, Math, Number, String, Array, Object, Date, RegExp, Error, Promise, performance,
+    S: { settings: { enrichMode: 'oe' }, rows: [], catalogVersion: 0 },
+    normArticle: s => String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9А-ЯЁ]/g, ''),
+    num: v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) ? n : 0; },
+    codeList: v => String(v || '').split(/[\/;,|]+/).map(x => x.trim()).filter(Boolean),
+    OE_DELIMITERS: { auto: { join: ' / ' } }, oeMode: () => 'auto',
+    CONST: { OE_SET_CACHE_MAX: 1000 },
+    DimPolicy: { validTuple: () => false, compareTuples: () => 0 },
+    nowISO: () => '2026-01-01'
+  };
+  c2.globalThis = c2;
+  vm.createContext(c2);
+  vm.runInContext(hvcSrc + '\nthis.HVC=HVC;', c2);
+  const H = c2.HVC;
+  assert.strictEqual(H.enrichCatMode(), 'artbrand', 'по умолчанию категория — только Артикул+Бренд');
+  const k1 = 'ART1|BRAND', k2 = 'ART2|BRAND';
+  H.parts.set(k1, { artikul: 'ART1', brand: 'BRAND', category: 'Фильтры', name: 'Фильтр масляный', tnved: '8421230000' });
+  H.parts.set(k2, { artikul: 'ART2', brand: 'BRAND', category: 'Двигатель', name: 'Поршень' });
+  H.byOe.set('OE1', new Set([k1, k2]));
+  H.byArt.set(k1, new Set(['OE1'])); H.byArt.set(k2, new Set(['OE1']));
+  const probe = { article: 'ART1', brand: 'BRAND', oe_norm: 'OE1', category: '', name: '', applicability: '' };
+  assert.strictEqual(H.textFor(probe, 'oe').category, '', 'доноры OE расходятся — категория по OE не берётся');
+  assert.strictEqual(H._oeSetOf(probe).catConflict, true, 'конфликт категорий зафиксирован');
+  H.parts.get(k2).category = 'Фильтры'; H._oeAggCache = null; H._oeSetCache = null;
+  assert.strictEqual(H.textFor(probe, 'oe').category, 'Фильтры', 'единогласные доноры OE — категория берётся');
+  const p2 = { article: 'ART1', brand: 'BRAND', oe_norm: 'OE1', category: '', tnved: '', name: '', applicability: '', weight: 0, length: 0, width: 0, height: 0 };
+  H.enrichOne(p2, null);
+  assert.strictEqual(p2.category, 'Фильтры', 'категория заполнена');
+  assert(/Артикул \+ Бренд/.test(p2._sources.category.file), 'по умолчанию категория — от пары Артикул+Бренд, не от OE: ' + p2._sources.category.file);
+  assert.strictEqual(p2.tnved, '8421230000', 'ТН ВЭД заполнен из пары Артикул+Бренд');
+}
+
 console.log('OK: все тесты пройдены (' + rows.length + ' строк CSV пересчитано)');

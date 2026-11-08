@@ -102,6 +102,10 @@
   Каталог V) и автоподбором не затираются; авто по названию/справочнику заполняет
   только пустые поля и помечается жёлтой заливкой (таблица, XLSX юнит-экономики,
   XLSX Ozon). Стандартные ОВХ при выгрузке — жёлтый фон вместо красного шрифта.
+  v12.9.69 — РАЗДЕЛЬНЫЙ РЕЖИМ ОБОГАЩЕНИЯ: для категории и ТН ВЭД отдельный способ
+  (enrichCatMode, по умолчанию «только Артикул+Бренд» — OE-аналоги категорию и код
+  не приносят); название/применимость/ОВХ обогащаются общим способом (enrichMode).
+  Категория по OE — только при единогласии всех доноров этого OE.
   v12.9.66 — ПЕРВЫЙ ФАЙЛ ГРУЗИТСЯ БЫСТРЕЕ. Замер по журналу показал, где уходят
   минуты: на прайсе 124 454 строки (122 930 SKU) импорт занимал 168 с, из них
   151 с — пересчёт конвейера, а в нём 70 с computeEconomics, 36 с типизации Ozon
@@ -7562,6 +7566,12 @@ html { -webkit-text-size-adjust: 100%; }
         <button type="button" data-enmode="artbrand"><i class="fa-solid fa-tag"></i> Только SKU+бренд</button>
       </div>
       <span class="hint" id="enModeHint">сначала OE; недостающие поля — из словаря по точной паре SKU+бренд</span>
+      <div class="tabbar" id="enCatMode" style="margin-top:6px">
+        <button type="button" data-encatmode="artbrand" class="on"><i class="fa-solid fa-tag"></i> Категория/ТН ВЭД: только SKU+бренд</button>
+        <button type="button" data-encatmode="oe"><i class="fa-solid fa-barcode"></i> Категория/ТН ВЭД: OE (при единогласии доноров)</button>
+        <button type="button" data-encatmode="auto"><i class="fa-solid fa-wand-magic-sparkles"></i> Категория/ТН ВЭД: OE → SKU+бренд</button>
+      </div>
+      <span class="hint" id="enCatModeHint">категория и ТН ВЭД — только от того же артикула и бренда; OE-аналог может быть другим товаром</span>
     </div>
     <div class="pad" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
       <span class="hint" style="letter-spacing:.08em;text-transform:uppercase">Обогащать колонки:</span>
@@ -13478,7 +13488,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.68-client+autofill-mark';
+const APP_VERSION = '12.9.69-client+enrich-catmode';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -23132,6 +23142,14 @@ const HVC = {
     const m = (typeof S !== 'undefined' && S.settings) ? S.settings.enrichMode : '';
     return ['oe','artbrand','auto'].includes(m) ? m : 'auto';
   },
+  /* v12.9.69: отдельный способ для категории и ТН ВЭД. По умолчанию — только
+     точная пара Артикул+Бренд: OE-аналог может быть другим товаром, а чужие
+     категория и код ТН ВЭД — юридический риск. Остальные колонки (название,
+     применимость, ОВХ) обогащаются общим способом enrichMode(). */
+  enrichCatMode() {
+    const m = (typeof S !== 'undefined' && S.settings) ? S.settings.enrichCatMode : '';
+    return ['oe','artbrand','auto'].includes(m) ? m : 'artbrand';
+  },
   /* Колонки обогащения: у каждой свой флаг. Старые групповые переключатели
      (dims/name/applicability/category) остаются как значение по умолчанию. */
   enCol(k) {
@@ -23594,7 +23612,7 @@ const HVC = {
     if (!HVC._oeAggCache) HVC._oeAggCache = new Map();
     let hit = HVC._oeAggCache.get(oe);
     if (hit) return hit;
-    const H = { agg: { length:0, width:0, height:0, weight:0, dimensions_str:'', name:'', applicability:'', category:'', list:[], listN:[] }, rep: null,
+    const H = { agg: { length:0, width:0, height:0, weight:0, dimensions_str:'', name:'', applicability:'', category:'', list:[], listN:[] }, aggCats: new Set(), rep: null,
       /* Меньший ЦЕЛЬНЫЙ комплект вес+три стороны из одной исходной строки
          среди держателей этого OE. Смешивать поля разных записей нельзя. */
       smallest:null, smallestOe:'' };
@@ -23618,6 +23636,7 @@ const HVC = {
         if (!H.agg.name && pt.name) H.agg.name = pt.name;
         if (!H.agg.applicability && pt.applicability) H.agg.applicability = pt.applicability;
         if (!H.agg.category && pt.category && !['Без категории','Разное','Прочее','Не определено'].includes(String(pt.category).trim())) H.agg.category = pt.category;
+        if (pt.category && !['Без категории','Разное','Прочее','Не определено'].includes(String(pt.category).trim())) H.aggCats.add(String(pt.category).trim());
         if (dimsBudget-- > 0) {
           if (pt.length) H.agg.length = Math.max(H.agg.length, pt.length);
           if (pt.width) H.agg.width = Math.max(H.agg.width, pt.width);
@@ -23654,6 +23673,7 @@ const HVC = {
     }
     const selfArt = normArticle(key.split('|')[0]);
     const agg = { length:0, width:0, height:0, weight:0, dimensions_str:'', name:'', applicability:'', category:'', list:[] };
+    const catSet = new Set();
     const aggListSeen = new Set();
     let rep = null, smallest = null, smallestOe = '';
     if (myOes) {
@@ -23663,6 +23683,8 @@ const HVC = {
         if (O.smallest && (!smallest || DimPolicy.compareTuples(O.smallest, smallest) < 0)) {
           smallest = O.smallest; smallestOe = O.smallestOe || oe;
         }
+        if (O.aggCats) for (const c of O.aggCats) catSet.add(c);
+        if (O.rep && O.rep.category && !['Без категории','Разное','Прочее','Не определено'].includes(String(O.rep.category).trim())) catSet.add(String(O.rep.category).trim());
         const a2 = O.agg;
         if (a2.length) agg.length = Math.max(agg.length, a2.length);
         if (a2.width) agg.width = Math.max(agg.width, a2.width);
@@ -23679,7 +23701,10 @@ const HVC = {
     /* Группа артикулов — одним дешёвым проходом от нормализованного OE (с кэшем по oeKey
        и защитой от OE-хабов), вместо дорогого слияния O.group по каждому OE. */
     const groupArr = HVC._groupOnly(key);
+    /* v12.9.69: категория по OE — только при единогласии всех доноров. */
+    if (catSet.size > 1) agg.category = '';
     const H = { group: groupArr.join(OE_DELIMITERS[oeMode()].join), groupSize: groupArr.length, analog_list: agg.list.join(', '), agg, rep,
+      cats: [...catSet], catConflict: catSet.size > 1,
       smallest, smallestOe };
     if (oeKey) {
       HVC._lrSet(HVC._oeSetCache, oeKey, H, CONST.OE_SET_CACHE_MAX);   // LRU вместо Map.clear()
@@ -23794,7 +23819,10 @@ const HVC = {
     if (isOe) {
       const H = HVC._oeSetOf(p);             /* кэш: rep = прямой OE-реестр, agg = доноры по OE */
       const rep = H.rep || {}, ag = H.agg;
-      nameVals = [rep.name, ag.name]; applVals = [rep.applicability, ag.applicability]; catVals = [rep.category, ag.category]; tnVals = [rep.tnved, ag.tnved];
+      nameVals = [rep.name, ag.name]; applVals = [rep.applicability, ag.applicability]; tnVals = [rep.tnved, ag.tnved];
+      /* v12.9.69: если доноры OE расходятся в категории — категорию не берём
+         вовсе, а не первое попавшееся значение. */
+      catVals = H.catConflict ? [] : [rep.category, ag.category];
       labels = ['OE-реестр', 'аналоги по OE'];
     } else {
       const ab = HVC._abAgg(p).agg;          /* доноры только по связке артикул + бренд */
@@ -23822,19 +23850,29 @@ const HVC = {
   },
   /* Обогащение товара полями Каталога V (oe_list, аналоги, применимость, габариты) */
   enrichOne(p,scope,modeOverride) {
-    const mode = modeOverride || HVC.enrichMode();
-    if (mode !== 'auto') return HVC._enrichOneWithMode(p,scope,mode);
-    /* audit.4: сначала прямой OE, затем недостающие поля из точной пары SKU+бренд.
-       Оба прохода неразрушающие, поэтому второй не перезаписывает результат OE. */
+    /* v12.9.69: два раздельных прохода. Основной (название, применимость, ОВХ,
+       списки) идёт общим способом enrichMode; категория и ТН ВЭД — своим
+       способом enrichCatMode (по умолчанию только точная пара Артикул+Бренд).
+       Оба прохода неразрушающие: заполняют только пустые поля. */
+    const mainMode = modeOverride || HVC.enrichMode();
+    const catMode = HVC.enrichCatMode();
     let touched = false;
-    if (HVC._oeKnown(p)) touched = HVC._enrichOneWithMode(p,scope,'oe') || touched;
-    const key = HVC.keyOf(p);
-    if (HVC.normalizeKey(p.article) && HVC.normalizeKey(p.brand) && HVC.parts.has(key))
-      touched = HVC._enrichOneWithMode(p,scope,'artbrand') || touched;
+    const runPass = (m, grp) => {
+      if (m === 'auto') {
+        if (HVC._oeKnown(p)) touched = HVC._enrichOneWithMode(p,scope,'oe',grp) || touched;
+        const key = HVC.keyOf(p);
+        if (HVC.normalizeKey(p.article) && HVC.normalizeKey(p.brand) && HVC.parts.has(key))
+          touched = HVC._enrichOneWithMode(p,scope,'artbrand',grp) || touched;
+      } else touched = HVC._enrichOneWithMode(p,scope,m,grp) || touched;
+    };
+    runPass(mainMode, 'main');
+    runPass(catMode, 'cat');
     return touched;
   },
-  _enrichOneWithMode(p,scope,mode) {
+  _enrichOneWithMode(p,scope,mode,grp) {
     if (HVC.identityUnsafe(p,scope)) return false;
+    /* v12.9.69: grp='main' — без категории/ТН ВЭД; grp='cat' — только они. */
+    const mainOnly = grp === 'main', catOnly = grp === 'cat';
     const key = HVC.keyOf(p);
     const sku = HVC.normalizeKey(p.article);
     /* Гейт по выбранному способу: «OE-номер» требует OE у строки, известный реестру
@@ -23851,10 +23889,10 @@ const HVC = {
        Индекс OE строки строится один раз на пакет в rebuildIndex, не здесь на каждую строку. */
     const H = HVC._oeSetOf(p);
     const ag = H.agg;
-    if (HVC.enCol('analog_list')) p.analog_list = H.analog_list;
+    if (!catOnly && HVC.enCol('analog_list')) p.analog_list = H.analog_list;
     /* Группа артикулов строится ОТ нормализованного OE строки (все артикулы с любым
        из её OE), с защитой от OE-хабов и кэшем по набору OE. */
-    if (HVC.enCol('group_articles')) {
+    if (!catOnly && HVC.enCol('group_articles')) {
       p.group_articles = H.group; /* артикулы через выбранный разделитель — поиск от нормализованных OE строки (1 уровень) "/" по Level1+Level2 */
       p.groupSize = H.groupSize || 1;
     }
@@ -23870,12 +23908,12 @@ const HVC = {
     const wasName = !!String(p.name || '').trim(), wasAppl = !!String(p.applicability || '').trim();
     const wasCat = !!String(p.category || '').trim() && !['Без категории','Разное','Прочее','Не определено'].includes(String(p.category).trim());
     const t = HVC.textFor(p, mode);
-    if (HVC.enCol('name') && !wasName && t.name) { p.name = t.name; (p._sources = p._sources || {}).name = { file: srcTag + t.nameSource, date: nowISO() }; }
-    if (HVC.enCol('applicability') && !wasAppl && t.applicability) { p.applicability = t.applicability; (p._sources = p._sources || {}).applicability = { file: srcTag + t.applicabilitySource, date: nowISO() }; }
-    if (HVC.enCol('category') && !wasCat && t.category) { p.category = t.category; (p._sources = p._sources || {}).category = { file: srcTag + t.categorySource, date: nowISO() }; }
+    if (!catOnly && HVC.enCol('name') && !wasName && t.name) { p.name = t.name; (p._sources = p._sources || {}).name = { file: srcTag + t.nameSource, date: nowISO() }; }
+    if (!catOnly && HVC.enCol('applicability') && !wasAppl && t.applicability) { p.applicability = t.applicability; (p._sources = p._sources || {}).applicability = { file: srcTag + t.applicabilitySource, date: nowISO() }; }
+    if (!mainOnly && HVC.enCol('category') && !wasCat && t.category) { p.category = t.category; (p._sources = p._sources || {}).category = { file: srcTag + t.categorySource, date: nowISO() }; }
     /* v12.9.51: ТН ВЭД приходит отдельным файлом — переносим только в пустое поле. */
-    if (HVC.enCol('tnved') && !String(p.tnved || '').trim() && t.tnved) { p.tnved = t.tnved; (p._sources = p._sources || {}).tnved = { file: srcTag + t.tnvedSource, date: nowISO() }; }
-    const anyDim = HVC.enCol('length') || HVC.enCol('width') || HVC.enCol('height') || HVC.enCol('weight');
+    if (!mainOnly && HVC.enCol('tnved') && !String(p.tnved || '').trim() && t.tnved) { p.tnved = t.tnved; (p._sources = p._sources || {}).tnved = { file: srcTag + t.tnvedSource, date: nowISO() }; }
+    const anyDim = !catOnly && (HVC.enCol('length') || HVC.enCol('width') || HVC.enCol('height') || HVC.enCol('weight'));
     const pt = HVC.parts.get(key);
     if (anyDim) {
       /* Допустимые источники ОВХ (DimPolicy):
@@ -23918,7 +23956,7 @@ const HVC = {
         delete p.dimensionAnomalyAck;
       }
     }
-    if (pt) { if (!p.multiplicity) p.multiplicity = pt.multiplicity; if (!p.image_url && pt.image_url) p.image_url = pt.image_url; if (HVC.enCol('barcode') && !p.barcode && pt.barcode) p.barcode = pt.barcode; }
+    if (!catOnly && pt) { if (!p.multiplicity) p.multiplicity = pt.multiplicity; if (!p.image_url && pt.image_url) p.image_url = pt.image_url; if (HVC.enCol('barcode') && !p.barcode && pt.barcode) p.barcode = pt.barcode; }
     return true;
   },
   enrich(list,mode) { const rows=list || S.rows, scope=HVC.identityScope(rows); let n = 0; rows.forEach(p => { if (HVC.enrichOne(p,scope,mode)) n++; }); return n; },
@@ -43972,6 +44010,13 @@ function bindAll() {
       .forEach(([sel, g]) => { const el = $(sel); if (el) el.classList.toggle('on', EN_GROUP[g].every(k => cols[k])); });
     const mode = HVC.enrichMode();
     $$('#enMode button').forEach(b => b.classList.toggle('on', b.dataset.enmode === mode));
+    const catMode = HVC.enrichCatMode();
+    $$('#enCatMode button').forEach(b => b.classList.toggle('on', b.dataset.encatmode === catMode));
+    const ch = $('#enCatModeHint');
+    if (ch) ch.textContent = catMode === 'artbrand'
+      ? 'категория и ТН ВЭД — только от того же артикула и бренда; OE-аналог может быть другим товаром'
+      : catMode === 'oe' ? 'категория по OE — только если все доноры OE дают одну и ту же категорию'
+      : 'сначала OE (при единогласии доноров), затем недостающее — из точной пары SKU+бренд';
     const sh = $('#enSourceHint'), mh = $('#enModeHint');
     if (sh) sh.textContent = mode === 'oe'
       ? 'источник: OE-реестр Каталога V · поиск по oe_norm'
@@ -44083,6 +44128,14 @@ function bindAll() {
       ? 'только OE-реестр и артикулы с общим OE'
       : S.settings.enrichMode === 'auto' ? 'сначала OE, затем недостающее из точной пары SKU+бренд'
       : 'только артикул + бренд: без OE-аналогов');
+  });
+  $$('#enCatMode button').forEach(b => b.onclick = async () => {
+    S.settings.enrichCatMode = ['oe','artbrand','auto'].includes(b.dataset.encatmode) ? b.dataset.encatmode : 'artbrand';
+    await UI2.saveSettings(); syncEnSw(); renderEnrichCoverage();
+    Toast.info('Категория и ТН ВЭД: способ обогащения', S.settings.enrichCatMode === 'artbrand'
+      ? 'только тот же артикул + бренд (рекомендуется)'
+      : S.settings.enrichCatMode === 'oe' ? 'по OE, только при единогласии всех доноров'
+      : 'сначала OE (при единогласии доноров), затем пара SKU+бренд');
   });
   /* Групповые переключатели (раздел «Категоризация» и окно импорта) — управляют своими колонками */
   [['#enDims', 'dims'], ['#enName', 'name'], ['#enAppl', 'applicability'], ['#enCat', 'category'],
