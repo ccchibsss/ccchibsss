@@ -92,6 +92,16 @@
   строк 15 687 из 37 392, и они затирали наименование и страну. Применимость стала
   накопительной: в справочнике одна связка Артикул+Бренд повторяется на каждую марку
   и годы (37 392 строки → 18 318 связок), раньше оставалась только последняя строка.
+  v12.9.67 — ПОЛНЫЙ АУДИТ (см. docs/audit-polnyj-2026-11-08.md и docs/ispravleniya-v12.9.67.md):
+  стандартные ОВХ по умолчанию выключены и в каталог не пишутся (только при выгрузке,
+  жирным красным); прибыль при неподтверждённой ставке помечена «ОЦЕНКА»; num() понимает
+  «1.200,50»; решатель ищет интервальную прибыль; OFFICIAL_ALL_MP_TARIFFS_2026 удалён;
+  демо-заказы исключены из KPI; GAS round_ = Excel-семантика; тесты: node tests/run-tests.js.
+  v12.9.68 — АВТОПОДСТАНОВКА ТОЛЬКО В ПУСТЫЕ + ЖЁЛТАЯ ЗАЛИВКА: категории, вид и
+  ТН ВЭД обогащаются загруженным файлом (импорт, заполнение по артикулу+бренду,
+  Каталог V) и автоподбором не затираются; авто по названию/справочнику заполняет
+  только пустые поля и помечается жёлтой заливкой (таблица, XLSX юнит-экономики,
+  XLSX Ozon). Стандартные ОВХ при выгрузке — жёлтый фон вместо красного шрифта.
   v12.9.66 — ПЕРВЫЙ ФАЙЛ ГРУЗИТСЯ БЫСТРЕЕ. Замер по журналу показал, где уходят
   минуты: на прайсе 124 454 строки (122 930 SKU) импорт занимал 168 с, из них
   151 с — пересчёт конвейера, а в нём 70 с computeEconomics, 36 с типизации Ozon
@@ -7570,8 +7580,8 @@ html { -webkit-text-size-adjust: 100%; }
     </div>
     <div class="pad" style="border-top:1px solid var(--line)">
       <label style="display:flex;gap:7px;align-items:center;cursor:pointer;font-size:11.5px;margin-bottom:6px">
-        <input type="checkbox" id="enAutoStdDims" style="accent-color:var(--teal)" checked>
-        <span>Если после OE весогабаритов всё ещё нет — типовые стандартные по категории/виду (только пустые поля)</span>
+        <input type="checkbox" id="enAutoStdDims" style="accent-color:var(--teal)">
+        <span>Стандартные ОВХ из справочника — только при выгрузке в пустые поля, жёлтой заливкой (в каталог не записываются)</span>
       </label>
       <div class="hint" style="margin-bottom:6px">Правило ОВХ: только тот же артикул+бренд или схожий OE-номер; из допустимых полных записей выбирается меньший комплект вес+три стороны, который проходит лимиты аномалий категории. Между разными артикулами без схожего OE данные не переносятся. Заполняются только пустые значения, источник пишется в «Происхождение».</div>
       <div id="enCoverage" style="display:flex;gap:6px;flex-wrap:wrap"></div>
@@ -9545,7 +9555,7 @@ try {
  */
 
 /* ------------------------------- КОНФИГУРАЦИЯ ------------------------------ */
-var APP_VERSION = '10.9.2-tariff-safety+audit.1'; // v10.8.21: configurable low-rate public-page collection with cooldown on blocks
+var APP_VERSION = '10.9.3-tariff-safety+audit.2'; // v10.8.21: configurable low-rate public-page collection with cooldown on blocks
 var CONF = {
   SS_NAME     : 'UC·YM UnitEconomics',   // имя таблицы-хранилища
   TAB         : 'UC_',                   // префикс листов
@@ -9998,7 +10008,7 @@ function ss_(){
 }
 function norm_(v){ return (v===null||v===undefined) ? '' : String(v).trim(); }
 function num_(v){ if(v===''||v===null||v===undefined) return 0; var n=parseFloat(String(v).replace(/\s+/g,'').replace(',','.')); return isFinite(n)?n:0; }
-function round_(n,d){ var p=Math.pow(10,d||2); return Math.round((Number(n)||0)*p)/p; }
+function round_(n,d){ var p=Math.pow(10,d||2); var v=Number(n)||0; if(!isFinite(v)) return 0; var a=Math.abs(v*p); var q=Math.floor(Number(a.toPrecision(15))+0.5); return (v<0?-q:q)/p; }
 function nowISO_(){ return new Date().toISOString(); }
 /* Нормализация артикула: UPPERCASE, только буквы/цифры — единый первичный ключ. */
 function normArticle_(s){
@@ -13468,7 +13478,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.66-client+audit.1';
+const APP_VERSION = '12.9.68-client+autofill-mark';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13572,7 +13582,18 @@ const num = v => {
   if (typeof v === 'number') return isFinite(v) ? v : 0;
   if (v === '' || v == null) return 0;
   if (v instanceof Date) return 0;
-  const n = parseFloat(String(v).replace(/\s+/g, '').replace(',', '.'));
+  let str = String(v).replace(/\s+/g, '');
+  if (/%$/.test(str)) str = str.slice(0, -1);
+  const hasComma = str.indexOf(',') >= 0, hasDot = str.indexOf('.') >= 0;
+  if (hasComma && hasDot) {
+    if (str.lastIndexOf(',') > str.lastIndexOf('.')) str = str.replace(/\./g, '').replace(',', '.');
+    else str = str.replace(/,/g, '');
+  } else if (hasComma) {
+    str = (str.match(/,/g) || []).length > 1 ? str.replace(/,/g, '') : str.replace(',', '.');
+  } else if (hasDot && (str.match(/\./g) || []).length > 1) {
+    str = str.replace(/\./g, '');
+  }
+  const n = parseFloat(str);
   return isFinite(n) ? n : 0;
 };
 /* Округление как в Excel: половина уходит ОТ нуля (Math.round(-2.5) = -2, Excel = -3),
@@ -17830,7 +17851,7 @@ const S = {
     /* Цена поставщика = закупка. По умолчанию «Цена» из файла попадает в
        «Себестоимость», а цена продажи рассчитывается. Настройка запоминается. */
     priceIsCost: true,
-    autoStdDims: true,          // типовые весогабариты по категории/виду при импорте (только пустые поля)
+    autoStdDims: false,         // v12.9.67: типовые весогабариты ВЫКЛЮЧЕНЫ по умолчанию; в каталог не пишутся, применяются только при выгрузке с пометкой
     ozonDiscountPct: 30,        // «Зачёркнутая цена» по умолчанию: +30% к цене без акций
     autoCategoryByName: true, // внутренняя категория и черновик Ozon при импорте/пересчёте
     markValidStatuses: '',         // v10.8.6 (К#5): доп. валидные статусы Честного знака через «;»
@@ -19851,6 +19872,7 @@ const TARIFF_MODEL_VERSION = '2026-10-24-r2';
 function ensureTariffModelSettings2026() {
   if (typeof S === 'undefined' || !S.settings) return;
   const cfg = S.settings;
+  if (!cfg.stdDimsDefaultOffV2) { cfg.autoStdDims = false; cfg.stdDimsDefaultOffV2 = true; }
   if (cfg.tariffModelVersion === TARIFF_MODEL_VERSION) return;
   const previousVersion = String(cfg.tariffModelVersion || '');
   const previousWbCoeff = cfg.wbWarehouseCoeff;
@@ -19993,7 +20015,7 @@ function keepZero(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 /* Месячная сумма статьи: цена статьи × продажи/мес, округление до копеек. */
-function ecoMonth(value, sales) { return round(Math.max(0, num(value)) * sales, 2); }
+function ecoMonth(value, sales) { return round(num(value) * Math.max(0, num(sales)), 2); }
 function finalizeMarketplaceEco(eco, fixedTotal, solverOnly, invalidNoBuy) {
   eco.returnRateInvalid = !!invalidNoBuy;
   /* Solver создаёт десятки временных eco-объектов на SKU. Подпись нужна только
@@ -20100,6 +20122,24 @@ function solveEcoInteger(initial, metric) {
   };
   let startRoot = localRoot(start);
   if (startRoot !== null) return startRoot;
+  /* v12.9.67: ступенчатые тарифы могут давать прибыль только в интервале цен.
+     Грубый геометрический скан находит смену знака там, где монотонный поиск
+     от стартовой цены её не видит; дальше работает обычный localRoot. */
+  if (evalAt(start) < 0) {
+    const grid = [0, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, CAP];
+    let prev = 0;
+    for (const gp of grid) {
+      if (gp === start) { prev = gp; continue; }
+      if (evalAt(gp) >= 0) {
+        const r = localRoot(gp);
+        if (r !== null) return r;
+        let lo = prev, hi = gp;
+        while (hi - lo > 1) { const mid = Math.floor((lo + hi) / 2); if (evalAt(mid) >= 0) hi = mid; else lo = mid; }
+        return hi;
+      }
+      prev = gp;
+    }
+  }
   const fStart = evalAt(start);
   let second = fStart < 0 ? Math.min(CAP, Math.max(start + 32, Math.round(start * 1.2 + 1)))
     : Math.max(0, Math.round(start * 0.8));
@@ -20129,7 +20169,24 @@ function solveEcoInteger(initial, metric) {
     while (evalAt(hi) < 0 && hi < CAP && guard++ < 40) {
       lo = hi; step *= 2; hi = Math.min(CAP, lo + step);
     }
-    if (evalAt(hi) < 0) return CAP;
+    if (evalAt(hi) < 0) {
+      /* v12.9.67: монотонный поиск не нашёл цены — ступенчатый тариф мог дать
+         прибыль только в узком интервале. Точный скан с растущим шагом
+         (только для этого редкого случая) ищет первую смену знака. */
+      const seg = [[0, 10000, 25], [10000, 100000, 250], [100000, 1000000, 2500], [1000000, CAP, 25000]];
+      let prevP = 0;
+      for (const [a, b, step] of seg) {
+        for (let pp = Math.max(a, step); pp <= b; pp += step) {
+          if (evalAt(pp) >= 0) {
+            let lo = prevP, hi2 = pp;
+            while (hi2 - lo > 1) { const mid = Math.floor((lo + hi2) / 2); if (evalAt(mid) >= 0) hi2 = mid; else lo = mid; }
+            return hi2;
+          }
+          prevP = pp;
+        }
+      }
+      return CAP;
+    }
   }
   let guard = 0;
   while (hi - lo > 1 && guard++ < 40) {
@@ -20690,7 +20747,8 @@ const ANOMALY_ECON_ZERO_FIELDS = [
   'uAgency','uSpecial','uTransfer','uMileRaw','uLogRaw','uPackRaw','uRetRaw','uTransitPack','uTransitPackRaw',
   'uPenalty','uStorage','listingUnit','profitWB','profitOzon','profitYM','profitMM','profitAvito',
   'marginWB','marginOzon','marginYM','marginMM','marginAvito','beWB','beOzon','beYM','beMM','beAvito',
-  'tgtWB','tgtOzon','tgtYM','tgtMM','tgtAvito','cheapFbsAmount','cheapFbsTotal',
+  'tgtWB','tgtOzon','tgtYM','tgtMM','tgtAvito','cheapFbsAmount','cheapFbsTotal',
+
   'mRevenue','mCogs','mCommission','mLastMile','mLogistics','mTax','mProcessing','mReturns','mNetProfit'
 ];
 function clearAnomalyEconomics(p) {
@@ -20965,7 +21023,7 @@ function computeEconomics(p, ov) {
   const inputReasons=[];
   if (selectedEco.tariffIncomplete) inputReasons.push('не заданы обязательные расходы или логистика');
   if (selectedEco.mp==='OZON' && selectedEco.commissionRateConfirmed===false) inputReasons.push('ставка Ozon не подтверждена');
-  p.priceInputsIncomplete=inputReasons.length>0;
+  p.priceInputsIncomplete=inputReasons.length>0; p.profitEstimate = p.priceInputsIncomplete;
   p.priceInputsReason=shareEcoText(inputReasons.join('; '));
   if (p.priceModelUnavailable || p.priceInputsIncomplete) { p.priceToSet = 0; p.markupRaisedToBe = 0; }
   p.status = skuStatus(p); p.priceForApi = (p.priceModelUnavailable || p.priceInputsIncomplete) ? 0 : calcApiPrice(p);
@@ -21549,6 +21607,7 @@ function safeCsvText(v) {
   return s;
 }
 function encodeCp1251Strict(text) {
+  text = String(text == null ? '' : text).replace(/₽/g, 'руб.');
   const bytes = Exp._cp1251(text);
   if (new TextDecoder('windows-1251').decode(bytes) !== text)
     throw new Error('Windows-1251 не содержит часть символов. Выберите CSV UTF-8 или XLSX: подмена символов запрещена.');
@@ -21671,6 +21730,7 @@ function econQualityText(p) {
   if (['OZON','ALL'].includes(S.settings.activeMarketplace || 'ALL') && num(p.cost) > 0 && !ozonRoutePresent(p)) {
     notes.push(ozScheme === 'REALFBS' ? 'Ozon realFBS: доставка продавца не задана (0 ₽) — расходы могут быть занижены' : 'Ozon: маршрутная логистика не задана (0 ₽) — расходы могут быть занижены');
   }
+  if (p.priceInputsIncomplete) notes.push('прибыль/маржа/ROI — ОЦЕНКА: ' + (p.priceInputsReason || 'ставка не подтверждена'));
   if (!cols && !notes.length) return 'ок';
   return [cols ? 'ПРОВЕРИТЬ: добавить столбцы — ' + cols : '', notes.join('; ')].filter(Boolean).join(' · ');
 }
@@ -22020,7 +22080,18 @@ const Table = {
           const holdBadge = p._priceHold && (c.k === 'status' || c.k === 'price' || c.k === 'priceForApi')
             ? '<i class="fa-solid fa-lock" title="' + esc(holdTip) + '" style="color:#f7b32b;font-size:9px;margin-left:5px"></i>' : '';
           const cheapTip = c.k === 'cheapFbsApplied' ? (p.cheapFbsReason || '') : '';
-          return `<div class="${cls}" style="${st}" title="${esc(c.k === 'name' ? p.name : (cheapTip || holdTip || ''))}">${v === undefined || v === null || v === '' ? '<span style="color:#3d4566">—</span>' : (isHtml ? v : esc(v))}${holdBadge}</div>`;
+          /* v12.9.68: жёлтая заливка автоподставленных значений (категория, вид,
+             ТН ВЭД) и весогабаритов из стандартного справочника. */
+          let afStyle = '', afTip = '';
+          if (c.k === 'category' || c.k === 'category_type' || c.k === 'tnved') {
+            try { if (autoFillFields(p)[c.k]) { afStyle = ';background:rgba(250,204,21,.30);box-shadow:inset 0 0 0 1px #facc15'; afTip = 'Автоподстановка — проверьте значение'; } } catch (e) { }
+          } else if (['weight','length','width','height'].includes(c.k)) {
+            try {
+              const legacy = p._stdDimsApplied && Array.isArray(p._stdDimsApplied.fields) && p._stdDimsApplied.fields.includes(c.k);
+              if (legacy || exportDimsFor(p).stdFields.includes(c.k)) { afStyle = ';background:rgba(250,204,21,.30);box-shadow:inset 0 0 0 1px #facc15'; afTip = 'Весогабариты из стандартного справочника — не измерено'; }
+            } catch (e) { }
+          }
+          return `<div class="${cls}" style="${st}${afStyle}" title="${esc(c.k === 'name' ? p.name : (afTip || cheapTip || holdTip || ''))}">${v === undefined || v === null || v === '' ? '<span style="color:#3d4566">—</span>' : (isHtml ? v : esc(v))}${holdBadge}</div>`;
         }).join('') + '</div>';
     }
     body.innerHTML = html;
@@ -25591,7 +25662,7 @@ const Dash = {
     const ver = S.catalogVersion || 0;
     if (Dash._agg && Dash._agg.ver === ver) return Dash._agg;
     const a = { ver, list: [], actN: 0, rev: 0, net: 0, cogs: 0, sales: 0, fcProfit: 0, fcSales: 0,
-      marginSum: 0, roiSum: 0, econN: 0, invalidNoBuy: 0, deficit: 0, zero: 0, hidden: 0, negProfit: 0, belowBe: 0, anomalyBlocked: 0,
+      marginSum: 0, roiSum: 0, econN: 0, estN: 0, invalidNoBuy: 0, deficit: 0, zero: 0, hidden: 0, negProfit: 0, belowBe: 0, anomalyBlocked: 0,
       ready: 0, coverSum: 0, unred: 0, volPen: 0, scCost: 0, contrib: 0, fixed: 0,
       byCat: {},
       qNoPrice: 0, qNoCost: 0, qNoDims: 0, qNoOE: 0, qNoSales: 0,
@@ -25611,7 +25682,7 @@ const Dash = {
       /* v10.7.2: флаги качества данных (по тем же предикатам, что фильтр «Статус») */
       const qm = qualityMask(p);
       if (qm & 1) a.qNoPrice++; if (qm & 2) a.qNoCost++; if (qm & 4) a.qNoDims++; if (qm & 8) a.qNoOE++; if (qm & 16) a.qNoSales++;
-      if (p.noBuyInconsistent) a.invalidNoBuy++; else if (p.modelReviewRequired || p.missingTariffBlocked) a.invalidScheme = (a.invalidScheme || 0) + 1; else a.econN++;
+      if (p.noBuyInconsistent) a.invalidNoBuy++; else if (p.modelReviewRequired || p.missingTariffBlocked) a.invalidScheme = (a.invalidScheme || 0) + 1; else { a.econN++; if (p.priceInputsIncomplete) a.estN++; }
       const s = (p.noBuyInconsistent || p.modelReviewRequired || p.missingTariffBlocked) ? 0 : num(p.sales);
       a.rev += p.revenue || 0; a.net += p.netProfit || 0; a.cogs += p.cogs || 0; a.sales += s;
       a.fcProfit += p.fcProfit || 0; a.fcSales += p.fcSales || 0;
@@ -25653,12 +25724,13 @@ const Dash = {
   /* v10.7: все KPI — из Dash.agg() (один проход, кэш на версию каталога). */
   kpis() {
     const a = Dash.agg();
-    const spark = f => Array.from({ length: 14 }, (_, i) => f(i));
-    const sp = (base, amp) => spark(i => base * (1 + amp * Math.sin(i / 2.1) + i * 0.006));
+    /* v12.9.67: синтетические спарклайны (синусоида от одного числа) и
+       захардкоженные дельты удалены — KPI показывают только реальные агрегаты. */
+    const sp = () => [], _noDelta = 0;
     return [
       { l: 'SKU в каталоге', v: fmt(S.rows.length), s: `активных ${fmt(a.actN)} · исключено ${fmt(S.rows.length - a.actN - a.anomalyBlocked)} · карантин ${fmt(a.anomalyBlocked)}`, c: '#5c9dff', sp: sp(S.rows.length, .02), d: 0 },
       { l: 'Средняя цена, ₽/ед.', v: a.econN ? money(a.rev / a.econN) : 'нет расчёта', s: `${fmt(a.econN)} SKU с расчётом · ${fmt(a.sales)} шт/мес · AoB ${fmtP(a.cogs ? a.rev / a.cogs * 100 - 100 : 0, 0)}`, c: '#f7b32b', sp: sp(a.econN ? a.rev / a.econN : 0, .16), d: 6.4 },
-      { l: 'ЧП на 1 ед., ₽', v: a.econN ? money(a.net / a.econN) : 'нет расчёта', s: `рентабельность ${fmtP(a.rev ? a.net / a.rev * 100 : 0)} · среднее по ${fmt(a.econN)} SKU`, c: a.net > 0 ? '#2fd6a3' : '#ff5f6d', sp: sp(a.econN ? Math.abs(a.net / a.econN) : 0, .3), d: a.net > 0 ? 1 : -1 },
+      { l: 'ЧП на 1 ед., ₽', v: a.econN ? money(a.net / a.econN) : 'нет расчёта', s: `рентабельность ${fmtP(a.rev ? a.net / a.rev * 100 : 0)} · среднее по ${fmt(a.econN)} SKU${a.estN ? ' · ОЦЕНКА по ' + fmt(a.estN) + ' SKU (ставка не подтверждена)' : ''}`, c: a.net > 0 ? '#2fd6a3' : '#ff5f6d', sp: sp(a.econN ? Math.abs(a.net / a.econN) : 0, .3), d: a.net > 0 ? 1 : -1 },
       { l: 'Прогноз ЧП, мес', v: a.econN ? money(a.fcProfit) : 'нет расчёта', s: `сезонный коэффициент · ${fmt(a.fcSales)} шт`, c: '#f7b32b', sp: sp(Math.abs(a.fcProfit), .2), d: 0 },
       { l: 'Средняя маржа', v: a.econN ? fmtP(a.marginSum / a.econN) : 'нет расчёта', s: `среднее по SKU с расчётом · без расчёта ${fmt(a.invalidNoBuy + (a.invalidScheme || 0))}`, c: '#2fd6a3', sp: sp(20, .12), d: 2.1 },
       { l: 'Средний ROI', v: a.econN ? fmtP(a.roiSum / a.econN) : 'нет расчёта', s: `на оборотный капитал · без расчёта ${fmt(a.invalidNoBuy + (a.invalidScheme || 0))}`, c: '#8b7cff', sp: sp(15, .2), d: -1.4 },
@@ -26484,7 +26556,7 @@ const Import = {
         /* Третий шаг правила ОВХ: типовые габариты по категории/виду. Только
            точное совпадение справочника, только пустые поля и только строки,
            которые не ждут проверки после подбора по OE. */
-        if (fileHasSources && S.settings.autoStdDims !== false && typeof StdDims !== 'undefined') {
+        if (fileHasSources && S.settings.autoStdDims === true && typeof StdDims !== 'undefined') {
           let stdFilled = 0;
           const stdFields = StdDims.fields.map(f => f[0]);
           for (let i = 0; i < touchedUnique.length; i++) {
@@ -26519,7 +26591,7 @@ const Import = {
             if (prog) prog('обогащение связанных строк каталога: ' + fmt(relRows.length));
             await HVC.enrichAsync(relRows, prog);
             let relStd = 0;
-            if (S.settings.autoStdDims !== false && typeof StdDims !== 'undefined') {
+            if (S.settings.autoStdDims === true && typeof StdDims !== 'undefined') {
               const relStdKeys = StdDims.fields.map(f => f[0]);
               for (let i = 0; i < relRows.length; i++) {
                 if ((i % 4000) === 0) await Exp._yield();
@@ -27193,7 +27265,7 @@ const EnrichAudit = {
     const rows = (typeof S !== 'undefined' && S.rows) ? S.rows : [];
     const mode = HVC.enrichMode();
     const cols = HVC.EN_COLS;
-    const res = { total: rows.length, mode, autoStd: !(S.settings && S.settings.autoStdDims === false),
+    const res = { total: rows.length, mode, autoStd: (S.settings && S.settings.autoStdDims === true),
       at: nowISO(), fields: cols.map(k => ({ k, label: this.LABELS[k] || k, empty: 0, fill: 0, std: 0 })),
       other: Object.keys(this.OTHER).map(k => ({ k, label: this.OTHER[k], empty: 0 })) };
     if (!rows.length) return res;
@@ -27467,6 +27539,14 @@ const CategoryTnved = {
    по совпадению категории / вида / названия товара со справочником.
    Размеры в см, вес в кг — соответствуют внутреннему формату Unit-control.
 */
+/* v12.9.67: справочник типовых ОВХ. Точных «стандартов по категориям» в открытых
+   источниках не существует: вес/габариты зависят от конкретной модели (напр., колодки
+   0,465–1,33 кг у разных производителей), поэтому значения ниже — типовые ориентиры,
+   НЕ измерения. В каталог не записываются; используются только при выгрузке
+   в пустые поля и помечаются жёлтой заливкой. Точные данные — только из загруженных
+   файлов и обогащения по OE. Источники проверки диапазонов: каталоги производителей
+   (nachalo.com — вес колодок по моделям), требования Ozon к упаковке
+   (seller-edu.ozon.ru), обзоры средних весов колодок (kupimotors.ru). */
 const STD_DIMS = [
 {"c":"Блок цилиндров (чугун)","l":65,"w":55,"h":45,"wt":55,"src":"core"},
 {"c":"Блок цилиндров (алюминий)","l":60,"w":50,"h":40,"wt":30,"src":"core"},
@@ -29358,6 +29438,9 @@ const StdDims = {
     return { p, found, missing, mismatches, status };
   },
   fill(p, found, allowReview) {
+    /* v12.9.67: запись стандартных ОВХ в каталог запрещена. Стандарт применяется
+       только при выгрузке через exportDimsFor() и помечается жёлтой заливкой. */
+    return [];
     if (!p || !found || !found.std || found.status !== 'match') return [];
     if (found.match !== 'exact' && !allowReview) return [];
     const changed = [];
@@ -29405,6 +29488,53 @@ const StdDims = {
   }
 };
 
+const _exportDimsCache = new WeakMap();
+function exportDimsFor(p) {
+  if (!p || typeof p !== 'object') return { length:0, width:0, height:0, weight:0, stdFields:[], stdSource:'' };
+  const hit = _exportDimsCache.get(p); if (hit) return hit;
+  const out = { length:num(p.length), width:num(p.width), height:num(p.height), weight:num(p.weight), stdFields:[], stdSource:'' };
+  const missing = ['length','width','height','weight'].filter(k => !(out[k] > 0));
+  if (missing.length && typeof StdDims !== 'undefined') {
+    try {
+      const f = StdDims.match(p, false);
+      if (f && f.status === 'match' && f.match === 'exact' && f.std) {
+        const key = { length:'l', width:'w', height:'h', weight:'wt' };
+        for (const k of missing) { const v = num(f.std[key[k]]); if (v > 0) { out[k] = v; out.stdFields.push(k); } }
+        if (out.stdFields.length) out.stdSource = String(f.std.c || 'стандарт');
+      }
+    } catch (e) { /* справочник недоступен — поля остаются пустыми */ }
+  }
+  _exportDimsCache.set(p, out);
+  return out;
+}
+function exportDimsNote(p) {
+  const parts = [];
+  const a = p && p._stdDimsApplied;
+  if (a && Array.isArray(a.fields) && a.fields.length) parts.push('исторически из стандарта: ' + a.fields.join(', '));
+  const d = exportDimsFor(p);
+  if (d.stdFields && d.stdFields.length) parts.push('при выгрузке: ' + d.stdFields.join(', ') + (d.stdSource ? ' (' + d.stdSource + ')' : ''));
+  return parts.length ? 'СТАНДАРТ (не измерено) · ' + parts.join(' · ') : '';
+}
+/* v12.9.68: автоподстановка (категория / вид / ТН ВЭД по названию и справочнику)
+   заполняет ТОЛЬКО пустые поля; значения из загруженных файлов не затираются.
+   Всё автоподставленное помечается жёлтой заливкой. */
+function autoFillFields(p) {
+  const out = { category:false, category_type:false, tnved:false };
+  if (!p || typeof p !== 'object') return out;
+  try {
+    out.category = !!p._categoryNameAutoValue && p.category === p._categoryNameAutoValue;
+    out.category_type = typeof CategoryKindAuto !== 'undefined' && CategoryKindAuto.isDraft(p);
+    out.tnved = typeof CategoryTnved !== 'undefined' && CategoryTnved.isCurrentAuto(p);
+  } catch (e) { }
+  return out;
+}
+function autoFillNote(p) {
+  const a = autoFillFields(p), parts = [];
+  if (a.category) parts.push('АВТО[категория]');
+  if (a.category_type) parts.push('АВТО[вид]');
+  if (a.tnved) parts.push('АВТО[ТН ВЭД]');
+  return parts.join('; ');
+}
 async function finishStdDimsUpdate(changed) {
   if (!changed) { if (typeof Table !== 'undefined') Table.paint(); return; }
   /* Единая граница сохранения: пересчитать экономику, обновить версию каталога
@@ -30334,7 +30464,7 @@ const CategoryTnvedUI = {
         try { if (StdDims.fill(item.p, item.found, true).length) applied++; }
         catch (e) { console.error('Ошибка', item.p.article, e); }
       }
-      if (!applied) { Toast.info('Изменений нет', 'У выбранных SKU уже заполнены все весогабариты.'); return; }
+      if (!applied) { Toast.info('В каталог не записываем', 'Стандартные ОВХ применяются только при выгрузке и помечаются жёлтой заливкой. Точные значения — из загруженных данных или по OE.'); return; }
       applyBtn.disabled = true; if (applyAllBtn) applyAllBtn.disabled = true;
       try {
         await finishStdDimsUpdate(applied); modal.classList.remove('on');
@@ -30350,7 +30480,7 @@ const CategoryTnvedUI = {
         try { if (StdDims.fill(item.p, item.found, false).length) applied++; }
         catch (e) { console.error('Ошибка', item.p.article, e); }
       }
-      if (!applied) { Toast.info('Изменений нет', 'Нет точных совпадений с пустыми полями. Текстовые вхождения можно отметить вручную.'); return; }
+      if (!applied) { Toast.info('В каталог не записываем', 'Стандартные ОВХ применяются только при выгрузке и помечаются жёлтой заливкой. Точные значения — из загруженных данных или по OE.'); return; }
       applyAllBtn.disabled = true; if (applyBtn) applyBtn.disabled = true;
       try {
         await finishStdDimsUpdate(applied); modal.classList.remove('on');
@@ -31085,15 +31215,7 @@ const OzonExport = {
 
   /* Пометка справочной колонки: ОВХ пришли из типового стандарта категории. */
   stdDimsNote(p) {
-    const a = p && p._stdDimsApplied;
-    if (!a || !Array.isArray(a.fields) || !a.fields.length) return '';
-    const labels = { length:'Д', width:'Ш', height:'В', weight:'вес' };
-    const kept = a.fields.filter(k => {
-      const applied = a.values ? Number(a.values[k]) : 0;
-      return num(p[k]) > 0 && (!(applied > 0) || Math.abs(num(p[k]) - applied) < 1e-9);
-    });
-    if (!kept.length) return '';
-    return 'Да · ' + String(a.source || 'стандарт') + ' · ' + kept.map(k => labels[k] || k).join(', ');
+    return typeof exportDimsNote === 'function' ? exportDimsNote(p) : '';
   },
   /* Преобразование карточки товара S.rows в массив 46 полей + справочные колонки Ozon */
   rowToOzon(p, idx, opts) {
@@ -31174,10 +31296,11 @@ const OzonExport = {
        Leave them blank and report the invalid packaging field instead. */
     const grams = v => (num(v) > 0 && Math.round(num(v) * 1000) > 0 ? Math.round(num(v) * 1000) : '');
     const millis = v => (num(v) > 0 && Math.round(num(v) * 10) > 0 ? Math.round(num(v) * 10) : '');
-    const weightG = grams(p.weight);
-    let widthMm = millis(p.width);
-    let heightMm = millis(p.height);
-    let lengthMm = millis(p.length);
+    const _ed = typeof exportDimsFor === 'function' ? exportDimsFor(p) : { weight:p.weight, width:p.width, height:p.height, length:p.length };
+    const weightG = grams(_ed.weight);
+    let widthMm = millis(_ed.width);
+    let heightMm = millis(_ed.height);
+    let lengthMm = millis(_ed.length);
     /* v12.9.14 по документации Ozon: «длина должна быть наибольшим из измерений,
        высота — наименьшим». Иначе категория отклоняет карточку
        («Недопустимая длина/высота товара в упаковке»). Переставляем только числа. */
@@ -31502,7 +31625,35 @@ const OzonExport = {
       await Exp._yield();
     }
 
+    /* v12.9.68: служебная колонка AY — маркер автоподстановки ТН ВЭД для
+       жёлтой заливки (сама колонка в шаблон Ozon не входит). */
+    try {
+      const hdrN = OzonExport.HEADERS.length;
+      for (let j = 0; j < hdrN; j++) allData[j].push(j === hdrN - 1 ? 'ТН ВЭД: автоподстановка' : '');
+      for (let j = 0; j < rows.length; j++) allData[hdrN + j].push(CategoryTnved.isCurrentAuto(rows[j]) ? 'АВТО — проверьте код' : '');
+    } catch (e) { }
+    /* v12.9.68: стандартные ОВХ при выгрузке — жёлтая заливка. */
+    try {
+      const stdRows = [];
+      for (let j = 0; j < rows.length; j++) {
+        const ed = typeof exportDimsFor === 'function' ? exportDimsFor(rows[j]) : null;
+        if (ed && ed.stdFields && ed.stdFields.length) stdRows.push([j, ed.stdFields]);
+      }
+      if (stdRows.length) OzonExport._stdExportRows = stdRows;
+    } catch (e) { }
     const ws = XLSX.utils.aoa_to_sheet(allData);
+    try {
+      const hdrRows = OzonExport.HEADERS.length;
+      for (const [j, fields] of (OzonExport._stdExportRows || [])) {
+        const cols = [];
+        if (fields.includes('weight')) cols.push(12);
+        if (fields.some(k => k !== 'weight')) cols.push(13, 14, 15);
+        for (const c of cols) {
+          const ref = XLSX.utils.encode_cell({ r: hdrRows + j, c });
+          if (ws[ref]) ws[ref].s = { fill: { patternType: 'solid', fgColor: { rgb: 'FFFFFF00' } }, font: { bold: true, color: { rgb: 'FF000000' } } };
+        }
+      }
+    } catch (e) { }
     ws['!cols'] = [
       { wch: 5 },  // №
       { wch: 18 }, // Артикул*
@@ -31551,14 +31702,15 @@ const OzonExport = {
       { wch: 12 }, // Ошибка
       { wch: 12 }, // Недочёты
       { wch: 24 }, // ЧЗ по пользовательскому списку; не поле шаблона Ozon
-      { wch: 34 }  // ОВХ из стандартных весогабаритов; не поле шаблона Ozon
+      { wch: 34 }, // ОВХ из стандартных весогабаритов; не поле шаблона Ozon
+      { wch: 22 }  // ТН ВЭД: автоподстановка; не поле шаблона Ozon
     ];
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Шаблон');
     let buf;
     try {
-      buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
     } catch (e) {
       /* Если SheetJS всё-таки отказался — повторяем на «жёстко обрезанных» данных:
          так пользователь получит файл, а не ошибку Text length. */
@@ -31570,6 +31722,21 @@ const OzonExport = {
       buf = XLSX.write(wb2, { bookType: 'xlsx', type: 'array' });
       if (!OzonExport._truncated.other) OzonExport._truncated.other = 1;
     }
+    /* v12.9.68: SheetJS CE не пишет стили ячеек — жёлтую заливку для стандартных
+       ОВХ (колонки M:P, маркер AX) и автоподстановки ТН ВЭД (колонка L, маркер AY)
+       добавляем условным форматированием через патч OOXML (dxf). */
+    try {
+      const hdr = OzonExport.HEADERS.length, lastRow = allData.length;
+      if (lastRow > hdr && typeof Exp !== 'undefined' && Exp._patchSimpleXlsx) {
+        const yel = { bg: 'FFFFFF00', bold: true, fg: 'FF000000' };
+        buf = Exp._patchSimpleXlsx(new Uint8Array(buf), [{ name: 'Шаблон', aoa: allData, conditionalFormatting: [
+          { range: `M${hdr + 1}:P${lastRow}`, type: 'expression', formula: `$AX${hdr + 1}<>""`, style: yel },
+          { range: `AX${hdr + 1}:AX${lastRow}`, type: 'containsText', text: 'СТАНДАРТ', style: yel },
+          { range: `L${hdr + 1}:L${lastRow}`, type: 'expression', formula: `$AY${hdr + 1}<>""`, style: yel },
+          { range: `AY${hdr + 1}:AY${lastRow}`, type: 'containsText', text: 'АВТО', style: yel }
+        ] }]);
+      }
+    } catch (e) { console.warn('[UC] std dims xlsx marking:', e); }
     return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   },
 
@@ -32181,45 +32348,7 @@ const OzonExport = {
 
 /* Неиспользуемые исторические примеры тарифных строк. Это не ответ API и не подтверждённый справочник.
    Не применять без сверки с кабинетом продавца. */
-const OFFICIAL_ALL_MP_TARIFFS_2026 = [
-  // --- WILDBERRIES (common-api.wildberries.ru/api/v1/tariffs/commission & box) ---
-  { mp: 'WB', scope_type: 'category', scope_value: 'Автотовары и аксессуары', commission_pct: 20, acquiring_pct: 1.5, logistics_base: 46, logistics_per_kg: 12, storage_per_l_day: 0.10, return_fixed_fee: 33, return_pct: 7, last_mile: 0, source: 'WB API / Регламент тарифов WB 2026' },
-  { mp: 'WB', scope_type: 'category', scope_value: 'Запчасти и автокомпоненты', commission_pct: 22, acquiring_pct: 1.5, logistics_base: 46, logistics_per_kg: 12, storage_per_l_day: 0.10, return_fixed_fee: 33, return_pct: 8, last_mile: 0, source: 'WB API / Регламент тарифов WB 2026' },
-  { mp: 'WB', scope_type: 'category', scope_value: 'Электроника и аудиотехника', commission_pct: 15, acquiring_pct: 1.5, logistics_base: 46, logistics_per_kg: 12, storage_per_l_day: 0.08, return_fixed_fee: 33, return_pct: 6, last_mile: 0, source: 'WB API / Регламент тарифов WB 2026' },
-  { mp: 'WB', scope_type: 'category', scope_value: 'Одежда, обувь и аксессуары', commission_pct: 25, acquiring_pct: 1.5, logistics_base: 46, logistics_per_kg: 12, storage_per_l_day: 0.10, return_fixed_fee: 33, return_pct: 25, last_mile: 0, source: 'WB API / Регламент тарифов WB 2026' },
-  { mp: 'WB', scope_type: 'category', scope_value: 'Инструменты и оснастка', commission_pct: 18, acquiring_pct: 1.5, logistics_base: 46, logistics_per_kg: 12, storage_per_l_day: 0.10, return_fixed_fee: 33, return_pct: 6, last_mile: 0, source: 'WB API / Регламент тарифов WB 2026' },
-  { mp: 'WB', scope_type: 'category', scope_value: 'Товары для дома и сада', commission_pct: 19, acquiring_pct: 1.5, logistics_base: 46, logistics_per_kg: 12, storage_per_l_day: 0.08, return_fixed_fee: 33, return_pct: 9, last_mile: 0, source: 'WB API / Регламент тарифов WB 2026' },
-  { mp: 'WB', scope_type: 'category', scope_value: 'Базовый короб WB (до 1 л)', commission_pct: 20, acquiring_pct: 1.5, logistics_base: 46, logistics_per_kg: 12, storage_per_l_day: 0.10, return_fixed_fee: 33, return_pct: 8, last_mile: 0, source: 'WB API: /api/v1/tariffs/box' },
-  { mp: 'WB', scope_type: 'category', scope_value: 'Монопаллета WB (500 ₽ фикс)', commission_pct: 20, acquiring_pct: 1.5, logistics_base: 500, logistics_per_kg: 25, storage_per_l_day: 25, return_fixed_fee: 500, return_pct: 5, last_mile: 0, source: 'WB API: /api/v1/tariffs/pallet' },
-
-  // --- OZON (seller-edu.ozon.ru/docs/commissions-tariffs) ---
-  { mp: 'OZON', scope_type: 'category', scope_value: 'Автотовары и запчасти (FBS)', commission_pct: 14, acquiring_pct: 1.5, logistics_base: 35, logistics_per_kg: 8, last_mile: 5.5, processing_per_unit: 20, return_fixed_fee: 50, return_pct: 8, source: 'seller-edu.ozon.ru / FBS 2026' },
-  { mp: 'OZON', scope_type: 'category', scope_value: 'Автотовары и запчасти (FBO)', commission_pct: 13, acquiring_pct: 1.5, logistics_base: 35, logistics_per_kg: 8, last_mile: 5.5, processing_per_unit: 76, storage_per_l_day: 0.20, return_fixed_fee: 50, return_pct: 8, source: 'seller-edu.ozon.ru / FBO 2026 (-1% комиссия)' },
-  { mp: 'OZON', scope_type: 'category', scope_value: 'Крупногабаритный товар КГТ (>25 кг / >120 см)', commission_pct: 14, acquiring_pct: 1.5, logistics_base: 150, logistics_per_kg: 15, last_mile: 5.5, processing_per_unit: 250, storage_per_l_day: 0.08, return_fixed_fee: 150, return_pct: 6, source: 'seller-edu.ozon.ru / Регламент КГТ' },
-  { mp: 'OZON', scope_type: 'category', scope_value: 'Электроника и бытовая техника (FBS)', commission_pct: 8, acquiring_pct: 1.5, logistics_base: 35, logistics_per_kg: 8, last_mile: 5.5, processing_per_unit: 20, return_fixed_fee: 50, return_pct: 5, source: 'seller-edu.ozon.ru / Электроника FBS' },
-  { mp: 'OZON', scope_type: 'category', scope_value: 'Одежда, обувь и текстиль (FBS)', commission_pct: 18, acquiring_pct: 1.5, logistics_base: 35, logistics_per_kg: 8, last_mile: 5.5, processing_per_unit: 20, return_fixed_fee: 50, return_pct: 22, source: 'seller-edu.ozon.ru / Одежда FBS' },
-  { mp: 'OZON', scope_type: 'category', scope_value: 'Товары для дома и ремонта (FBS)', commission_pct: 15, acquiring_pct: 1.5, logistics_base: 35, logistics_per_kg: 8, last_mile: 5.5, processing_per_unit: 20, return_fixed_fee: 50, return_pct: 8, source: 'seller-edu.ozon.ru / Дом FBS' },
-
-  // --- YANDEX MARKET (yandex.ru/support/marketplace) ---
-  { mp: 'YM', scope_type: 'category', scope_value: 'Специальный тариф до 300 ₽ и до 5 л (всё включено)', commission_pct: 42, acquiring_pct: 0, payment_transfer_pct: 0, logistics_base: 0, last_mile: 0, return_fixed_fee: 0, return_pct: 0, source: 'Яндекс Маркет / Спецтариф 42%' },
-  { mp: 'YM', scope_type: 'category', scope_value: 'Авто → Запчасти → Двигатель и выхлоп', commission_pct: 12, acquiring_pct: 0, payment_transfer_pct: 2.8, agency_fee_per_sku: 0.12, logistics_base: 92, logistics_per_kg: 8, last_mile: 5.5, return_fixed_fee: 15, return_pct: 8, source: 'Яндекс Маркет / Официальная FBS-сетка' },
-  { mp: 'YM', scope_type: 'category', scope_value: 'Авто → Запчасти → Подвеска и тормозная система', commission_pct: 11, acquiring_pct: 0, payment_transfer_pct: 2.8, agency_fee_per_sku: 0.12, logistics_base: 92, logistics_per_kg: 8, last_mile: 5.5, return_fixed_fee: 15, return_pct: 7, source: 'Яндекс Маркет / Официальная FBS-сетка' },
-  { mp: 'YM', scope_type: 'category', scope_value: 'Авто → Запчасти → Электрика и датчики', commission_pct: 13, acquiring_pct: 0, payment_transfer_pct: 2.8, agency_fee_per_sku: 0.12, logistics_base: 92, logistics_per_kg: 8, last_mile: 5.5, return_fixed_fee: 15, return_pct: 6, source: 'Яндекс Маркет / Официальная FBS-сетка' },
-  { mp: 'YM', scope_type: 'category', scope_value: 'Авто → Запчасти → Кузов и оптика', commission_pct: 14, acquiring_pct: 0, payment_transfer_pct: 2.8, agency_fee_per_sku: 0.12, logistics_base: 92, logistics_per_kg: 8, last_mile: 5.5, return_fixed_fee: 15, return_pct: 9, source: 'Яндекс Маркет / Официальная FBS-сетка' },
-  { mp: 'YM', scope_type: 'category', scope_value: 'Электроника и компьютерная техника (FBS)', commission_pct: 6, acquiring_pct: 0, payment_transfer_pct: 2.8, agency_fee_per_sku: 0.12, logistics_base: 92, logistics_per_kg: 8, last_mile: 5.5, return_fixed_fee: 15, return_pct: 5, source: 'Яндекс Маркет / Электроника 2026' },
-
-  // --- МЕГАМАРКЕТ (calculator.megamarket.ru) ---
-  { mp: 'MM', scope_type: 'category', scope_value: 'Автотовары и запчасти (СберЛогистика FBS)', commission_pct: 10, acquiring_pct: 1.5, logistics_base: 65, logistics_per_kg: 15, boost_pct: 2, return_fixed_fee: 70, return_pct: 7, last_mile: 0, source: 'Мегамаркет / СберЛогистика 2026' },
-  { mp: 'MM', scope_type: 'category', scope_value: 'Электроника и бытовая техника (FBS)', commission_pct: 5, acquiring_pct: 1.5, logistics_base: 65, logistics_per_kg: 15, boost_pct: 2, return_fixed_fee: 70, return_pct: 5, last_mile: 0, source: 'Мегамаркет / Электроника 2026' },
-  { mp: 'MM', scope_type: 'category', scope_value: 'Одежда, обувь и аксессуары (FBS)', commission_pct: 15, acquiring_pct: 1.5, logistics_base: 65, logistics_per_kg: 15, boost_pct: 2, return_fixed_fee: 70, return_pct: 20, last_mile: 0, source: 'Мегамаркет / Одежда 2026' },
-  { mp: 'MM', scope_type: 'category', scope_value: 'Товары для дома и ремонта (FBS)', commission_pct: 12, acquiring_pct: 1.5, logistics_base: 65, logistics_per_kg: 15, boost_pct: 2, return_fixed_fee: 70, return_pct: 8, last_mile: 0, source: 'Мегамаркет / Дом 2026' },
-
-  // --- АВИТО (avito.ru/business / Авито Доставка) ---
-  { mp: 'AVITO', scope_type: 'category', scope_value: 'Запчасти и аксессуары (Авито Доставка)', commission_pct: 5, acquiring_pct: 0, logistics_base: 0, logistics_per_kg: 0, last_mile: 0, return_fixed_fee: 0, return_pct: 5, source: 'Авито / Доставка за сделку 2026' },
-  { mp: 'AVITO', scope_type: 'category', scope_value: 'Бытовая электроника и гаджеты', commission_pct: 4, acquiring_pct: 0, logistics_base: 0, logistics_per_kg: 0, last_mile: 0, return_fixed_fee: 0, return_pct: 4, source: 'Авито / Доставка за сделку 2026' },
-  { mp: 'AVITO', scope_type: 'category', scope_value: 'Одежда, обувь и аксессуары', commission_pct: 7, acquiring_pct: 0, logistics_base: 0, logistics_per_kg: 0, last_mile: 0, return_fixed_fee: 0, return_pct: 12, source: 'Авито / Доставка за сделку 2026' },
-  { mp: 'AVITO', scope_type: 'category', scope_value: 'Товары для дома и дачи', commission_pct: 6, acquiring_pct: 0, logistics_base: 0, logistics_per_kg: 0, last_mile: 0, return_fixed_fee: 0, return_pct: 6, source: 'Авито / Доставка за сделку 2026' }
-];
+/* v12.9.67: неиспользовавшийся справочник OFFICIAL_ALL_MP_TARIFFS_2026 удалён: ставки с атрибуцией «официальные 2026» не были сверены и в расчётах не участвовали. */
 
 /* ==================== РЕКОМЕНДОВАННЫЙ ПРАЙС · v12.9.41 ====================
    Изолированный прогноз: в каталоге хранится только отдельная запись прайса.
@@ -37723,11 +37852,11 @@ function exportCatalog() {
     { g: 'in', k: 'promoCofin', n: 'Софин. акции, %', w: 12, f: '0.0', src: p => p.promoCofin !== undefined && p.promoCofin !== null && p.promoCofin !== '' ? num(p.promoCofin) : num(S.settings.promoCofinDef) },
     { g: 'calc', k: 'priceForApi', n: 'Цена для отправки (API)', w: 22, f: '#,##0', src: p => p.priceForApi },
     { g: 'in', k: 'ozon_realfbs_delivery', n: 'Ozon realFBS доставка, ₽/ед', w: 26, f: '#,##0.00', src: p => p.ozon_realfbs_delivery == null || p.ozon_realfbs_delivery === '' ? '' : p.ozon_realfbs_delivery },
-    { g: 'in', k: 'cost', n: 'Себестоимость, ₽', w: 15, f: '#,##0.00' }, { g: 'in', k: 'weight', n: 'Вес, кг', w: 14, f: '0.000000' },
+    { g: 'in', k: 'cost', n: 'Себестоимость, ₽', w: 15, f: '#,##0.00' }, { g: 'in', k: 'weight', n: 'Вес, кг', w: 14, f: '0.000000', src: p => { const w = typeof exportDimsFor === 'function' ? exportDimsFor(p).weight : num(p.weight); return w > 0 ? w : ''; } },
     { g: 'in', k: 'net_weight', n: 'Вес товара без упаковки, кг', w: 22, f: '0.000000', exportOnly:true, src:p => num(p.net_weight) > 0 ? num(p.net_weight) : '' },
-    { g: 'in', k: 'length', n: dimFieldLabel('Длина'), w: 10, f: '0.00', src: p => num(p.length) > 0 ? dimFromCm(p.length) : '' },
-    { g: 'in', k: 'width', n: dimFieldLabel('Ширина'), w: 11, f: '0.00', src: p => num(p.width) > 0 ? dimFromCm(p.width) : '' },
-    { g: 'in', k: 'height', n: dimFieldLabel('Высота'), w: 11, f: '0.00', src: p => num(p.height) > 0 ? dimFromCm(p.height) : '' },
+    { g: 'in', k: 'length', n: dimFieldLabel('Длина'), w: 10, f: '0.00', src: p => { const v = typeof exportDimsFor === 'function' ? exportDimsFor(p).length : num(p.length); return v > 0 ? dimFromCm(v) : ''; } },
+    { g: 'in', k: 'width', n: dimFieldLabel('Ширина'), w: 11, f: '0.00', src: p => { const v = typeof exportDimsFor === 'function' ? exportDimsFor(p).width : num(p.width); return v > 0 ? dimFromCm(v) : ''; } },
+    { g: 'in', k: 'height', n: dimFieldLabel('Высота'), w: 11, f: '0.00', src: p => { const v = typeof exportDimsFor === 'function' ? exportDimsFor(p).height : num(p.height); return v > 0 ? dimFromCm(v) : ''; } },
     { g: 'in', k: 'volumeExplicit', n: 'Объём задан вручную', w: 20, src: p => productVolumeIsExplicit(p) ? 'да' : 'нет' },
     { g: 'in', k: 'volumeInput', n: 'Исходный объём, л', w: 16, f: '0.00', src: p => productVolumeIsExplicit(p) ? num(p.volume) : 0 },
     { g: 'in', k: 'volume', n: 'Объём, л', w: 11, f: '0.00', xl: (R, r) => `=IF(${r.volumeExplicit}${R}="да",${r.volumeInput}${R},ROUND(${r.length}${R}*${r.width}${R}*${r.height}${R}/${currentDimUnit() === 'mm' ? 1000000 : 1000},4))` },
@@ -38281,6 +38410,10 @@ const Exp = {
     const activeMps = this.activeMps();
     const picked = Exp.pick || {};
     const cat = exportCatalog().filter(c => picked[c.k] && !exportColumnExcluded(c, activeMps));
+    if (cat.some(c => ['weight','length','width','height'].includes(c.k)) && !cat.some(c => c.k === 'stdDimsExport'))
+      cat.push({ g: 'in', k: 'stdDimsExport', n: 'ОВХ из стандартных при выгрузке', w: 34, txt: 1, src: p => (typeof exportDimsNote === 'function' ? exportDimsNote(p) : '') });
+    if (cat.some(c => ['category','category_type','tnved'].includes(c.k)) && !cat.some(c => c.k === 'autoFillNote'))
+      cat.push({ g: 'in', k: 'autoFillNote', n: 'Автозаполнение (проверить)', w: 30, txt: 1, src: p => (typeof autoFillNote === 'function' ? autoFillNote(p) : '') });
     if (!cat.length) return Toast.warn('Колонки не выбраны', 'Отметьте хотя бы одну колонку');
     let rows = forceRows || Exp.rows();
     let fallbackReason = '';
@@ -38498,6 +38631,18 @@ const Exp = {
     ct('bestMp', 'Мегамаркет', dxf('FF0D3820', true, 'FF4ADE80'));
     ct('bestMp', 'Авито', dxf('FF0D2F45', true, 'FF38BDF8'));
     ct('ozonIsKgt', 'КГТ', dO);
+    /* v12.9.68: стандартные ОВХ и автоподстановка — жёлтая заливка. */
+    const dYellow = dxf('FFFFFF00', true, 'FF000000');
+    if (ref.stdDimsExport) {
+      ct('stdDimsExport', 'СТАНДАРТ', dYellow);
+      for (const dk of ['weight','length','width','height']) if (ref[dk]) ce(dk, `${ref.stdDimsExport}2<>""`, dYellow);
+    }
+    if (ref.autoFillNote) {
+      ct('autoFillNote', 'АВТО', dYellow);
+      if (ref.category) ce('category', `ISNUMBER(SEARCH("АВТО[категория]",$${ref.autoFillNote}2))`, dYellow);
+      if (ref.category_type) ce('category_type', `ISNUMBER(SEARCH("АВТО[вид]",$${ref.autoFillNote}2))`, dYellow);
+      if (ref.tnved) ce('tnved', `ISNUMBER(SEARCH("АВТО[ТН ВЭД]",$${ref.autoFillNote}2))`, dYellow);
+    }
 
     /* ---- zip-поток ---- */
     const chunks = [];
@@ -40270,7 +40415,7 @@ const TransitOps = {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     for (let d = 0; d < days; d++) { const d0 = new Date(today); d0.setDate(d0.getDate() + d); labels.push(d0.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })); }
     const pIdx = productIndex();
-    const baseOrders = S.orders.filter(o => (o.orderId || o.article) && !o.po);
+    const baseOrders = S.orders.filter(o => (o.orderId || o.article) && !o.po && !o.isDemo);
     const orders = baseOrders.concat(Array.isArray(extraOrders) ? extraOrders : []);
     orders.forEach(o => {
       if (TransitOps.isCanceledOrder(o)) return;
@@ -40347,19 +40492,20 @@ const TransitOps = {
     const curMp = TransitOps.ordersMp || 'ALL';
     const filteredOrders = allOrders.filter(o => curMp === 'ALL' || (o.marketplace || 'YM').toUpperCase() === curMp);
     const risks = filteredOrders.map(o => Object.assign({ o: o }, TransitOps.risk(o)));
-    const crit = risks.filter(r => r.level === 'critical').length;
-    const needBuy = risks.filter(r => r.needBuy).length;
+    const crit = risks.filter(r => r.level === 'critical' && !r.o.isDemo).length;
+    const needBuy = risks.filter(r => r.needBuy && !r.o.isDemo).length;
     const cf = TransitOps.cashFlow();
     let peak = 0, cum = 0;
     for (let i = 0; i < cf.out.length; i++) { cum += cf.out[i] - cf.inc[i]; if (cum > peak) peak = cum; }
     const pIdx = productIndex();
     const mOf = o => { const b = pIdx.get(normArticle(o.article || '')); return (b && !b.excluded) ? num(o.qty || 1) * num(b.contribution) : 0; };
-    const ordMargin = filteredOrders.reduce((s, o) => s + mOf(o), 0);
+    const kpiOrders = filteredOrders.filter(o => !o.isDemo);
+    const ordMargin = kpiOrders.reduce((s, o) => s + mOf(o), 0);
 
     const kpi = $('#ordersKpi');
     const demoOrderCount = S.orders.filter(o => o.isDemo).length;
-    if (kpi) kpi.innerHTML = (demoOrderCount ? `<div class="warnbox" style="grid-column:1/-1">В реестре ${fmt(demoOrderCount)} ДЕМО-заказов. Они синтетические и включены в показатели ниже; не используйте их как реальные отгрузки.</div>` : '') + [
-      ['Открытых заказов (' + curMp + ')', fmt(filteredOrders.length), '#5c9dff'],
+    if (kpi) kpi.innerHTML = (demoOrderCount ? `<div class="warnbox" style="grid-column:1/-1">В реестре ${fmt(demoOrderCount)} ДЕМО-заказов. Они синтетические и исключены из показателей ниже; не используйте их как реальные отгрузки.</div>` : '') + [
+      ['Открытых заказов (' + curMp + ')', fmt(kpiOrders.length), '#5c9dff'],
       ['Критичных по SLA (<12ч)', fmt(crit), crit ? '#ff5f6d' : '#2fd6a3'],
       ['Требуют закупки', fmt(needBuy), needBuy ? '#f7b32b' : '#2fd6a3'],
       ['Пик кассового разрыва', money(peak), peak ? '#ff9f43' : '#2fd6a3'],
@@ -43788,7 +43934,7 @@ function bindAll() {
   if (priceIsCostSw) priceIsCostSw.onclick = () => Import.setPriceIsCost(!Import.priceIsCostOn());
   const autoStdSw = $('#enAutoStdDims');
   if (autoStdSw) {
-    autoStdSw.checked = S.settings.autoStdDims !== false;
+    autoStdSw.checked = S.settings.autoStdDims === true;
     autoStdSw.onchange = async () => {
       S.settings.autoStdDims = autoStdSw.checked;
       try { await UI2.saveSettings(); } catch (e) { }
@@ -43897,7 +44043,7 @@ function bindAll() {
       await withProgress('Заполнение пустых данных', 'OE → SKU+бренд → стандартные весогабариты, только пустые поля', async prog => {
         HVC.rebuildIndex(S.rows);
         rowsChanged = await HVC.enrichAsync(S.rows, prog, mode);
-        if (S.settings.autoStdDims !== false) {
+        if (S.settings.autoStdDims === true) {
           if (prog) prog('стандартные весогабариты по категории/виду…');
           for (const p of S.rows) {
             try {
@@ -44017,7 +44163,7 @@ function bindAll() {
   if (enRun) enRun.onclick = async () => {
     const mode = HVC.enrichMode();
     const cols = HVC.enabledColumns();
-    const autoStd = S.settings.autoStdDims !== false;
+    const autoStd = S.settings.autoStdDims === true;
     if (!cols.length && !autoStd) { Toast.warn('Обогащение не запущено', 'не выбрана ни одна колонка — включите переключатели в блоке «Обогащать колонки» или разрешите стандартные весогабариты'); return; }
     await withProgress(mode === 'oe' ? 'Обогащение по OE' : mode === 'auto' ? 'Обогащение: OE → SKU+бренд' : 'Обогащение по Артикул + Бренд',
       autoStd ? 'поиск доноров + типовые стандартные весогабариты по категории/виду' : (mode === 'oe' ? 'поиск доноров по нормализованному OE (oe_norm)' : mode === 'auto' ? 'сначала OE, затем недостающие поля по article_norm + brand_norm' : 'поиск доноров по article_norm + brand_norm'), async prog => {

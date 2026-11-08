@@ -1,0 +1,82 @@
+/* UNIT·CONTROL — воспроизводимые тесты аудита v12.9.67–12.9.68.
+   Запуск: node tests/run-tests.js   (Node 18+, зависимостей нет) */
+'use strict';
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+
+const html = fs.readFileSync(__dirname + '/../index.html', 'utf8').replace(/\r\n/g, '\n');
+const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+const app = scripts[scripts.length - 1];
+new vm.Script(app); // синтаксис клиентского скрипта
+const gas = html.match(/<script type="text\/plain" id="gas-backend">([\s\S]*?)<\/script>/)[1];
+new vm.Script(gas); // синтаксис GAS-бэкенда
+
+const grab = re => { const m = app.match(re); assert(m, 'не найден фрагмент: ' + re); return m[0]; };
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(
+  grab(/const num = v => \{[\s\S]*?\n\};\n/) +
+  grab(/const _POW10[\s\S]*?const round = \(n, d = 2\) => \{[\s\S]*?\n\};\n/) +
+  grab(/function solveEcoInteger\(initial, metric\) \{[\s\S]*?\n\}\n/) +
+  '\nthis.num=num; this.round=round; this.solveEcoInteger=solveEcoInteger;', ctx);
+const { num, round, solveEcoInteger } = ctx;
+
+// num(): форматы чисел
+assert.strictEqual(num('11 200,00'), 11200);
+assert.strictEqual(num('1.200,50'), 1200.5, 'точка тысяч + запятая');
+assert.strictEqual(num('1,200.50'), 1200.5, 'запятая тысяч + точка');
+assert.strictEqual(num('12%'), 12);
+assert.strictEqual(num(''), 0); assert.strictEqual(num(null), 0); assert.strictEqual(num('abc'), 0);
+
+// round(): Excel-семантика (половина от нуля)
+assert.strictEqual(round(2.5, 0), 3); assert.strictEqual(round(-2.5, 0), -3);
+assert.strictEqual(round(1.005, 2), 1.01); assert.strictEqual(round(313.635, 2), 313.64);
+assert.strictEqual(round(-313.635, 2), -313.64);
+
+// solver: линейная, ступенчатая и интервальная (немонотонная) прибыль
+assert.strictEqual(solveEcoInteger(15306, p => p * 0.785 - 11285.17), 14377);
+assert.strictEqual(solveEcoInteger(900, p => p * 0.8 - 700 - (p >= 1000 ? 500 : 0)), 875);
+const band = solveEcoInteger(100, p => (p >= 500 && p <= 600) ? 10 : -Math.abs(p - 550));
+assert(band >= 500 && band <= 600, 'интервальная прибыль должна находиться, получено ' + band);
+assert.strictEqual(solveEcoInteger(100, () => -5), 10000000, 'нет прибыли — CAP');
+
+// статические гарантии аудита
+assert(app.includes('autoStdDims: false'), 'стандартные ОВХ по умолчанию выключены');
+assert(app.includes('stdDimsDefaultOffV2'), 'миграция выключения стандартных ОВХ');
+assert(app.includes('запись стандартных ОВХ в каталог запрещена'), 'StdDims.fill не пишет в каталог');
+assert(app.includes('function exportDimsFor'), 'стандартные ОВХ применяются при выгрузке');
+// v12.9.68: стандартные ОВХ и автоподстановка — жёлтая заливка, не красный шрифт
+assert(!app.includes('FFFF0000'), 'красной пометки ОВХ не осталось');
+assert(app.includes("fgColor: { rgb: 'FFFFFF00' }"), 'Ozon XLSX: жёлтая заливка стандартных ОВХ');
+assert(app.includes("dxf('FFFFFF00', true, 'FF000000')"), 'юнит-экономика XLSX: жёлтая заливка');
+assert(app.includes('function autoFillFields'), 'маркеры автоподстановки категорий/ТН ВЭД');
+assert(app.includes('function autoFillNote'), 'служебная колонка автозаполнения в экспорте');
+assert(app.includes("$AY"), 'Ozon XLSX: маркер автоподстановки ТН ВЭД (колонка AY)');
+assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: жёлтая заливка автоподстановки');
+// автоподстановка — только в пустые поля; файл — главный источник
+assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
+assert(app.includes('if (HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved)'), 'Каталог V: ТН ВЭД только в пустое поле');
+assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
+assert(app.includes('12.9.68-client+autofill-mark'), 'версия клиента обновлена');
+assert(!app.includes('OFFICIAL_ALL_MP_TARIFFS_2026 = ['), 'мёртвый справочник тарифов удалён');
+assert(app.includes('p.profitEstimate = p.priceInputsIncomplete'), 'прибыль помечается оценкой');
+assert(app.includes('ОЦЕНКА по '), 'KPI показывает долю оценочной прибыли');
+assert(gas.includes('toPrecision(15)'), 'GAS round_ унифицирован с клиентом');
+
+// CSV: независимый пересчёт безубытка в recalculated
+const csvText = fs.readFileSync(__dirname + '/../UC_unit_economics_OZON_2026-11-06_recalculated.csv', 'utf8').replace(/^﻿/, '');
+const rows = csvText.trim().split(/\r?\n/).slice(1).map(l => l.split(';'));
+const n = s => parseFloat(String(s).replace(/[\s ]/g, '').replace(',', '.')) || 0;
+for (const r of rows) {
+  const price = n(r[13]), tot = n(r[32]);
+  const pct = (n(r[15]) + n(r[17]) + n(r[31])) / price;
+  const fixed = tot - price * pct;
+  const be = fixed / (1 - pct), t20 = fixed / (1 - pct - 0.20);
+  assert(Math.abs(n(r[41]) - be) < 0.02, r[0] + ': BE ' + r[41] + ' != ' + be.toFixed(2));
+  assert(Math.abs(n(r[42]) - t20) < 0.02, r[0] + ': target20 ' + r[42] + ' != ' + t20.toFixed(2));
+  // суммы статей
+  let sum = 0; for (let i = 14; i <= 31; i++) sum += n(r[i]);
+  assert(Math.abs(sum - tot) < 0.02, r[0] + ': сумма статей != итогу');
+}
+console.log('OK: все тесты пройдены (' + rows.length + ' строк CSV пересчитано)');
