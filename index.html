@@ -122,6 +122,17 @@
   v12.9.73 — ПРОДАЖИ ЗА МЕСЯЦ УБРАНЫ ИЗ СНОСКИ НЕДОСТАЮЩИХ ДАННЫХ: экономика
   считается на единицу товара (прибыль, маржа, безубыток, целевая цена), продажи
   за месяц для этого не нужны и больше не числятся недостающими данными.
+  v12.9.79 — ПАМЯТЬ: МЕНЬШЕ КОПИЙ КАТАЛОГА. Замер: компактная строка
+  каталога ≈1,46 КБ (из них 1,14 КБ — Float64Array расчётных полей), то есть
+  200 тыс. SKU ≈ 290 МБ — это минимум текущей архитектуры; убираем то, что
+  вокруг неё. (1) Воркер фильтра освобождается после 60 с простоя и при
+  уходе из раздела «Данные» (копия-проекция каталога не живёт вечно;
+  поднимается заново при следующем фильтре). (2) HVC.cross: вместо Map с
+  объектом {oeNorm, artKey} на каждую OE-связь — Set самих ключей (оба
+  значения уже зашиты в ключ); формат записи в IndexedDB/GAS не изменён.
+  (3) MemGuard раз в минуту при простое и heap > 400 МБ мягко сбрасывает
+  воркер и кэши (включая пул интернированных строк — раньше не сбрасывался),
+  не дожидаясь критических 600/820 МБ и падения вкладки.
   v12.9.78 — ДЕЛЬТА-РЕЖИМ ДОВЕДЁН ДО КОНЦА. (1) Автосверка аномалий OE
   собирает доноров через реестр HVC.byOe и идентичности целей, а не проходом
   по всему каталогу с разбором OE каждой строки. (2) Триггер полного
@@ -13551,7 +13562,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.78-client+delta-anomaly-fullcalc-trigger';
+const APP_VERSION = '12.9.79-client+memory-idle-release';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19909,6 +19920,8 @@ const MemGuard = {
     }
     const freed = [];
     try { clearTariffLookupCache(); freed.push('тарифы'); } catch (e) { }
+    /* v12.9.79: пул интернированных строк (до 50 тыс.) тоже отдаём сборщику. */
+    try { if (typeof _rowTextPool !== 'undefined') { _rowTextPool.clear(); freed.push('пул строк'); } } catch (e) { }
     if (level >= 2) {
       try { if (!S._pipeActive) { FWorker.release(); freed.push('воркер'); } } catch (e) { }
       try { S.view = []; S.viewVer = -1; freed.push('срез таблицы'); } catch (e) { }
@@ -21482,6 +21495,21 @@ function runPipeline(full, options) {
   });
 }
 
+/* v12.9.79: мягкая уборка по простою. Раз в минуту, если расчёт не идёт и
+   heap заметно занят (>400 МБ), освобождаем воркер фильтра и кэши до того,
+   как браузер упрётся в лимит и вкладка упадёт. При низкой памяти уровень
+   тревоги сбрасывается, чтобы уборка могла повториться. */
+setInterval(() => {
+  try {
+    if (typeof S !== 'undefined' && S._pipeActive) return;
+    if (typeof FWorker !== 'undefined' && FWorker.releaseIfIdle) FWorker.releaseIfIdle();
+    if (typeof MemGuard === 'undefined' || !MemGuard.usedMB) return;
+    const used = MemGuard.usedMB();
+    if (used > 400) MemGuard.relief(1, 'простой');
+    else if (used < 200) MemGuard.level = 0;
+  } catch (e) { }
+}, 60000);
+
 /* v12.9.6-mem: нехватка памяти не должна оставлять пустую вкладку без объяснения.
    Перехватываем RangeError/«out of memory» и показываем, что делать; данные в
    IndexedDB при этом не уничтожаются. */
@@ -22044,6 +22072,9 @@ const FWorker = (function () {
     '};'
   ].join('\n');
   let worker = null, lastVer = -1, lastSortKey = '', seq = 0; const pend = new Map(); const pendTimers = new Map(); /* v10.8.6 (миноp #4): явная отмена watchdog по ответу */
+  /* v12.9.79: время последнего использования — воркер с копией каталога не
+     должен жить вечно ради одного фильтра. */
+  let lastUse = Date.now();
   function ensure() {
     if (worker) return worker;
     try { worker = new Worker(URL.createObjectURL(new Blob([SRC], { type: 'application/javascript' }))); }
@@ -22060,7 +22091,11 @@ const FWorker = (function () {
       pendTimers.clear(); pend.clear();
     },
     available() { return typeof Worker !== 'undefined'; },
+    /* v12.9.79: простой > 60 с без запросов — копия каталога в воркере
+       освобождается; следующий фильтр поднимет воркер заново. */
+    releaseIfIdle() { if (worker && !pend.size && Date.now() - lastUse > 60000) { this.release(); try { console.info('[UC] воркер фильтра освобождён по простою'); } catch (e) { } } },
     setRowsIfNeeded(rows, ver) {
+      lastUse = Date.now();
       if (typeof MemGuard !== 'undefined' && MemGuard.check('фильтр каталога') >= 2) return false;
       const w = ensure(); if (!w) return false; if (ver === lastVer && lastSortKey === S.sort.k) return true; lastVer = ver; lastSortKey = S.sort.k;
       try {
@@ -22093,7 +22128,7 @@ const FWorker = (function () {
       return true;
     },
     transferableInput: true,
-    filter(f, sort, ver, cb) { const w = ensure(); if (!w) return false; const id = ++seq; pend.set(id, cb);
+    filter(f, sort, ver, cb) { lastUse = Date.now(); const w = ensure(); if (!w) return false; const id = ++seq; pend.set(id, cb);
       try { w.postMessage({ type: 'filter', id, ver, filter: f, sort }); }
       catch (e) { pend.delete(id); worker = null; lastVer = -1; return false; }
       /* v11-аудит: watchdog — если воркер умер после отправки, через 12 с
@@ -23238,7 +23273,7 @@ async function applyDimensionUnit(unit, options) {
 const HVC = {
   oe: new Map(),        // oeNorm → { oe, name, applicability, category, length, width, height, weight, dimensions_str }
   parts: new Map(),     // artNorm|brandNorm → { artikul, brand, multiplicity, barcode, length..weight, image_url, dimensions_str }
-  cross: new Map(),     // oeNorm|artKey → 1
+  cross: new Set(),     /* v12.9.79: только ключи «oeNorm\u001FartKey» — объект {oeNorm, artKey} на связь больше не храним: оба значения уже в ключе */
   prices: new Map(),    // artKey → { price, currency }
   byArt: new Map(),     // artKey → Set(oeNorm)
   byOe: new Map(),      // oeNorm → Set(artKey)
@@ -23580,7 +23615,7 @@ const HVC = {
         const on = HVC.normalizeKey(oe); if (!on) continue;
         const ck = on + '\u001F' + key;
         if (!HVC.cross.has(ck)) {
-          HVC.cross.set(ck, { oeNorm: on, artKey: key }); crN++;
+          HVC.cross.add(ck); crN++;
           if (!HVC.byArt.has(key)) HVC.byArt.set(key, new Set()); HVC.byArt.get(key).add(on);
           if (!HVC.byOe.has(on)) HVC.byOe.set(on, new Set()); HVC.byOe.get(on).add(key);
         }
@@ -23791,7 +23826,7 @@ const HVC = {
         if (!HVC.byOe.has(on)) HVC.byOe.set(on, new Set());
         HVC.byOe.get(on).add(key);
         if (!HVC.oe.has(on)) HVC.oe.set(on, { oe: t, name: '', applicability: '', category: '', length: 0, width: 0, height: 0, weight: 0, dimensions_str: '' });
-        HVC.cross.set(on + '\u001F' + key, { oeNorm: on, artKey: key });
+        HVC.cross.add(on + '\u001F' + key);
       }
       const joined = out.join(OE_DELIMITERS[oeMode()].join);
       if (joined !== String(p.oe_numbers || '') || joined !== String(p.oe_list || '')) {
@@ -24401,7 +24436,9 @@ const HVC = {
         };
         await sync(db.hvcOe, HVC.oe, (oeNorm, v) => ({ oeNorm, ...v }), 'oeNorm');
         await sync(db.hvcParts, HVC.parts, (key, v) => ({ key, ...v }), 'key');
-        await sync(db.hvcCross, HVC.cross, (key, v) => ({ key, oeNorm:v.oeNorm, artKey:v.artKey }), 'key');
+        /* v12.9.79: cross — Set ключей; для записи в IndexedDB oeNorm/artKey
+           восстанавливаются из ключа, формат таблицы не меняется. */
+        await sync(db.hvcCross, (function* () { for (const ck of HVC.cross) { const i = ck.indexOf('\u001F'); yield [ck, { oeNorm: ck.slice(0, i), artKey: ck.slice(i + 1) }]; } })(), (key, v) => ({ key, oeNorm:v.oeNorm, artKey:v.artKey }), 'key');
         await sync(db.hvcPrices, HVC.prices, (key, v) => ({ key, ...v }), 'key');
         await db.meta.put({ key: 'hvcRules', value: { rules: HVC.rules, exclusions: HVC.exclusions, descTemplate: HVC.descTemplate } });
         await db.meta.put({ key: 'ozonApplicability', value: [...HVC.ozonApplicability.entries()] });
@@ -24412,7 +24449,7 @@ const HVC = {
         try {
           gas('saveHVC', {
             oe: [...HVC.oe.entries()].slice(0, 5000).map(([oeNorm, v]) => ({ oeNorm, ...v })),
-            cross: [...HVC.cross.values()].slice(0, 10000).map(v => { const p3 = String(v.artKey||'').split('|'); return { oeNorm:v.oeNorm, artNorm:p3[0], brandNorm:p3.slice(1).join('|') }; }),
+            cross: [...HVC.cross].slice(0, 10000).map(ck => { const i = ck.indexOf('\u001F'); const p3 = ck.slice(i + 1).split('|'); return { oeNorm: ck.slice(0, i), artNorm: p3[0], brandNorm: p3.slice(1).join('|') }; }),
             prices: [...HVC.prices.entries()].slice(0, 10000).map(([key, v]) => { const p2 = key.split('|'); return { artNorm: p2[0], brandNorm: p2[1], ...v }; })
           }).catch(() => { });
         } catch (e) { /* прокси недоступен — реестры остаются в IndexedDB */ }
@@ -24469,7 +24506,7 @@ const HVC = {
         const artKey = canonicalArtKey(rawArt);
         if (!on || !artKey || artKey === '|') return;
         const ck = on + '\u001F' + artKey;
-        HVC.cross.set(ck, { oeNorm:on, artKey });
+        HVC.cross.add(ck);
         if (!HVC.byArt.has(artKey)) HVC.byArt.set(artKey, new Set()); HVC.byArt.get(artKey).add(on);
         if (!HVC.byOe.has(on)) HVC.byOe.set(on, new Set()); HVC.byOe.get(on).add(artKey);
       });
@@ -25707,6 +25744,8 @@ const UI = {
     $$('.view').forEach(s => s.classList.toggle('active', s.id === 'v-' + v));
     $('#main').scrollTop = 0;
     location.hash = v;
+    /* v12.9.79: вне раздела «Данные» копия каталога в воркере не нужна. */
+    if (v !== 'data' && typeof FWorker !== 'undefined' && FWorker.release) { try { FWorker.release(); } catch (e) { } }
     const fn = { dashboard: () => Dash.render(), data: () => { buildCols(); applyFilter(); Table.head(); Table.paint(); UI.fillFilters(); }, unit: () => { UE.render(); UE.renderTariffTable(); }, 'ozon-advisor': () => OzonAdvisor.render(), cats: () => Cats.render(), pl: () => PL.render(), supply: () => Supply.render(), mail: () => Mail.renderList(), api: () => Api.render(), goods: () => Goods.render(), export: () => Exp.render(), orders: () => TransitOps.render(), 'price-limiter': () => PriceLimiter.render(), anomaly: () => { AnomalyDetector.renderLimits(); AnomalyDetector.renderFound(); AnomalyDetector.renderLog(); }, 'oe-groups': () => OEAggregator.build(), moq: () => { MOQManager.renderRules(); MOQManager.renderBasket(); }, lifecycle: () => LifecycleManager.render(), whatif: () => { WhatIf.renderList(); }, finance: () => FinanceRecon.render(), undo: () => UndoRedo.render(), competitors: () => CompetitorIntel.render() }[v];
     if (fn) setTimeout(fn, 30);
     /* v12.9.12: карточка наценок по брендам живёт в разделе «Управление товарами» */
@@ -42048,8 +42087,9 @@ const AnomalyOE = {
         !this.autoEvidence(entry.owner) || (verdict.tier==='oe' && !oeOk(this.codes(entry.owner,true))) ||
         !this.exactTuple(entry.owner,ev))) return false;
     }
-    const link=HVC.cross.get(entry.linkKey), part=HVC.parts.get(entry.partKey);
-    const codeOk=verdict.tier==='sku' || !!(link && DimPolicy.similarOe(normArticle(link.oeNorm),verdict.oe));
+    /* v12.9.79: cross — Set ключей; наличие связи и её OE читаются из самого ключа. */
+    const linkOk=HVC.cross.has(entry.linkKey), part=HVC.parts.get(entry.partKey);
+    const codeOk=verdict.tier==='sku' || !!(linkOk && DimPolicy.similarOe(normArticle(String(entry.linkKey||'').split('\u001F')[0]),verdict.oe));
     return !!(codeOk && part===entry.ref && part._dimensionEvidence===entry.evidence &&
       this.full(this.tuple(entry.evidence)) && this.exactTuple(this.tuple(entry.evidence),entry.tuple));
   },
