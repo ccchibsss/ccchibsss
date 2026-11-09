@@ -9187,7 +9187,7 @@ try {
         <div><label class="f">Разделитель</label><select id="expDelim" style="min-width:130px"><option value=";">точка с запятой</option><option value=",">запятая</option><option value="&#9;">табуляция</option></select></div>
         <div><label class="f">Кодировка</label><select id="expEnc" style="min-width:130px"><option value="utf8">UTF-8 + BOM</option><option value="cp1251">Windows-1251</option></select></div>
       </div>
-      <div><label class="f">Листы</label><select id="expSheetsSel" multiple size="6" style="min-width:170px;max-height:120px" title="Ctrl+клик — несколько листов; «Юнит-экономика» включён всегда"><option selected>Юнит-экономика</option><option selected>Категории</option><option>Тарифы</option><option>PnL</option><option>Поставщики</option><option>Сводка</option></select></div>
+      <div><label class="f">Листы</label><select id="expSheetsSel" multiple size="6" style="min-width:170px;max-height:120px" title="Ctrl+клик — несколько листов; «Юнит-экономика» включён всегда"><option selected>Юнит-экономика</option><option selected>Категории</option><option>Тарифы</option><option>Сводка</option></select></div>
       <div><label class="f">Объём</label><select id="expScope" style="min-width:150px"><option value="filter">текущий фильтр</option><option value="all">весь каталог</option><option value="sel">выделенные</option></select></div>
       <div><label class="f" for="expChzFilter">ЧЗ по списку</label><select id="expChzFilter" style="min-width:155px"><option value="all">Все</option><option value="yes">Да — совпало</option><option value="no">Нет — не совпало</option><option value="unknown">Проверить</option></select> <button type="button" class="btn sm gh" id="expChzSettings">Список…</button></div>
       <div style="flex:1 1 300px;min-width:240px"><label class="f" for="expCategories">Категории (через |)</label><input id="expCategories" type="text" list="expCategorySuggestions" placeholder="Все категории" autocomplete="off" style="width:100%" aria-describedby="expCategoryHint"><datalist id="expCategorySuggestions"></datalist><div class="hint" id="expCategoryHint" style="margin-top:5px">Пусто — все категории. Например: Подвеска | Тормозная система</div></div>
@@ -13551,7 +13551,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.78-client+delta-anomaly-fullcalc-trigger';
+const APP_VERSION = '12.9.79-client+light-export-unit-calc';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -32042,291 +32042,111 @@ const OzonExport = {
     return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   },
 
-  /* audit.2: отдельная книга для сценарного пересчёта. Официальный Ozon-шаблон
-     не перегружаем служебными листами; здесь цена и тарифы — редактируемые числа,
-     а результат — настоящие Excel-формулы с cached value для предпросмотра. */
+  /* v12.9.79: компактный калькулятор НА ЕДИНИЦУ товара. Без месячных расчётов,
+     планов и двойных проходов: только «купил у поставщика за X → продал за Y →
+     вот прибыль ₽/ед, маржа % и заработок на закупку %». Все результаты —
+     живые формулы Excel от редактируемых вводов (цена, акция, закупка, вес,
+     габариты, % ставки и ₽/ед расходы): поменял ввод — всё пересчиталось. */
   async generateEconomicsXlsx(rows, opts, prog) {
     if (typeof XLSX === 'undefined' || !XLSX.utils) throw new Error('Библиотека XLSX (SheetJS) не загрузилась — калькулятор недоступен');
     if (rows.length > 20000) throw new Error('Формульный калькулятор ограничен 20 000 SKU за файл. Отфильтруйте каталог или выгрузите несколько частей.');
     const columns = [
-      ['article','Артикул',18],['name','Название',34],['internalCategory','Внутренняя категория',22],
-      ['internalKind','Внутренний вид',24],['ozonCategory','Категория Ozon',28],['ozonType','Тип Ozon',25],
-      ['tnved','ТН ВЭД',15],['price','Цена продажи, ₽ — ввод',16],['cost','Закупка/ед, ₽ — ввод',16],
-      ['sales','Продажи/мес — ввод',15],['fixedMonth','Фикс. расходы/мес, ₽ — ввод',19],
-      ['commissionPct','Вознаграждение, % — ввод',19],['transferPct','Эквайринг/перевод, % — ввод',20],
-      ['adsPct','Реклама, % — ввод',16],['cofinPct','Кофинансирование, % — ввод',20],
-      ['logistics','Логистика/ед, ₽ — ввод',18],['lastMile','Последняя миля/ед, ₽ — ввод',20],
-      ['handover','Сдача/ед, ₽ — ввод/формула ПВЗ',21],['pack','Упаковка/ед, ₽ — ввод',18],
-      ['transitPack','Транзитная упаковка/ед, ₽ — ввод',22],['storage','Хранение/ед, ₽ — ввод',18],
-      ['returns','Возвраты/ед, ₽ — ввод',18],['returnStorage','Хранение возвратов/ед, ₽ — ввод',22],
-      ['other','Прочие расходы/ед, ₽ — ввод',20],['nonStdPct','Нестандарт, % — ввод',18],
-      ['nonStdCap','Нестандарт cap, ₽ — ввод',18],['lateShipPct','Поздняя отгрузка, % — ввод',20],
-      ['taxRegime','Налоговый режим — ввод',24],['customTaxPct','Своя ставка налога, % — ввод',20],
-      ['osnoShare','Доля расходов с НДС, % — ввод',20],
-      ['commissionRub','Вознаграждение/ед, ₽ — формула',20],['transferRub','Эквайринг/ед, ₽ — формула',20],
-      ['adsRub','Реклама/ед, ₽ — формула',18],['cofinRub','Кофинансирование/ед, ₽ — формула',20],
-      ['nonStdRub','Нестандарт/ед, ₽ — формула',18],['lateShipRub','Поздняя отгрузка/ед, ₽ — формула',20],
-      ['taxBase','Расходы для налога/ед, ₽ — формула',22],['vatOut','НДС исходящий/ед, ₽ — формула',20],
-      ['vatIn','НДС входящий/ед, ₽ — формула',20],['taxRub','Налог/ед, ₽ — формула',18],
-      ['contribution','Маржинальная прибыль/ед, ₽ — формула',22],['monthlyNet','Чистая прибыль/мес, ₽ — формула',22],
-      ['netUnit','Чистая прибыль/ед, ₽ — формула',22],['margin','Маржа, % — формула',18],
-      ['beApp','Безубыточность, ₽ — формула',22],
-      ['targetApp','Рекомендуемая цена, ₽ — формула',23],
-      ['beFirst','Безубыточность, ₽ — 1-й проход (текущий сегмент)',26],
-      ['tgtFirst','Рекомендуемая цена, ₽ — 1-й проход (текущий сегмент)',28],
-      ['rateBe','Перем. расходы на цене безубытка, доля — формула',26],
-      ['fixedBe','Фикс. часть на цене безубытка, ₽ — формула',26],
-      ['rateTgt','Перем. расходы на рекомендованной цене, доля — формула',28],
-      ['fixedTgt','Фикс. часть на рекомендованной цене, ₽ — формула',26],
-      ['solverBe','Безубыточность, ₽ — решатель приложения',24],
-      ['solverTarget','Рекомендуемая цена, ₽ — решатель приложения',26],
-      ['solverDiff','Δ рекомендуемой цены (формула − решатель), ₽',26],
-      ['targetMarginPct','Целевая маржа, % — ввод',18],
-      ['priceRate','Переменные расходы, доля цены — формула',22],
-      ['priceFixed','Фиксированная часть цены, ₽ — формула',22],
-      ['profitTaxRate','Налог на прибыль в цене, доля — формула',22],
-      ['status','Статус исходных данных',46],['details','Маршрут и пояснения модели',60]
+      ['article','Артикул',18],['name','Название',34],
+      ['price','Цена продажи, ₽ — ввод',16],['promoPct','Скидка акции, % — ввод',16],
+      ['cost','Закупка у поставщика, ₽/ед — ввод',20],
+      ['weightKg','Вес, кг — ввод',12],['lenCm','Длина, см — ввод',12],['widCm','Ширина, см — ввод',12],['heiCm','Высота, см — ввод',12],
+      ['volumeL','Объём, л — формула',12],
+      ['commissionPct','Вознаграждение Ozon, % — ввод',18],['transferPct','Эквайринг/перевод, % — ввод',18],
+      ['adsPct','Реклама, % — ввод',14],['cofinPct','Кофинансирование, % — ввод',18],['taxPct','Налог, % от цены — ввод',16],
+      ['logisticsRub','Логистика, ₽/ед — ввод',16],['lastMileRub','Последняя миля, ₽/ед — ввод',18],
+      ['handoverRub','Сдача отправления, ₽/ед — ввод',20],['packRub','Упаковка, ₽/ед — ввод',16],
+      ['storageRub','Хранение, ₽/ед — ввод',16],['returnsRub','Возвраты/невыкуп, ₽/ед — ввод',20],
+      ['otherRub','Прочие расходы, ₽/ед — ввод',18],['targetMarginPct','Целевая маржа, % — ввод',17],
+      ['effPrice','Цена после акции, ₽/ед — формула',20],
+      ['commissionRub','Вознаграждение, ₽/ед — формула',20],
+      ['pctOtherRub','Остальные % расходы, ₽/ед — формула',24],
+      ['fixedRub','Закупка + все ₽ расходы, ₽/ед — формула',26],
+      ['profitUnit','Прибыль, ₽/ед — формула',18],
+      ['marginPct','Маржа, % — формула',15],
+      ['markupPct','Заработок на закупку, % — формула',22],
+      ['breakEvenPrice','Цена безубыточности, ₽ — формула',22],
+      ['targetPrice','Цена для целевой маржи, ₽ — формула',24],
+      ['note','Примечание',52]
     ];
     const pos = {}; columns.forEach((c, i) => { pos[c[0]] = i; });
     const aoa = [columns.map(c => c[1])];
-    const monthlyKeys = ['cost','commissionRub','transferRub','logistics','lastMile','handover','pack','transitPack',
-      'storage','returns','returnStorage','other','adsRub','cofinRub','nonStdRub','lateShipRub','taxRub'];
     for (let i = 0; i < rows.length; i++) {
       const p = rows[i], rr = i + 2;
       const eco = calcMarketplacesEconomics(p, null, { currentOzonOnly:true }).ozonEco;
       const ref = key => XLSX.utils.encode_col(pos[key]) + rr;
-      const sales = Math.max(0, num(eco.sales !== undefined ? eco.sales : p.sales));
-      let fixedMonth = Math.max(0, num(eco.fixedRub));
-      if (sales > 0 && eco.monthly) {
-        const monthlyCosts = Object.values(eco.monthly).reduce((sum, value) => sum + num(value), 0);
-        fixedMonth = Math.max(0, round(num(eco.revenue) - num(eco.cogs) - monthlyCosts - num(eco.netProfit), 2));
-      }
+      const dims = (typeof exportDimsFor === 'function') ? exportDimsFor(p) : { weight:num(p.weight), length:num(p.length), width:num(p.width), height:num(p.height) };
+      const price0 = Math.max(0, num(eco.effPrice !== undefined ? eco.effPrice : (p.effPrice || p.price)));
+      /* Налог — эффективная ставка % от цены (из расчёта приложения), а не режим:
+         в компактном файле пользователь правит именно процент. */
+      const taxPct = price0 > 0 ? Math.max(0, Math.min(100, round(num(eco.taxRub) / price0 * 100, 2))) : 0;
       const statusReasons = [eco.comparisonReasons, p.modelReviewRequired ? 'требуется проверка модели' : '',
         eco.returnRateInvalid ? 'некорректный процент невыкупа' : ''].filter(Boolean);
       const values = {
-        article:String(p.article || ''), name:String(p.name || ''), internalCategory:String(p.category || ''),
-        internalKind:String(CategoryTnved.typeInfo(p).value || ''), ozonCategory:String(p.ozon_category || ''),
-        ozonType:String(p.ozon_type || ''), tnved:String(CategoryTnved.code(p) || ''),
-        price:Math.max(0, num(eco.effPrice !== undefined ? eco.effPrice : (p.effPrice || p.price))),
-        cost:Math.max(0, num(eco.cost !== undefined ? eco.cost : p.cost)), sales, fixedMonth,
+        article:String(p.article || ''), name:String(p.name || ''),
+        price:price0, promoPct:0,
+        cost:Math.max(0, num(eco.cost !== undefined ? eco.cost : p.cost)),
+        weightKg:Math.max(0, num(dims.weight)), lenCm:Math.max(0, num(dims.length)), widCm:Math.max(0, num(dims.width)), heiCm:Math.max(0, num(dims.height)),
         commissionPct:Math.max(0, num(eco.commissionPct)), transferPct:Math.max(0, num(eco.paymentTransferPct)),
-        adsPct:Math.max(0, num(eco.adsPct)), cofinPct:Math.max(0, num(eco.cofinPct)),
-        logistics:Math.max(0, num(eco.logisticsRub)), lastMile:Math.max(0, num(eco.lastMileRub)),
-        handover:Math.max(0, num(eco.scDeliveryRub)), pack:Math.max(0, num(eco.packRub)),
-        transitPack:Math.max(0, num(eco.transitPackRub)), storage:Math.max(0, num(eco.storageRub)),
-        returns:Math.max(0, num(eco.returnsRub)), returnStorage:Math.max(0, num(eco.returnStorageRub)),
-        other:Math.max(0, num(eco.processingRub) + num(eco.penaltiesRub) + num(eco.listingRub)),
-        nonStdPct:eco.nonStdApplied ? Math.max(0, num(eco.nonStdPct)) : 0,
-        nonStdCap:Math.max(0, keepZero(S.settings.ozonNonStdCapRub, 280)),
-        lateShipPct:Math.max(0, num(eco.lateShipPct)), taxRegime:String(eco.taxRegime || S.settings.taxRegime || 'usn_income_6'),
-        customTaxPct:Math.max(0, Math.min(100, keepZero(S.settings.taxPct, 6))),
-        osnoShare:Math.max(0, Math.min(100, keepZero(S.settings.taxOsnoEligibleSharePct, 0))),
+        adsPct:Math.max(0, num(eco.adsPct)), cofinPct:Math.max(0, num(eco.cofinPct)), taxPct,
+        logisticsRub:Math.max(0, num(eco.logisticsRub)), lastMileRub:Math.max(0, num(eco.lastMileRub)),
+        handoverRub:Math.max(0, num(eco.scDeliveryRub)), packRub:Math.max(0, num(eco.packRub)),
+        storageRub:Math.max(0, num(eco.storageRub)), returnsRub:Math.max(0, num(eco.returnsRub)),
+        otherRub:Math.max(0, num(eco.transitPackRub) + num(eco.returnStorageRub) + num(eco.processingRub) + num(eco.penaltiesRub) + num(eco.listingRub) + num(eco.nonStdRub) + num(eco.lateShipRub)),
         targetMarginPct:Math.max(0, keepZero(S.settings.tgtMargin, 20)),
-        solverBe:(Number.isFinite(num(eco.breakEvenPrice)) && num(eco.breakEvenPrice) > 0 && num(eco.breakEvenPrice) < 1e7) ? Math.ceil(num(eco.breakEvenPrice)) : '',
-        solverTarget:(Number.isFinite(num(eco.tgtPrice)) && num(eco.tgtPrice) > 0 && num(eco.tgtPrice) < 1e7) ? Math.ceil(num(eco.tgtPrice)) : '',
-        status:statusReasons.length ? 'СЦЕНАРИЙ — ' + statusReasons.join('; ') :
-          'Базовые условия модели заполнены; тарифы всё равно сверьте с кабинетом',
-        details:String(eco.details || '')
+        note:(!eco.mp ? 'СЦЕНАРИЙ — модель Ozon отсутствует; проверьте исходные данные'
+          : statusReasons.length ? 'СЦЕНАРИЙ — ' + statusReasons.join('; ')
+          : 'Тарифы предзаполнены из расчёта приложения — сверьте с кабинетом Ozon')
       };
-      if (!eco.mp) values.status = 'СЦЕНАРИЙ — модель Ozon отсутствует; проверьте исходные данные';
       const row = columns.map(c => values[c[0]] !== undefined ? values[c[0]] : '');
       const setFormula = (key, formula, cached) => {
         const n = Number(cached);
-        if (cached === '' || cached === null || !Number.isFinite(n)) {
-          row[pos[key]] = { t:'str', f:formula, v:cached == null ? '' : String(cached) };
-          values[key] = cached == null ? '' : cached;
-        } else {
-          row[pos[key]] = { t:'n', f:formula, v:n };
-          values[key] = n;
-        }
+        if (cached === '' || cached === null || !Number.isFinite(n)) { row[pos[key]] = { t:'str', f:formula, v:cached == null ? '' : String(cached) }; values[key] = cached == null ? '' : cached; }
+        else { row[pos[key]] = { t:'n', f:formula, v:n }; values[key] = n; }
       };
-      setFormula('commissionRub', `ROUND(${ref('price')}*${ref('commissionPct')}/100,2)`, eco.commissionRub);
-      setFormula('transferRub', `ROUND(${ref('price')}*${ref('transferPct')}/100,2)`, eco.paymentTransferRub);
-      setFormula('adsRub', `ROUND(${ref('price')}*${ref('adsPct')}/100,2)`, eco.adsRub);
-      setFormula('cofinRub', `ROUND(${ref('price')}*${ref('cofinPct')}/100,2)`, eco.cofinRub);
-      setFormula('nonStdRub', `IF(${ref('nonStdPct')}>0,ROUND(MIN(${ref('price')}*${ref('nonStdPct')}/100,${ref('nonStdCap')}),2),0)`, eco.nonStdRub);
-      setFormula('lateShipRub', `ROUND(${ref('price')}*${ref('lateShipPct')}/100,2)`, eco.lateShipRub);
-      /* ПВЗ с процентным тарифом зависит от цены. Для остальных режимов сдача —
-         редактируемая фиксированная сумма, как и в исходной модели. */
+      /* JS-зеркало формул для cached values (предпросмотр без открытия в Excel). */
+      const eff = round(values.price * (1 - values.promoPct / 100), 2);
+      const varPct = values.commissionPct + values.transferPct + values.adsPct + values.cofinPct + values.taxPct;
+      const commissionRub = round(eff * values.commissionPct / 100, 2);
+      const pctOtherRub = round(eff * (varPct - values.commissionPct) / 100, 2);
+      const fixedRub = round(values.cost + values.logisticsRub + values.lastMileRub + values.handoverRub + values.packRub + values.storageRub + values.returnsRub + values.otherRub, 2);
+      const profit = round(eff - commissionRub - pctOtherRub - fixedRub, 2);
+      const a = 1 - values.promoPct / 100, v = varPct / 100, m = values.targetMarginPct / 100;
+      const be = (a * (1 - v)) > 0 ? Math.ceil(fixedRub / (a * (1 - v))) : '';
+      const tgt = (a * (1 - v - m)) > 0 && be !== '' ? Math.max(be, Math.ceil(fixedRub / (a * (1 - v - m)))) : '';
+      setFormula('volumeL', `IF(OR(${ref('lenCm')}<=0,${ref('widCm')}<=0,${ref('heiCm')}<=0),"",ROUND(${ref('lenCm')}*${ref('widCm')}*${ref('heiCm')}/1000,3))`,
+        (values.lenCm > 0 && values.widCm > 0 && values.heiCm > 0) ? round(values.lenCm * values.widCm * values.heiCm / 1000, 3) : '');
+      setFormula('effPrice', `ROUND(${ref('price')}*(1-${ref('promoPct')}/100),2)`, eff);
+      setFormula('commissionRub', `ROUND(${ref('effPrice')}*${ref('commissionPct')}/100,2)`, commissionRub);
+      setFormula('pctOtherRub', `ROUND(${ref('effPrice')}*(${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100,2)`, pctOtherRub);
+      setFormula('fixedRub', `ROUND(${ref('cost')}+${ref('logisticsRub')}+${ref('lastMileRub')}+${ref('handoverRub')}+${ref('packRub')}+${ref('storageRub')}+${ref('returnsRub')}+${ref('otherRub')},2)`, fixedRub);
+      setFormula('profitUnit', `ROUND(${ref('effPrice')}-${ref('commissionRub')}-${ref('pctOtherRub')}-${ref('fixedRub')},2)`, profit);
+      setFormula('marginPct', `IF(${ref('effPrice')}>0,ROUND(${ref('profitUnit')}/${ref('effPrice')}*100,1),"")`, eff > 0 ? round(profit / eff * 100, 1) : '');
+      setFormula('markupPct', `IF(${ref('cost')}>0,ROUND(${ref('profitUnit')}/${ref('cost')}*100,1),"")`, values.cost > 0 ? round(profit / values.cost * 100, 1) : '');
+      setFormula('breakEvenPrice', `IF((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100)<=0,"",MAX(0,ROUNDUP(${ref('fixedRub')}/((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100)),0)))`, be);
+      setFormula('targetPrice', `IF(OR(${ref('breakEvenPrice')}="",(1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100-${ref('targetMarginPct')}/100)<=0),"",MAX(${ref('breakEvenPrice')},ROUNDUP(${ref('fixedRub')}/((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100-${ref('targetMarginPct')}/100)),0)))`, tgt);
+      /* ПВЗ с процентной сдачей: сумма зависит от цены продажи. */
       if (eco.fulfillment === 'FBS' && eco.handoverMode === 'pvz_pct') {
         const units = Math.max(1, keepZero(S.settings.ozonFbsUnitsPerShipment, 1));
         const pct = Math.max(0, keepZero(S.settings.ozonPvzPct, 2));
         const cap = Math.max(0, keepZero(S.settings.ozonPvzCapRub, 45));
-        setFormula('handover', `ROUND(MIN(${ref('price')}*${units}*${pct}/100,${cap})/${units},2)`, eco.scDeliveryRub);
+        setFormula('handoverRub', `ROUND(MIN(${ref('price')}*${units}*${pct}/100,${cap})/${units},2)`, values.handoverRub);
       }
-      const fixedPerUnit = `IF(${ref('sales')}>0,${ref('fixedMonth')}/${ref('sales')},${ref('fixedMonth')})`;
-      const baseKeys = monthlyKeys.filter(k => k !== 'taxRub');
-      setFormula('taxBase', baseKeys.map(k => ref(k)).join('+') + '+' + fixedPerUnit,
-        baseKeys.reduce((sum, k) => sum + num(values[k] !== undefined ? values[k] : eco[k]), 0) + (sales > 0 ? fixedMonth / sales : fixedMonth));
-      const regime = ref('taxRegime'), price = ref('price'), base = ref('taxBase');
-      const vatOutFormula = `IF(OR(${regime}="osno_20",${regime}="osno_22"),${price}*22/122,` +
-        `IF(OR(${regime}="usn_income_vat_5",${regime}="usn_income_expense_vat_5"),${price}*5/105,` +
-        `IF(OR(${regime}="usn_income_7",${regime}="usn_income_vat_7",${regime}="usn_income_expense_vat_7"),${price}*7/107,0)))`;
-      const currentRegime = values.taxRegime;
-      const vatRate = /(?:osno_20|osno_22)/.test(currentRegime) ? 22 : /_5$/.test(currentRegime) ? 5 : /(?:usn_income_7|usn_income_vat_7|usn_income_expense_vat_7)/.test(currentRegime) ? 7 : 0;
-      const cachedBase = baseKeys.reduce((sum, k) => sum + num(values[k] !== undefined ? values[k] : eco[k]), 0) + (sales > 0 ? fixedMonth / sales : fixedMonth);
-      const cachedVatOut = vatFromGross(values.price, vatRate);
-      setFormula('vatOut', vatOutFormula, cachedVatOut);
-      setFormula('vatIn', `IF(OR(${regime}="osno_20",${regime}="osno_22"),${base}*22/122*${ref('osnoShare')}/100,0)`,
-        /(?:osno_20|osno_22)/.test(currentRegime) ? vatFromGross(cachedBase, 22) * values.osnoShare / 100 : 0);
-      const vatOut = ref('vatOut'), vatIn = ref('vatIn'), customPct = ref('customTaxPct');
-      const taxFormula = `ROUND(IF(${regime}="usn_income_6",${price}*6/100,` +
-        `IF(OR(${regime}="usn_income_7",${regime}="usn_income_vat_7",${regime}="usn_income_vat_5"),${vatOut}+(${price}-${vatOut})*6/100,` +
-        `IF(${regime}="usn_income_expense_15",MAX(0,${price}-${base})*15/100,` +
-        `IF(OR(${regime}="usn_income_expense_vat_5",${regime}="usn_income_expense_vat_7"),${vatOut}+MAX(0,${price}-${vatOut}-${base})*15/100,` +
-        `IF(OR(${regime}="osno_20",${regime}="osno_22"),MAX(0,${vatOut}-${vatIn})+MAX(0,(${price}-${vatOut})-(${base}-${vatIn}))*25/100,` +
-        `IF(${regime}="self_employed_4",${price}*4/100,IF(${regime}="self_employed_6",${price}*6/100,` +
-        `IF(${regime}="custom_profit",MAX(0,${price}-${base})*${customPct}/100,${price}*${customPct}/100)))))))),2)`;
-      setFormula('taxRub', taxFormula, eco.taxRub);
-      setFormula('contribution', `ROUND(${price}-` + monthlyKeys.map(k => ref(k)).join('-') + ',4)', eco.contribution);
-      const monthlyFormula = `ROUND(ROUND(${price}*${ref('sales')},2)-` +
-        monthlyKeys.map(k => `ROUND(${ref(k)}*${ref('sales')},2)`).join('-') + `-MAX(0,${ref('fixedMonth')}),2)`;
-      setFormula('monthlyNet', monthlyFormula, eco.netProfit);
-      const solverNet = `IF(${ref('sales')}>0,${ref('monthlyNet')}/${ref('sales')},${ref('contribution')}-MAX(0,${ref('fixedMonth')}))`;
-      setFormula('netUnit', `ROUND(${solverNet},2)`, eco.netProfitUnit);
-      setFormula('margin', `IF(${price}>0,ROUND((${solverNet})/${price}*100,1),0)`, eco.margin);
-      /* audit.4: безубыток и рекомендуемая цена — живые формулы, а не снимок.
-         Модель кусочно-линейна: отдельно показываем переменную долю цены,
-         фиксированную часть и ставку налога на прибыль. Это сохраняет прозрачность
-         и работает в обычном Excel без макросов и динамических массивов. */
-      const handoverVariable = eco.fulfillment === 'FBS' && eco.handoverMode === 'pvz_pct';
-      const hvUnits = Math.max(1, keepZero(S.settings.ozonFbsUnitsPerShipment, 1));
-      const hvPct = Math.max(0, keepZero(S.settings.ozonPvzPct, 2));
-      const hvCapPerUnit = Math.max(0, keepZero(S.settings.ozonPvzCapRub, 45)) / hvUnits;
-      /* Флаги сегмента cap на текущей цене (колонка nonStdRub/сдача уже посчитаны
-         по текущей цене). */
-      const nonStdVarNow = `AND(${ref('nonStdPct')}>0,${ref('nonStdRub')}<${ref('nonStdCap')})`;
-      const nonStdCapNow = `AND(${ref('nonStdPct')}>0,${ref('nonStdRub')}>=${ref('nonStdCap')})`;
-      const hvVarNow = handoverVariable ? `(${ref('handover')}<${hvCapPerUnit})` : '';
-      const hvCapNow = handoverVariable ? `(${ref('handover')}>=${hvCapPerUnit})` : '';
-      /* Те же флаги, но на произвольной цене P. Пустая P (первый проход не сошёлся)
-         означает текущий сегмент — формулы остаются числовыми. */
-      const nonStdValAt = P => `IF(${P}="",${ref('nonStdRub')},${P}*${ref('nonStdPct')}/100)`;
-      const hvValAt = P => `IF(${P}="",${ref('handover')},${P}*${hvPct}/100)`;
-      const nonStdVarAt = P => `AND(${ref('nonStdPct')}>0,${nonStdValAt(P)}<${ref('nonStdCap')})`;
-      const nonStdCapAt = P => `AND(${ref('nonStdPct')}>0,${nonStdValAt(P)}>=${ref('nonStdCap')})`;
-      const hvVarAt = P => `(${hvValAt(P)}<${hvCapPerUnit})`;
-      const hvCapAt = P => `(${hvValAt(P)}>=${hvCapPerUnit})`;
-      const vat5 = '5/105', vat7 = '7/107', vat22 = '22/122';
-      const incomeTaxRate = `IF(${regime}=\"usn_income_6\",6/100,` +
-        `IF(OR(${regime}=\"usn_income_vat_5\",${regime}=\"usn_income_7\",${regime}=\"usn_income_vat_7\"),` +
-          `IF(${regime}=\"usn_income_vat_5\",${vat5}+(1-${vat5})*6/100,${vat7}+(1-${vat7})*6/100),` +
-        `IF(${regime}=\"self_employed_4\",4/100,IF(${regime}=\"self_employed_6\",6/100,${customPct}/100))))`;
-      const osnoCondition = `OR(${regime}=\"osno_20\",${regime}=\"osno_22\")`;
-      const expenseNoVat = `OR(${regime}=\"usn_income_expense_15\",${regime}=\"custom_profit\")`;
-      /* Сборка «переменная доля цены» и «фиксированная часть» для заданного набора
-         флагов сегмента: одни и те же формулы используются и для текущего сегмента,
-         и для сегмента, в который попадает найденная цена. */
-      const variableRateOf = (nv, hv) => `((${['commissionPct','transferPct','adsPct','cofinPct','lateShipPct'].map(k => ref(k)).join('+')}` +
-        `+IF(${nv},${ref('nonStdPct')},0)` +
-        (handoverVariable ? `+IF(${hv},${hvPct},0)` : '') + `)/100)`;
-      const fixedPartOf = (nc, hc) => `(${['cost','logistics','lastMile','pack','transitPack','storage','returns','returnStorage','other'].map(k => ref(k)).join('+')}` +
-        `+${fixedPerUnit}+IF(${nc},${ref('nonStdCap')},0)+` +
-        (handoverVariable ? `IF(${hc},${hvCapPerUnit},0)` : ref('handover')) + `)`;
-      const rateOf = v => `IF(${expenseNoVat},${v},` +
-        `IF(${regime}=\"usn_income_expense_vat_5\",${v}+${vat5},` +
-        `IF(${regime}=\"usn_income_expense_vat_7\",${v}+${vat7},` +
-        `IF(${osnoCondition},${v}+${vat22}-${vat22}*${ref('osnoShare')}/100*${v},${v}+${incomeTaxRate}))))`;
-      const fixedOf = f => `IF(${osnoCondition},${f}*(1-${vat22}*${ref('osnoShare')}/100),${f})`;
-      const profitRateFormula = `IF(OR(${regime}=\"usn_income_expense_15\",${regime}=\"usn_income_expense_vat_5\",${regime}=\"usn_income_expense_vat_7\"),15/100,` +
-        `IF(${osnoCondition},25/100,IF(${regime}=\"custom_profit\",${customPct}/100,0)))`;
-
-      /* Значения (JS) по тем же правилам. */
-      const currentTaxRegime = String(values.taxRegime || '');
-      const isOsno = currentTaxRegime === 'osno_20' || currentTaxRegime === 'osno_22';
-      const osnoSharePct = num(values.osnoShare);
-      let incomeRateValue = num(values.customTaxPct) / 100;
-      if (currentTaxRegime === 'usn_income_6') incomeRateValue = 0.06;
-      else if (currentTaxRegime === 'usn_income_vat_5') incomeRateValue = 5/105 + (1-5/105)*0.06;
-      else if (['usn_income_7','usn_income_vat_7'].includes(currentTaxRegime)) incomeRateValue = 7/107 + (1-7/107)*0.06;
-      else if (currentTaxRegime === 'self_employed_4') incomeRateValue = 0.04;
-      else if (currentTaxRegime === 'self_employed_6') incomeRateValue = 0.06;
-      let profitRateValue = 0;
-      if (['usn_income_expense_15','usn_income_expense_vat_5','usn_income_expense_vat_7'].includes(currentTaxRegime)) profitRateValue = 0.15;
-      else if (isOsno) profitRateValue = 0.25;
-      else if (currentTaxRegime === 'custom_profit') profitRateValue = num(values.customTaxPct) / 100;
-      const baseFixed = ['cost','logistics','lastMile','pack','transitPack','storage','returns','returnStorage','other']
-        .reduce((sum,k) => sum + num(values[k]), 0) + (sales > 0 ? fixedMonth / sales : fixedMonth);
-      const rateNum = (nv, hv) => {
-        let r = (num(values.commissionPct) + num(values.transferPct) + num(values.adsPct) + num(values.cofinPct) + num(values.lateShipPct)
-          + (nv ? num(values.nonStdPct) : 0) + (hv ? hvPct : 0)) / 100;
-        if (currentTaxRegime === 'usn_income_expense_vat_5') r += 5/105;
-        else if (currentTaxRegime === 'usn_income_expense_vat_7') r += 7/107;
-        else if (isOsno) r += 22/122 - (22/122) * osnoSharePct / 100 * r;
-        else if (!['usn_income_expense_15','custom_profit'].includes(currentTaxRegime)) r += incomeRateValue;
-        return r;
-      };
-      const fixedNum = (nc, hc) => {
-        let F = baseFixed + (nc ? num(values.nonStdCap) : 0) +
-          (handoverVariable ? (hc ? hvCapPerUnit : 0) : num(values.handover));
-        if (isOsno) F *= 1 - (22/122) * osnoSharePct / 100;
-        return F;
-      };
-      /* Сегмент cap на цене P: при пустой P — текущий сегмент. */
-      const segAt = P => {
-        const nonStdPct = num(values.nonStdPct), cap = num(values.nonStdCap);
-        const at = P === '' || !Number.isFinite(Number(P)) ? null : Number(P);
-        const nonStdNow = at == null ? num(values.nonStdRub) : at * nonStdPct / 100;
-        const hvNow = at == null ? num(values.handover) : at * hvPct / 100;
-        const nv = nonStdPct > 0 && nonStdNow < cap;
-        const hv = handoverVariable && hvNow < hvCapPerUnit;
-        return { nv, hv, nc: nonStdPct > 0 && !nv, hc: handoverVariable && !hv };
-      };
-      const marginPct = num(values.targetMarginPct) / 100;
-      const beFrom = (rate, fixed) => (1 - rate) > 0 && Number.isFinite(fixed / (1 - rate)) && fixed >= 0
-        ? Math.max(0, Math.ceil(fixed / (1 - rate))) : '';
-      const tgtFrom = (be, rate, fixed) => {
-        const den = (1 - profitRateValue) * (1 - rate) - marginPct;
-        return be === '' || den <= 0 ? '' : Math.max(be, Math.ceil((1 - profitRateValue) * fixed / den));
-      };
-      const seg1 = segAt('');
-      const rate1 = rateNum(seg1.nv, seg1.hv), fixed1 = fixedNum(seg1.nc, seg1.hc);
-      /* Первый проход — по текущему сегменту (как в v12.9.52 и раньше). */
-      const beFirst = beFrom(rate1, fixed1);
-      const tgtFirst = tgtFrom(beFirst, rate1, fixed1);
-      /* Второй проход — флаги cap пересчитываются на найденной цене. Функция прибыли
-         выпукла и монотонна, поэтому одного шага достаточно: если цена перешла в
-         сегмент с cap, её линейная формула меняется именно на этом сегменте. */
-      const segBe = segAt(beFirst);
-      const rateBe = rateNum(segBe.nv, segBe.hv), fixedBe = fixedNum(segBe.nc, segBe.hc);
-      const beValue = beFrom(rateBe, fixedBe);
-      const segTgt = segAt(tgtFirst);
-      const rateTgt = rateNum(segTgt.nv, segTgt.hv), fixedTgt = fixedNum(segTgt.nc, segTgt.hc);
-      const targetValue = tgtFrom(beValue, rateTgt, fixedTgt);
-
-      setFormula('priceRate', rateOf(variableRateOf(nonStdVarNow, hvVarNow)), rate1);
-      setFormula('priceFixed', fixedOf(fixedPartOf(nonStdCapNow, hvCapNow)), fixed1);
-      setFormula('profitTaxRate', profitRateFormula, profitRateValue);
-      setFormula('beFirst', `IF(OR(${ref('priceRate')}>=1,${ref('priceFixed')}<0),"",MAX(0,ROUNDUP(${ref('priceFixed')}/(1-${ref('priceRate')}),0)))`, beFirst);
-      setFormula('tgtFirst', `IF(${ref('beFirst')}="","",IF((1-${ref('profitTaxRate')})*(1-${ref('priceRate')})-${ref('targetMarginPct')}/100<=0,"",` +
-        `MAX(${ref('beFirst')},ROUNDUP((1-${ref('profitTaxRate')})*${ref('priceFixed')}/((1-${ref('profitTaxRate')})*(1-${ref('priceRate')})-${ref('targetMarginPct')}/100),0))))`, tgtFirst);
-      setFormula('rateBe', rateOf(variableRateOf(nonStdVarAt(ref('beFirst')), hvVarAt(ref('beFirst')))), rateBe);
-      setFormula('fixedBe', fixedOf(fixedPartOf(nonStdCapAt(ref('beFirst')), hvCapAt(ref('beFirst')))), fixedBe);
-      setFormula('beApp', `IF(OR(${ref('rateBe')}>=1,${ref('fixedBe')}<0),"",MAX(0,ROUNDUP(${ref('fixedBe')}/(1-${ref('rateBe')}),0)))`, beValue);
-      setFormula('rateTgt', rateOf(variableRateOf(nonStdVarAt(ref('tgtFirst')), hvVarAt(ref('tgtFirst')))), rateTgt);
-      setFormula('fixedTgt', fixedOf(fixedPartOf(nonStdCapAt(ref('tgtFirst')), hvCapAt(ref('tgtFirst')))), fixedTgt);
-      setFormula('targetApp', `IF(${ref('beApp')}="","",IF((1-${ref('profitTaxRate')})*(1-${ref('rateTgt')})-${ref('targetMarginPct')}/100<=0,"",` +
-        `MAX(${ref('beApp')},ROUNDUP((1-${ref('profitTaxRate')})*${ref('fixedTgt')}/((1-${ref('profitTaxRate')})*(1-${ref('rateTgt')})-${ref('targetMarginPct')}/100),0))))`, targetValue);
-      /* Сверка «формула ↔ решатель приложения» прямо в файле: решатель ищет цену
-         целочисленно по прибыли, формула линейна по доле цены — расхождение в 1–2 ₽
-         это округление, а не ошибка модели. */
-      setFormula('solverDiff', `IF(OR(${ref('targetApp')}="",${ref('solverTarget')}=""),"",${ref('targetApp')}-${ref('solverTarget')})`,
-        (values.targetApp === '' || values.solverTarget === '' || !Number.isFinite(Number(values.targetApp)) || !Number.isFinite(Number(values.solverTarget))) ? ''
-          : Number(values.targetApp) - Number(values.solverTarget));
       aoa.push(row);
       if (i > 0 && i % 500 === 0) { if (prog) prog(`Ozon калькулятор: ${fmt(i + 1)} из ${fmt(rows.length)} SKU…`); await Exp._yield(); }
     }
-    const inputFrom = XLSX.utils.encode_col(pos.price), inputTo = XLSX.utils.encode_col(pos.osnoShare);
-    const formulaFrom = XLSX.utils.encode_col(pos.commissionRub), formulaTo = XLSX.utils.encode_col(pos.profitTaxRate), targetMarginCol = XLSX.utils.encode_col(pos.targetMarginPct);
     const instructions = [
-      ['Ozon — редактируемый калькулятор юнит-экономики'],
-      ['Как пользоваться', `Изменяйте исходные значения в колонках ${inputFrom}:${inputTo} и целевую маржу в ${targetMarginCol}; результаты в ${formulaFrom}:${formulaTo} пересчитываются формулами Excel.`],
-      ['Безубыток и рекомендуемая цена', 'Это настоящие формулы от закупки, продаж, фиксированных расходов, процентных удержаний, налогового режима и целевой маржи. Рекомендуемая цена — минимальная целая цена для заданной маржи в текущем сегменте модели, но не ниже безубыточности.'],
-      ['Прозрачные компоненты', 'После рекомендуемой цены выведены переменная доля расходов, фиксированная часть и ставка налога на прибыль. По ним можно проверить знаменатель и числитель формул. Для ограниченных тарифов используется текущий сегмент cap; после его смены сверьте контрольную прибыль. Колонки «решатель приложения» показывают те же две цены из целочисленного поиска приложения, а Δ — их разницу с формулой. Δ в пределах 0–2 ₽ — округление (ROUNDUP против целочисленного поиска). Δ больше 2 ₽ означает ограничение сегмента: «Нестандарт, %» или процентная сдача ПВЗ при найденной цене упираются в cap, поэтому формула, считающая по текущему сегменту, завышает цену. В таких строках берите цену из колонки «решатель приложения»: она учитывает сегмент по результату.'],
-      ['Статус СЦЕНАРИЙ', 'Означает неподтверждённую ставку, отсутствующий маршрут или другое указанное ограничение. Это не достоверный тарифный результат.'],
-      ['Налоги', 'Поддерживаются режимы calcTax приложения, включая УСН с НДС 5/7%, ОСНО 22% и самозанятость. Для ОСНО заполните долю расходов с подтверждённым входным НДС.'],
-      ['Фиксированные тарифы', 'Логистика, выдача, упаковка, хранение и возвраты задаются в ₽/ед. Для ПВЗ с процентной сдачей колонка сдачи содержит формулу от цены.'],
-      ['Справочники', 'Внутренние категория/вид и ТН ВЭД показаны отдельно от категории/типа Ozon. Пустой код не заменяется догадкой.'],
+      ['Ozon — калькулятор на единицу товара'],
+      ['Как читать', 'Купили у поставщика за «Закупка» → продали за «Цена продажи» → «Прибыль, ₽/ед», «Маржа, %» (доля прибыли в цене) и «Заработок на закупку, %» (прибыль к вложенной закупке) считаются живыми формулами.'],
+      ['Что можно менять', 'Любой ввод: цену, скидку акции, закупку, вес, габариты, все % ставки и все расходы ₽/ед, целевую маржу. Результаты справа пересчитаются сами.'],
+      ['Вес и габариты', 'Объём в литрах считается формулой из габаритов. Тарифная таблица Ozon в файл не вшита: если от веса/объёма меняется логистика — поправьте «Логистика, ₽/ед» вручную по тарифу кабинета.'],
+      ['Налог', 'Задан одной эффективной ставкой «% от цены», предзаполненной из расчёта приложения. Налоговый режим в этом компактном файле отдельно не моделируется — при необходимости измените процент.'],
+      ['Безубыточность и целевая цена', 'Формулы от тех же вводов: цена безубыточности — прибыль 0; цена для целевой маржи — не ниже безубыточности. Если % расходы съедают цену, ячейка остаётся пустой.'],
+      ['Чего здесь нет', 'Месячных расчётов, планов продаж и планирования закупок — только единица товара.'],
       ['Дата выгрузки', nowISO()]
     ];
     const sheets = [
@@ -32334,7 +32154,7 @@ const OzonExport = {
       { name:'Инструкция', aoa:instructions, widths:[28,120], autoFilter:false }
     ];
     const wb = XLSX.utils.book_new();
-    sheets.forEach((sh, i) => {
+    sheets.forEach((sh) => {
       const safeAoa = sh.aoa.map(row => row.map(v => {
         if (typeof v !== 'string') return v;
         const safe = Exp._txt(v);
@@ -32348,9 +32168,6 @@ const OzonExport = {
     if (prog) prog('Ozon калькулятор: запись XLSX и включение пересчёта…');
     const raw = XLSX.write(wb, { bookType:'xlsx', type:'array' });
     let out = Exp._patchSimpleXlsx(raw, sheets);
-    /* Встроенная версия SheetJS не сериализует Workbook.CalcPr. Добавляем
-       стандартный calcPr непосредственно в OOXML, иначе Excel может оставить
-       cached values после изменения исходных ячеек. */
     const ziplib = window.fflate;
     if (ziplib && typeof ziplib.unzipSync === 'function') {
       const files = ziplib.unzipSync(out instanceof Uint8Array ? out : new Uint8Array(out));
@@ -32584,7 +32401,7 @@ const OzonExport = {
         Exp.download(blob, fn);
         const scenarios = rows.filter(p => !p.mp || !p.mp.OZON || p.mp.OZON.comparisonEligible === false).length;
         const text = `Файл «${fn}» · ${fmt(rows.length)} SKU. Меняйте цену, расходы и целевую маржу: прибыль, безубыток и рекомендуемая цена пересчитаются в Excel.`;
-        if (scenarios) Toast.warn('Калькулятор готов; есть сценарные строки', `${text} СЦЕНАРИЙ: ${fmt(scenarios)} — причины указаны в последних колонках.`);
+        if (scenarios) Toast.warn('Калькулятор готов; есть сценарные строки', `${text} СЦЕНАРИЙ: ${fmt(scenarios)} — причины указаны в колонке «Примечание».`);
         else Toast.ok('Калькулятор Ozon готов', text);
       }));
     });
@@ -38169,14 +37986,12 @@ function exportCatalog() {
     { g: 'calc', k: 'airCost', n: 'Воздух, ₽/ед', w: 13, f: '#,##0.00', src: p => p.airCost },
     { g: 'calc', k: 'repackNeeded', n: 'Переупаковка', w: 14, src: p => p.repackNeeded ? 'да' : 'нет' },
     { g: 'in', k: 'stock', n: 'Остаток, шт', w: 11 }, { g: 'in', k: 'minStock', n: 'Мин. остаток, шт', w: 14 },
-    { g: 'in', k: 'sales', n: 'Продажи, шт/мес', w: 14 }, { g: 'in', k: 'fixed', n: 'Фиксированные расходы, ₽/мес', w: 20, f: '#,##0' },
     { g: 'ana', k: 'cheapFbsApplied', n: 'Спецтариф FBS применён', w: 22, src: p => p.cheapFbsApplied ? 'да' : 'нет' },
     { g: 'ana', k: 'cheapFbsRate', n: 'Спецтариф FBS, %', w: 17, f: '0.0', src: p => p.cheapFbsRate },
     { g: 'ana', k: 'cheapFbsBaseRate', n: 'Ставка до скидок, %', w: 18, f: '0.0', src: p => p.cheapFbsBaseRate },
     { g: 'ana', k: 'cheapFbsVolumeRounded', n: 'Объём для порога, л', w: 19, f: '0' , src: p => p.cheapFbsVolumeRounded },
     { g: 'ana', k: 'cheapFbsReason', n: 'Основание спецтарифа', w: 56, src: p => p.cheapFbsReason || '—' },
     { g: 'calc', k: 'cheapFbsAmount', n: 'Спецтариф, ₽/ед', w: 17, f: '#,##0.00', src: p => p.cheapFbsAmount },
-    { g: 'calc', k: 'cheapFbsTotal', n: 'Спецтариф, ₽/мес', w: 18, f: '#,##0.00', src: p => p.cheapFbsTotal },
     { g: 'in', k: 'commPct', n: 'Размещение, %', w: 17, f: '0.0', src: p => p.commPct },
     { g: 'in', k: 'acqPct', n: 'Перевод выплаты, %', w: 15, f: '0.00', src: p => p.acqPct },
     { g: 'in', k: 'agencyFeePerSku', n: 'Приём платежа, ₽/SKU', w: 18, f: '#,##0.00', src: p => p.agencyFeePerSku },
@@ -38189,7 +38004,6 @@ function exportCatalog() {
     { g: 'in', k: 'uPack', n: 'Упаковка товара, ₽/ед', w: 20, f: '#,##0.00', src: p => p.uPackRaw ?? p.uPack },
     { g: 'in', k: 'uTransitPack', n: 'Транзитная тара, ₽/ед', w: 18, f: '#,##0.00', src: p => p.uTransitPackRaw ?? p.uTransitPack },
     { g: 'in', k: 'uRet', n: 'Возврат/невыкуп, ₽/ед', w: 20, f: '#,##0.00', src: p => p.uRetRaw ?? p.uRet },
-    { g: 'in', k: 'fixedTotal', n: 'Фикс. расходы всего, ₽/мес', w: 20, f: '#,##0.00', src: p => p.fixedTotalRaw ?? p.fixedTotal },
     { g: 'in', k: 'contribution', n: 'Маржинальный доход/ед, ₽', w: 22, f: '#,##0.00', src: p => p.contribution },
     { g: 'in', k: 'noBuyRateSource', n: 'Источник прогноза невыкупа', w: 28, txt: 1, src: p => p.noBuyRateSource || '—' },
     { g: 'ana', k: 'economicsDataQuality', n: 'Качество исходных данных', w: 58, txt: 1, src: p => econQualityText(p) },
@@ -38254,7 +38068,6 @@ function exportCatalog() {
     { g: 'calc', k: 'boost', n: 'Продвижение, ₽/ед.', w: 13, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.boostPct}${R}/100,2),2)` },
     { g: 'calc', k: 'cofin', n: 'Софинансирование, ₽/ед.', w: 15, f: '#,##0.00', xl: (R, r) => `=ROUND(ROUND(${r.effPrice}${R}*${r.cofinPct}${R}/100,2),2)` },
     { g: 'calc', k: 'logistics', n: 'Средняя миля FBS, ₽/ед.', w: 18, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uLog}${R},2)` },
-    { g: 'in', k: 'daysCover', n: 'Покрытие резерва, дн', w: 14, f: '0.0', src: p => p.daysCover },
     { g: 'calc', k: 'scDelivery', n: 'Доставка до СЦ, ₽/ед.', w: 15, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uSc}${R},2)` },
     { g: 'calc', k: 'packaging', n: 'Упаковка, ₽/ед.', w: 12, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uPack}${R},2)` },
     { g: 'calc', k: 'storage', n: 'Хранение, ₽/ед.', w: 13, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.storageUnit}${R},2)` },
@@ -38270,7 +38083,6 @@ function exportCatalog() {
        вместо того чтобы получить в Excel #NAME? из-за ISREF(undefined2)/undefinedR. */
     { g: 'calc', k: 'returns', n: 'Возвраты/невыкуп, ₽/ед.', w: 20, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.uRet}${R},2)` },
     { g: 'calc', k: 'tax', n: 'Налог, ₽/ед.', w: 12, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.taxUnit}${R},2)` },
-    { g: 'calc', k: 'stockValue', n: 'Стоимость резерва, ₽', w: 16, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.stock}${R}*${r.cost}${R},2)` },
     { g: 'calc', k: 'costPerUnit', n: 'Все затраты на 1 ед., ₽', w: 21, f: '#,##0.00', xl: (R, r) => `=ROUND(${r.effPrice}${R}-${r.netProfit}${R},2)` },
     { g: 'calc', k: 'netProfit', n: 'ЧП на 1 ед., ₽', w: 16, f: '#,##0.00;[Red]-#,##0.00', xl: (R, r) => `=ROUND(${['revenue','cogs','commission','specialFee','acquiring','paymentTransfer','lastMile','boost','logistics','scDelivery','packaging','storage','processing','returns','returnStorage','penalties','listing','tax','cofin','nonStd','lateShip']
       .filter(k => !r.__ymAbsent(k))
@@ -38279,7 +38091,6 @@ function exportCatalog() {
     { g: 'calc', k: 'margin', n: 'Маржа, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(IF(${r.revenue}${R}>0,${r.netProfit}${R}/${r.revenue}${R}*100,IFERROR(${r.perUnitNet}${R}/${r.price}${R}*100,0)),1),0)` },
     { g: 'calc', k: 'roi', n: 'ROI, %', w: 11, f: '0.0', xl: (R, r) => `=IFERROR(ROUND(IF(${r.cogs}${R}>0,${r.netProfit}${R}/${r.cogs}${R}*100,IFERROR(${r.perUnitNet}${R}/${r.cost}${R}*100,0)),1),0)` },
     { g: 'calc', k: 'tgtPrice', n: 'Цена для маржи, ₽', w: 14, f: '#,##0', src: p => p.noBuyInconsistent || p.priceTargetUnavailable ? '' : p.tgtPrice },
-    { g: 'calc', k: 'fcProfit', n: 'Прогноз ЧП / мес, ₽', w: 16, f: '#,##0;[Red]-#,##0', src: p => p.fcProfit },
     { g: 'calc', k: 'breakEvenPrice', n: 'Цена безубыточности, ₽', w: 18, f: '#,##0.00', src: p => p.noBuyInconsistent || p.priceBreakEvenUnavailable ? '' : p.breakEvenPrice },
     { g: 'calc', k: 'priceToSet', n: 'Цена к установке, ₽', w: 16, f: '#,##0.00', src: p => p.noBuyInconsistent || p.priceModelUnavailable ? '' : (p.priceToSet ?? '') },
     { g: 'calc', k: 'costMult', n: 'Закупка с кратностью, ₽', w: 22, f: '#,##0.00',
@@ -38304,7 +38115,6 @@ function exportCatalog() {
       xl: (R, r) => `=IFERROR(IF(${r.tgtPrice}${R}>0,ROUND((${r.tgtPrice}${R}/${r.costMult}${R}-1)*100,1),""),"")` },
     { g: 'calc', k: 'markupMargin', n: 'Наценка по марже, %', w: 17, f: '0.0', xl: (R, r) => `=IFERROR(ROUND((${r.price}${R}-${r.costMult}${R})/${r.costMult}${R}*100,1),0)` },
     { g: 'calc', k: 'markupProfit', n: 'Наценка по прибыли, %', w: 17, f: '0.0;[Red]-0.0', xl: (R, r) => `=IFERROR(ROUND(${r.netProfit}${R}/${r.cogs}${R}*100,1),0)` },
-    { g: 'calc', k: 'breakEvenUnits', n: 'Точка безубыточности, шт', w: 20, xl: (R, r) => `=IF(${r.contribution}${R}<=0,"Убыточно",IF(${r.fixedTotal}${R}<=0,0,CEILING(${r.fixedTotal}${R}/${r.contribution}${R},1)))` },
     { g: 'ana', k: 'tariffSource', n: 'Источник тарифа', w: 48, src: p => p.tariffSourceUsed || (p._t ? p._t.source : '—') },
     { g: 'ana', k: 'tariffCategoryPath', n: 'Путь категории Яндекс Маркета', w: 52, txt: 1, src: p => p.tariffCategoryPath || p.category_src || p.yandexCategoryPath || '' },
     { g: 'ana', k: 'tariffQuality', n: 'Качество тарифа', w: 54, src: p => p.tariffQuality || '—' },
@@ -38681,8 +38491,8 @@ const Exp = {
     const xfNum = id => `<xf numFmtId="${id}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>`;
     return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
       `<numFmts count="${numFmts.length}">` + numFmts.map(n => `<numFmt numFmtId="${n[0]}" formatCode="${n[1]}"/>`).join('') + '</numFmts>' +
-      '<fonts count="2"><font><sz val="9"/><name val="Calibri"/></font><font><b/><sz val="9"/><color rgb="FFE8ECF7"/><name val="Calibri"/></font></fonts>' +
-      '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1B2140"/><bgColor indexed="64"/></patternFill></fill></fills>' +
+      '<fonts count="2"><font><sz val="9"/><name val="Calibri"/></font><font><b/><sz val="9"/><color rgb="FF1F2430"/><name val="Calibri"/></font></fonts>' +
+      '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE9EDF3"/><bgColor indexed="64"/></patternFill></fill></fills>' +
       '<borders count="2"><border/><border><bottom style="thin"><color rgb="FFF7B32B"/></bottom></border></borders>' +
       '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
       '<cellXfs count="11">' +
@@ -38810,7 +38620,9 @@ const Exp = {
     const allSheetNames = ['Юнит-экономика', 'Категории', 'Тарифы', 'PnL', 'Поставщики', 'Сводка'];
     const sheetSelector = document.getElementById('expSheetsSel');
     const selectedSheets = new Set(sheetSelector ? Array.from(sheetSelector.selectedOptions).map(o => o.textContent.trim()) : allSheetNames);
-    /* Главный лист обязателен: формулы сводных листов ссылаются на него. */
+    /* Главный лист обязателен: формулы сводных листов ссылаются на него.
+       v12.9.79: месячные PnL и планирование закупок (Поставщики) из выгрузки убраны. */
+    selectedSheets.delete('PnL'); selectedSheets.delete('Поставщики');
     selectedSheets.add('Юнит-экономика');
     const sheetNames = allSheetNames.filter(name => selectedSheets.has(name));
     const x = Exp._xE, cx = Exp._cx, sty = Exp._sty;
@@ -38861,10 +38673,10 @@ const Exp = {
     cs('margin', [0, 15, 30], ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6']);
     cs('roi', [0, 50, 100], ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6']);
     cs('deficit', [-20, 0, 20], ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6']);
-    const dG = dxf('FF123324', true, 'FF5FF0B6'), dR = dxf('FF331116', true, 'FFFF9AA5'), dS = dxf('FF242732', false, 'FF7A839C', true),
-      dY = dxf('FF3D3210', false, 'FFFFD166'), dRS = dxf('FF3A1220', false, 'FFFF6B7D'), dO = dxf('FF4A2A0A', true, 'FFFFB454'),
-      dGS = dxf('FF123324', false, 'FF5FF0B6'), dR2 = dxf('FF331116', false, 'FFFF9AA5'),
-      dBlue = dxf('FF10243F', false, 'FF9AC6FF'), dGray = dxf('FF242732', false, 'FFB6BDD6');
+    const dG = dxf('FFE2F5EA', true, 'FF0E6B3A'), dR = dxf('FFFDE8EA', true, 'FF9E1B30'), dS = dxf('FFF2F4F7', false, 'FF5B6472', true),
+      dY = dxf('FFFFF3CD', false, 'FF7A5A00'), dRS = dxf('FFFDE8EA', false, 'FF9E1B30'), dO = dxf('FFFFEDD5', true, 'FF8A4B00'),
+      dGS = dxf('FFE2F5EA', false, 'FF0E6B3A'), dR2 = dxf('FFFDE8EA', false, 'FF9E1B30'),
+      dBlue = dxf('FFE8F1FF', false, 'FF1D4ED8'), dGray = dxf('FFF2F4F7', false, 'FF5B6472');
     const ci = (key, op, val, d) => {
       const fs = (Array.isArray(val) ? val : [val]).map(v => `<formula>${x(v)}</formula>`).join('');
       cfRange(key, `<cfRule type="cellIs" dxfId="${d}" priority="${prio++}" operator="${op}">${fs}</cfRule>`);
@@ -38872,7 +38684,7 @@ const Exp = {
     const ce = (key, formula, d) => { const L = ref[key]; if (L) cfs.push({ sqref: `${L}2:${L}${last}`, rules: [`<cfRule type="expression" dxfId="${d}" priority="${prio++}"><formula>${x(formula)}</formula></cfRule>`] }); };
     const db = (key, color) => { const L = ref[key]; if (L) cfRange(key, `<cfRule type="dataBar" priority="${prio++}"><dataBar showValue="1"><cfvo type="min"/><cfvo type="max"/><color rgb="${color}"/></dataBar></cfRule>`); };
     const ct = (key, text, d) => { const L = ref[key]; if (!L) return; cfs.push({ sqref: `${L}2:${L}${last}`, rules: [`<cfRule type="containsText" dxfId="${d}" priority="${prio++}" operator="containsText" text="${x(text)}"><formula>NOT(ISERROR(SEARCH("${x(text)}",${L}2)))</formula></cfRule>`] }); };
-    const dDef = dxf('FF7A1F2E', true, 'FFFFFFFF'), dNorm = dxf('FF12603F', true, 'FFFFFFFF');
+    const dDef = dxf('FFF8D7DA', true, 'FF7A1F2E'), dNorm = dxf('FFD9F2E3', true, 'FF0E6B3A');
     /* Финансовые итоги, прибыль на единицу, продажи и запас */
     ci('netProfit', 'greaterThan', 0, dG); ci('netProfit', 'lessThan', 0, dR); db('netProfit', 'FF2FD6A3');
     db('specialFee', 'FFFB923C'); db('paymentTransfer', 'FF38BDF8'); db('acquiring', 'FF5C9DFF');
@@ -38910,8 +38722,8 @@ const Exp = {
     ct('status', 'Заблокировано системой', dDef);
     ct('status', 'Ошибка маркировки', dDef); ct('status', 'На удаление', dDef); ct('status', 'Исключён', dS);
     ct('status', 'Готов к отгрузке', dNorm);
-    ct('status', 'Скрыт (мало остатка)', dxf('FF3D3210', true, 'FFFFD166'));
-    ct('status', 'Скрыт (витрина)', dxf('FF242732', true, 'FFB6BDD6'));
+    ct('status', 'Скрыт (мало остатка)', dxf('FFFFF3CD', true, 'FF7A5A00'));
+    ct('status', 'Скрыт (витрина)', dxf('FFF2F4F7', true, 'FF5B6472'));
     ct('visible', 'нет', dDef); ct('visible', 'да', dNorm);
     ct('repackNeeded', 'да', dY);
     ct('markStatus', 'ошиб', dDef); ct('markStatus', 'некор', dDef); ct('markStatus', 'действ', dNorm);
@@ -38929,11 +38741,11 @@ const Exp = {
       cs(k, [0, 15, 30], ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6']);
     });
     db('profitDiff', 'FFFB923C');
-    ct('bestMp', 'WB', dxf('FF2D1B4E', true, 'FFC084FC'));
-    ct('bestMp', 'Ozon', dxf('FF13274F', true, 'FF60A5FA'));
-    ct('bestMp', 'Яндекс', dxf('FF3D3000', true, 'FFFACC15'));
-    ct('bestMp', 'Мегамаркет', dxf('FF0D3820', true, 'FF4ADE80'));
-    ct('bestMp', 'Авито', dxf('FF0D2F45', true, 'FF38BDF8'));
+    ct('bestMp', 'WB', dxf('FFF3E8FF', true, 'FF6D28D9'));
+    ct('bestMp', 'Ozon', dxf('FFE8F1FF', true, 'FF1D4ED8'));
+    ct('bestMp', 'Яндекс', dxf('FFFFF3CD', true, 'FF7A5A00'));
+    ct('bestMp', 'Мегамаркет', dxf('FFD9F2E3', true, 'FF0E6B3A'));
+    ct('bestMp', 'Авито', dxf('FFE0F2FE', true, 'FF0369A1'));
     ct('ozonIsKgt', 'КГТ', dO);
     /* v12.9.68: стандартные ОВХ и автоподстановка — жёлтая заливка. */
     const dYellow = dxf('FFFFFF00', true, 'FF000000');
@@ -39025,7 +38837,7 @@ const Exp = {
     s1.w(`<autoFilter ref="A1:${COL_LET(nC - 1)}${last}"/>`);
     cfs.forEach(cf => s1.w(`<conditionalFormatting sqref="${cf.sqref}">` + cf.rules.join('') + '</conditionalFormatting>'));
     s1.w('</worksheet>'); s1.end();
-    if (prog) prog('Сводные листы: Категории, Тарифы, PnL, Поставщики, Сводка…'); Prog.step(72);
+    if (prog) prog('Сводные листы: Категории, Тарифы, Сводка…'); Prog.step(72);
     await Exp._yield();
     /* ---- мелкие сводные листы (значения + формулы, одна книга) ---- */
     const smallCellCF = (range, op, values, style) => {
@@ -39244,7 +39056,7 @@ const Exp = {
       let R = 2;
       add(R, [['Unit-control — сводка экспорта (одна книга)']]); R++;
       add(R, [['Режим тарифов'], [S.tariffs.mode === 'api' ? 'API Яндекс Маркет' : 'ЛОКАЛЬНЫЙ EXCEL (СИМУЛЯЦИЯ)']]); R++;
-      const sums = [['revenue', 'Цена, ₽ (сумма по SKU)'], ['cogs', 'Себестоимость, ₽ (сумма по SKU)'], ['commission', 'Комиссия, ₽ (сумма по SKU)'], ['logistics', 'Логистика, ₽ (сумма по SKU)'], ['storage', 'Хранение, ₽ (сумма по SKU)'], ['processing', 'Обработка, ₽ (сумма по SKU)'], ['returns', 'Возвраты, ₽ (сумма по SKU)'], ['tax', 'Налог, ₽ (сумма по SKU)'], ['fixedTotal', 'Фикс. расходы за SKU, ₽/мес'], ['netProfit', 'ЧП на 1 ед., ₽ (сумма по SKU)']];
+      const sums = [['revenue', 'Цена, ₽ (сумма по SKU)'], ['cogs', 'Себестоимость, ₽ (сумма по SKU)'], ['commission', 'Комиссия, ₽ (сумма по SKU)'], ['logistics', 'Логистика, ₽ (сумма по SKU)'], ['storage', 'Хранение, ₽ (сумма по SKU)'], ['processing', 'Обработка, ₽ (сумма по SKU)'], ['returns', 'Возвраты, ₽ (сумма по SKU)'], ['tax', 'Налог, ₽ (сумма по SKU)'], ['netProfit', 'ЧП на 1 ед., ₽ (сумма по SKU)']];
       const reportableRows = [];
       rows.forEach((p, i) => { if (!genericEconExportUnavailable(p)) reportableRows.push({p, excelRow:i + 2}); });
       const incomplete = reportableRows.length !== rows.length;
