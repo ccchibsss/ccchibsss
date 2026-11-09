@@ -58,7 +58,15 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.68-client+autofill-mark') || app.includes('12.9.69-client+enrich-catmode'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard'), 'версия клиента обновлена');
+// v12.9.70: ошибка выгрузки не теряет данные
+assert(app.includes('async function exportGuard'), 'страж выгрузки');
+assert(app.includes('ensureCatalogSafeBeforeExport'), 'запись каталога на диск перед выгрузкой');
+assert(app.includes('данные НЕ потеряны'), 'честное сообщение об ошибке выгрузки');
+assert(app.includes("return exportGuard('Экспорт', () => this._runImpl(forceRows))"), 'общий экспорт под стражем');
+assert(app.includes("return exportGuard('Экспорт в OZON', () => this._runImpl())"), 'Ozon экспорт под стражем');
+assert(app.includes('_persistDirty = true'), 'флаг несохранённых изменений');
+assert((app.match(/exportGuard\('/g) || []).length >= 5, 'все кнопки выгрузки под стражем');
 assert(!app.includes('OFFICIAL_ALL_MP_TARIFFS_2026 = ['), 'мёртвый справочник тарифов удалён');
 assert(app.includes('p.profitEstimate = p.priceInputsIncomplete'), 'прибыль помечается оценкой');
 assert(app.includes('ОЦЕНКА по '), 'KPI показывает долю оценочной прибыли');
@@ -84,7 +92,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.70-client+export-guard'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
