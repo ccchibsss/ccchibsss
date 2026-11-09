@@ -9187,7 +9187,7 @@ try {
         <div><label class="f">Разделитель</label><select id="expDelim" style="min-width:130px"><option value=";">точка с запятой</option><option value=",">запятая</option><option value="&#9;">табуляция</option></select></div>
         <div><label class="f">Кодировка</label><select id="expEnc" style="min-width:130px"><option value="utf8">UTF-8 + BOM</option><option value="cp1251">Windows-1251</option></select></div>
       </div>
-      <div><label class="f">Листы</label><select id="expSheetsSel" multiple size="6" style="min-width:170px;max-height:120px" title="Ctrl+клик — несколько листов; «Юнит-экономика» включён всегда"><option selected>Юнит-экономика</option><option selected>Категории</option><option>Тарифы</option><option>Сводка</option></select></div>
+      <div><label class="f">Листы</label><select id="expSheetsSel" multiple size="6" style="min-width:170px;max-height:120px" title="Ctrl+клик — несколько листов; «Юнит-экономика» включён всегда"><option selected>Юнит-экономика</option><option selected>Вводы и ставки</option><option selected>Категории</option><option>Тарифы</option><option>Сводка</option></select></div>
       <div><label class="f">Объём</label><select id="expScope" style="min-width:150px"><option value="filter">текущий фильтр</option><option value="all">весь каталог</option><option value="sel">выделенные</option></select></div>
       <div><label class="f" for="expChzFilter">ЧЗ по списку</label><select id="expChzFilter" style="min-width:155px"><option value="all">Все</option><option value="yes">Да — совпало</option><option value="no">Нет — не совпало</option><option value="unknown">Проверить</option></select> <button type="button" class="btn sm gh" id="expChzSettings">Список…</button></div>
       <div style="flex:1 1 300px;min-width:240px"><label class="f" for="expCategories">Категории (через |)</label><input id="expCategories" type="text" list="expCategorySuggestions" placeholder="Все категории" autocomplete="off" style="width:100%" aria-describedby="expCategoryHint"><datalist id="expCategorySuggestions"></datalist><div class="hint" id="expCategoryHint" style="margin-top:5px">Пусто — все категории. Например: Подвеска | Тормозная система</div></div>
@@ -13551,7 +13551,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.81-client+split-calc-sheets';
+const APP_VERSION = '12.9.82-client+unit-econ-two-sheets';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -38627,16 +38627,34 @@ const Exp = {
     if (!window.fflate) throw new Error('Библиотека fflate не загрузилась (нет сети?) — экспорт XLSX недоступен, используйте CSV');
     const useF = $('#expFormulas') ? $('#expFormulas').classList.contains('on') : true;
     const protect = $('#expProtect') ? $('#expProtect').classList.contains('on') : true;
-    const allSheetNames = ['Юнит-экономика', 'Категории', 'Тарифы', 'PnL', 'Поставщики', 'Сводка'];
+    const allSheetNames = ['Юнит-экономика', 'Вводы и ставки', 'Категории', 'Тарифы', 'PnL', 'Поставщики', 'Сводка'];
     const sheetSelector = document.getElementById('expSheetsSel');
     const selectedSheets = new Set(sheetSelector ? Array.from(sheetSelector.selectedOptions).map(o => o.textContent.trim()) : allSheetNames);
     /* Главный лист обязателен: формулы сводных листов ссылаются на него.
        v12.9.79: месячные PnL и планирование закупок (Поставщики) из выгрузки убраны. */
     selectedSheets.delete('PnL'); selectedSheets.delete('Поставщики');
     selectedSheets.add('Юнит-экономика');
+    /* v12.9.82: лист вводов обязателен — формулы главного листа ссылаются на него. */
+    selectedSheets.add('Вводы и ставки');
     const sheetNames = allSheetNames.filter(name => selectedSheets.has(name));
     const x = Exp._xE, cx = Exp._cx, sty = Exp._sty;
-    const ref = {}; cat.forEach((c, i) => { c.L = COL_LET(i); ref[c.k] = c.L; });
+    /* v12.9.82: как в калькуляторе Ozon — главный лист компактный (идентификация,
+       цена/закупка и результаты по всем маркетплейсам), а детальные вводы
+       (габариты, ставки %, расходы ₽/ед и разбивка по площадкам) живут на листе
+       «Вводы и ставки». Формулы главного листа ссылаются на него через ref. */
+    const INPUT_SHEET_KEYS = new Set(['weight','length','width','height','stock','minStock',
+      'commPct','acqPct','agencyFeePerSku','boostPct','taxPct','cofinPct','promoCofin','cheapFbsApplied','cheapFbsRate','cheapFbsBaseRate','cheapFbsVolumeRounded','cheapFbsReason','cheapFbsAmount','cheapFbsFlag','tariffLastMileP','buyerDeliveryUnit','uLog','uSc','uPack','uTransitPack','uRet','storageUnit','returnStorageUnit','nonStdUnit','lateShipUnit','taxUnit','listingUnit','lastMileP','returnPct','noBuyPct','returnLogK','returnPerKg','returnFixed','returnStorageDays','returnStoragePerDay','slaPenaltyPerUnit','lgKg','stL','prUnit','days',
+      'visible','visibleReason','excluded','deletePending','markRequired','markCompliant','multUsed','multiplicity','stdDimsExport','autoFillNote',
+      'commWB','logWB','retWB','ozonScheme','ozonIsKgt','ozonLiters','commOzon','dropoffOzon','midMileOzon','lastMileOzon','logOzon','realFbsServiceOzon','retOzon','handOverOzon','nonStdOzon','ozonRateConf','lateShipOzon','shipDiscOzon','retStoreOzon','nonStdWhyOzon','commYM','logYM','retYM','commMM','logMM','retMM','commAvito','logAvito','retAvito']);
+    const mainCat = [], inCat = [];
+    cat.forEach(c => { (INPUT_SHEET_KEYS.has(c.k) ? inCat : mainCat).push(c); });
+    /* На листе вводов первая колонка — артикул, чтобы строки читались без главного листа. */
+    const artCol = cat.find(c => c.k === 'article');
+    if (artCol && !inCat.some(c => c.k === 'article')) inCat.unshift(artCol);
+    const ref = {}, mainRef = {};
+    mainCat.forEach((c, i) => { c.L = COL_LET(i); ref[c.k] = c.L; mainRef[c.k] = c.L; });
+    inCat.forEach((c, i) => { if (c.k === 'article' && mainCat.includes(c)) return; c.Lin = COL_LET(i); ref[c.k] = `'Вводы и ставки'!${c.Lin}`; });
+    if (artCol && mainCat.includes(artCol)) artCol.Lin = 'A';
     /* Колонки ЯМ, которые не попадают в выгрузку другой площадки, в формулах
        считаются нулём: для выбранной площадки эти статьи не начисляются.
        Шаблон спрашивает __ymAbsent(k) вместо обращения к отсутствующей колонке. */
@@ -38678,7 +38696,7 @@ const Exp = {
     /* ---- dxf-стили и правила условного форматирования (OOXML) ---- */
     const dxfs = []; const dxf = (bg, bold, fg, strike) => { dxfs.push({ bg, bold, strike }); if (fg) dxfs[dxfs.length - 1].fg = fg; return dxfs.length - 1; };
     const cfs = []; let prio = 1;
-    const cfRange = (key, ruleXml) => { const L = ref[key]; if (L) cfs.push({ sqref: `${L}2:${L}${last}`, rules: [ruleXml] }); };
+    const cfRange = (key, ruleXml) => { const L = mainRef[key]; if (L) cfs.push({ sqref: `${L}2:${L}${last}`, rules: [ruleXml] }); };
     const cs = (key, vals, colors) => cfRange(key, `<cfRule type="colorScale" priority="${prio++}"><colorScale>` + vals.map(v => `<cfvo type="num" val="${v}"/>`).join('') + colors.map(c => `<color rgb="${c}"/>`).join('') + '</colorScale></cfRule>');
     cs('margin', [0, 15, 30], ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6']);
     cs('roi', [0, 50, 100], ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6']);
@@ -38691,9 +38709,9 @@ const Exp = {
       const fs = (Array.isArray(val) ? val : [val]).map(v => `<formula>${x(v)}</formula>`).join('');
       cfRange(key, `<cfRule type="cellIs" dxfId="${d}" priority="${prio++}" operator="${op}">${fs}</cfRule>`);
     };
-    const ce = (key, formula, d) => { const L = ref[key]; if (L) cfs.push({ sqref: `${L}2:${L}${last}`, rules: [`<cfRule type="expression" dxfId="${d}" priority="${prio++}"><formula>${x(formula)}</formula></cfRule>`] }); };
-    const db = (key, color) => { const L = ref[key]; if (L) cfRange(key, `<cfRule type="dataBar" priority="${prio++}"><dataBar showValue="1"><cfvo type="min"/><cfvo type="max"/><color rgb="${color}"/></dataBar></cfRule>`); };
-    const ct = (key, text, d) => { const L = ref[key]; if (!L) return; cfs.push({ sqref: `${L}2:${L}${last}`, rules: [`<cfRule type="containsText" dxfId="${d}" priority="${prio++}" operator="containsText" text="${x(text)}"><formula>NOT(ISERROR(SEARCH("${x(text)}",${L}2)))</formula></cfRule>`] }); };
+    const ce = (key, formula, d) => { const L = mainRef[key]; if (L) cfs.push({ sqref: `${L}2:${L}${last}`, rules: [`<cfRule type="expression" dxfId="${d}" priority="${prio++}"><formula>${x(formula)}</formula></cfRule>`] }); };
+    const db = (key, color) => { const L = mainRef[key]; if (L) cfRange(key, `<cfRule type="dataBar" priority="${prio++}"><dataBar showValue="1"><cfvo type="min"/><cfvo type="max"/><color rgb="${color}"/></dataBar></cfRule>`); };
+    const ct = (key, text, d) => { const L = mainRef[key]; if (!L) return; cfs.push({ sqref: `${L}2:${L}${last}`, rules: [`<cfRule type="containsText" dxfId="${d}" priority="${prio++}" operator="containsText" text="${x(text)}"><formula>NOT(ISERROR(SEARCH("${x(text)}",${L}2)))</formula></cfRule>`] }); };
     const dDef = dxf('FFF8D7DA', true, 'FF7A1F2E'), dNorm = dxf('FFD9F2E3', true, 'FF0E6B3A');
     /* Финансовые итоги, прибыль на единицу, продажи и запас */
     ci('netProfit', 'greaterThan', 0, dG); ci('netProfit', 'lessThan', 0, dR); db('netProfit', 'FF2FD6A3');
@@ -38707,8 +38725,8 @@ const Exp = {
     ci('fcProfit', 'greaterThan', 0, dGS); ci('fcProfit', 'lessThan', 0, dR2); db('fcProfit', 'FF8B7CFF');
     ci('stock', 'equal', 0, dS);
     if (ref.stock && ref.minStock) {
-      ce('stock', `${ref.stock}2<${ref.minStock}2`, dR);
-      ce('stock', `${ref.stock}2>=${ref.minStock}2`, dGS);
+      ce('stock', `${mainRef.stock}2<${mainRef.minStock}2`, dR);
+      ce('stock', `${mainRef.stock}2>=${mainRef.minStock}2`, dGS);
     }
     ci('sales', 'greaterThan', 0, dGS); ci('sales', 'equal', 0, dS); db('sales', 'FF2FD6A3');
     db('revenue', 'FF5C9DFF'); db('stockValue', 'FFF7B32B'); db('daysCover', 'FF5C9DFF');
@@ -38720,12 +38738,12 @@ const Exp = {
     ci('noBuyPct', 'greaterThan', 30, dR); ci('noBuyPct', 'between', [15, 30], dY);
     ci('daysCover', 'lessThan', 7, dR); ci('daysCover', 'between', [7, 14], dY);
     ci('tariffQuoteAgeDays', 'between', [30, 90], dY); ci('tariffQuoteAgeDays', 'greaterThan', 90, dR);
-    if (ref.tariffCategoryPath) ce('tariffCategoryPath', `LEN(TRIM(${ref.tariffCategoryPath}2))=0`, dO);
+    if (ref.tariffCategoryPath) ce('tariffCategoryPath', `LEN(TRIM(${mainRef.tariffCategoryPath}2))=0`, dO);
     ct('cheapFbsApplied', 'да', dBlue); ct('cheapFbsFlag', 'да', dBlue);
     ci('markupProfit', 'lessThan', 0, dR2); ci('markupProfit', 'greaterThan', 50, dGS);
     if (ref.breakEvenPrice && ref.price) {
-      ce('breakEvenPrice', `${ref.price}2<${ref.breakEvenPrice}2`, dO);
-      ce('price', `${ref.price}2<${ref.breakEvenPrice}2`, dR);
+      ce('breakEvenPrice', `${mainRef.price}2<${mainRef.breakEvenPrice}2`, dO);
+      ce('price', `${mainRef.price}2<${mainRef.breakEvenPrice}2`, dR);
     }
     /* Статусы наличия, витрины, качества данных и товарных политик */
     ct('status', 'Дефицит', dDef); ct('status', 'Норма', dNorm);
@@ -38761,13 +38779,13 @@ const Exp = {
     const dYellow = dxf('FFFFFF00', true, 'FF000000');
     if (ref.stdDimsExport) {
       ct('stdDimsExport', 'СТАНДАРТ', dYellow);
-      for (const dk of ['weight','length','width','height']) if (ref[dk]) ce(dk, `${ref.stdDimsExport}2<>""`, dYellow);
+      for (const dk of ['weight','length','width','height']) if (mainRef[dk]) ce(dk, `${mainRef.stdDimsExport}2<>""`, dYellow);
     }
     if (ref.autoFillNote) {
       ct('autoFillNote', 'АВТО', dYellow);
-      if (ref.category) ce('category', `ISNUMBER(SEARCH("АВТО[категория]",$${ref.autoFillNote}2))`, dYellow);
-      if (ref.category_type) ce('category_type', `ISNUMBER(SEARCH("АВТО[вид]",$${ref.autoFillNote}2))`, dYellow);
-      if (ref.tnved) ce('tnved', `ISNUMBER(SEARCH("АВТО[ТН ВЭД]",$${ref.autoFillNote}2))`, dYellow);
+      if (ref.category) ce('category', `ISNUMBER(SEARCH("АВТО[категория]",$${mainRef.autoFillNote}2))`, dYellow);
+      if (ref.category_type) ce('category_type', `ISNUMBER(SEARCH("АВТО[вид]",$${mainRef.autoFillNote}2))`, dYellow);
+      if (ref.tnved) ce('tnved', `ISNUMBER(SEARCH("АВТО[ТН ВЭД]",$${mainRef.autoFillNote}2))`, dYellow);
     }
 
     /* ---- zip-поток ---- */
@@ -38787,55 +38805,54 @@ const Exp = {
     /* ---- лист 1: Юнит-экономика (потоково, чанками строк) ---- */
     const s1 = sheetW('xl/worksheets/sheet1.xml');
     s1.w(Exp._sheetOpen(true));
-    s1.w('<cols>' + cat.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.w || 12}" customWidth="1"/>`).join('') + '</cols>');
+    s1.w('<cols>' + mainCat.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.w || 12}" customWidth="1"/>`).join('') + '</cols>');
     s1.w('<sheetData>');
-    s1.w('<row r="1" ht="24">' + cat.map((c, i) => cx(COL_LET(i), 1, 1, c.n)).join('') + '</row>');
-    const CH = 4000, nC = cat.length;
+    s1.w('<row r="1" ht="24">' + mainCat.map((c, i) => cx(COL_LET(i), 1, 1, c.n)).join('') + '</row>');
+    /* Лист вводов: габариты — свёрнутая группа (outlineLevel), как в калькуляторе Ozon. */
+    const s2 = sheetW('xl/worksheets/sheet' + (sheetNames.indexOf('Вводы и ставки') + 1) + '.xml');
+    const dimIdx = ['weight','length','width','height'].map(k => inCat.findIndex(c => c.k === k)).filter(i => i >= 0);
+    const dimGroup = dimIdx.length > 1 && Math.max(...dimIdx) - Math.min(...dimIdx) === dimIdx.length - 1 ? { from: Math.min(...dimIdx), to: Math.max(...dimIdx) } : null;
+    s2.w(Exp._sheetOpen(true).replace('<sheetViews>', '<sheetPr><outlinePr summaryBelow="0"/></sheetPr><sheetViews>'));
+    s2.w('<cols>' + inCat.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.w || 12}" customWidth="1"${dimGroup && i >= dimGroup.from && i <= dimGroup.to ? ' outlineLevel="1" hidden="1"' : ''}/>`).join('') + '</cols>');
+    s2.w('<sheetData>');
+    s2.w('<row r="1" ht="24">' + inCat.map((c, i) => cx(COL_LET(i), 1, 1, c.n)).join('') + '</row>');
+    const CH = 4000, nC = mainCat.length;
+    /* Одна ячейка любого из двух листов: значение/формула считаются один раз,
+       буква колонки зависит от листа (у вводов — межлистовая ссылка в ref). */
+    const cellFor = (p, R, c, letter) => {
+      let v = c.src ? c.src(p) : c.custom ? (p.custom || {})[c.custom] : p[c.k];
+      if (c.rejectLongText && typeof v === 'string' && v.length > XLSX_CELL_MAX)
+        throw new Error('Колонка «' + c.n + '», строка ' + R + ': больше ' + XLSX_CELL_MAX + ' символов. Используйте CSV или сократите список.');
+      const unavailable = exportCellUnavailable(p, c.k, c.g);
+      if (unavailable) v = '';
+      if (v instanceof Date) v = 0;
+      if (c.txt) v = (v == null ? '' : String(v));
+      else if (c.f && v !== '' && v !== null && v !== undefined && typeof v !== 'number') v = num(v);
+      let fml = null;
+      if (useF && c.xl && !unavailable) {
+        const fs = formulaFor(c, R);
+        if (fs) {
+          let f = Exp._sanitizeFormula(fs);
+          if (!f && !skippedFormulas.has(c.k)) skippedFormulas.set(c.k, 'формула отклонена санитайзером (ведущие =,+,-,@ / управляющие символы / длина >8192)');
+          else if (f && typeof v === 'number' && isFinite(v) && !/^IFERROR\(/i.test(f)) f = `IFERROR(${f},"")`;
+          fml = f;
+        }
+      }
+      return cx(letter, R, c.txt ? 8 : sty(c.f), v, fml);
+    };
     for (let i = 0; i < rows.length; i += CH) {
       const end = Math.min(i + CH, rows.length);
-      /* Массив вместо конкатенации строк: в V8 `out += ...` в цикле плодит
-         промежуточные строки и провоцирует частые GC / пики RAM (OOM на 300k строк). */
-      const parts = [];
+      const parts = [], partsIn = [];
       for (let j = i; j < end; j++) {
         const p = rows[j], R = j + 2;
         parts.push(`<row r="${R}">`);
-        for (let cix = 0; cix < nC; cix++) {
-          const c = cat[cix];
-          let v = c.src ? c.src(p) : c.custom ? (p.custom || {})[c.custom] : p[c.k];
-          /* Список кодов нельзя молча обрезать по лимиту Excel. */
-          if (c.rejectLongText && typeof v === 'string' && v.length > XLSX_CELL_MAX)
-            throw new Error('Колонка «' + c.n + '», строка ' + R + ': больше ' + XLSX_CELL_MAX + ' символов. Используйте CSV или сократите список.');
-          const unavailable = exportCellUnavailable(p, c.k, c.g);
-          if (unavailable) v = '';
-          if (v instanceof Date) v = 0;
-          /* Кодовые колонки (артикул, штрихкод, КИЗ, OE-списки) — ВСЕГДА текст:
-             числовая ячейка «3708067» в Excel превращается в «3 708 067» и ломает ключи. */
-          if (c.txt) v = (v == null ? '' : String(v));
-          else if (c.f && v !== '' && v !== null && v !== undefined && typeof v !== 'number') v = num(v);
-          let fml = null;
-          if (useF && c.xl && !unavailable) {
-            /* v10.8.7 (критич #3): шаблон компилируется один раз на колонку через
-               строгий strictRef (отсутствующая колонка → исключение, а не
-               «undefinedB5»), затем проходит санитайзер Exp._sanitizeFormula. */
-            const fs = formulaFor(c, R);
-            if (fs) {
-              let f = Exp._sanitizeFormula(fs);
-              if (!f && !skippedFormulas.has(c.k)) skippedFormulas.set(c.k, 'формула отклонена санитайзером (ведущие =,+,-,@ / управляющие символы / длина >8192)');
-              /* Подстраховка на случай ошибки формулы. Раньше вторым аргументом
-                 подставлялся кэш из JS: если пользователь удалял или портил
-                 зависимую колонку, Excel молча показывал СТАРОЕ число вместо
-                 ошибки — в финансовой выгрузке это хуже, чем пустая ячейка.
-                 Теперь ошибка даёт пусто, а корректные строки по-прежнему
-                 несут кэш и пересчитываются при открытии. */
-              else if (f && typeof v === 'number' && isFinite(v) && !/^IFERROR\(/i.test(f)) f = `IFERROR(${f},"")`;
-              fml = f;
-            }
-          }
-          parts.push(cx(c.L, R, c.txt ? 8 : sty(c.f), v, fml));
-        }
+        for (let cix = 0; cix < mainCat.length; cix++) parts.push(cellFor(p, R, mainCat[cix], mainCat[cix].L));
         parts.push('</row>');
+        partsIn.push(`<row r="${R}">`);
+        for (let cix = 0; cix < inCat.length; cix++) { const c = inCat[cix]; partsIn.push(cellFor(p, R, c, c.Lin || c.L)); }
+        partsIn.push('</row>');
       }
-      s1.w(parts.join(''));
+      s1.w(parts.join('')); s2.w(partsIn.join(''));
       if (prog) prog(`Юнит-экономика: строки ${fmt(end)} из ${fmt(rows.length)}`);
       Prog.step(6 + (end / rows.length) * 62);
       await Exp._yield();
@@ -38847,6 +38864,9 @@ const Exp = {
     s1.w(`<autoFilter ref="A1:${COL_LET(nC - 1)}${last}"/>`);
     cfs.forEach(cf => s1.w(`<conditionalFormatting sqref="${cf.sqref}">` + cf.rules.join('') + '</conditionalFormatting>'));
     s1.w('</worksheet>'); s1.end();
+    s2.w('</sheetData>');
+    if (inCat.length) s2.w(`<autoFilter ref="A1:${COL_LET(inCat.length - 1)}${last}"/>`);
+    s2.w('</worksheet>'); s2.end();
     if (prog) prog('Сводные листы: Категории, Тарифы, Сводка…'); Prog.step(72);
     await Exp._yield();
     /* ---- мелкие сводные листы (значения + формулы, одна книга) ---- */
@@ -38895,7 +38915,7 @@ const Exp = {
     const softGreen = { bg: 'FFE5F7EE', fg: 'FF136B43' }, softRed = { bg: 'FFFFE8E8', fg: 'FFB42318' }, softAmber = { bg: 'FFFFF4D6', fg: 'FF8C5A00' }, softBlue = { bg: 'FFEAF2FF', fg: 'FF2457A7' };
     const threeScale = ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6'];
     /* Категории: COUNTIF/SUMIF по главному листу */
-    smallSheet('xl/worksheets/sheet2.xml', [['n', 'Категория', 26], ['s', 'SKU', 9], ['r', 'Цена, ₽/ед.', 15], ['p', 'ЧП, ₽/ед.', 15], ['m', 'Маржа, %', 11], ['d', 'Доля прибыли, %', 15]], add => {
+    smallSheet('xl/worksheets/sheet3.xml', [['n', 'Категория', 26], ['s', 'SKU', 9], ['r', 'Цена, ₽/ед.', 15], ['p', 'ЧП, ₽/ед.', 15], ['m', 'Маржа, %', 11], ['d', 'Доля прибыли, %', 15]], add => {
       const byCat = Object.create(null); let incomplete = false;
       rows.forEach(p => { const category = p.category == null ? '' : String(p.category); const g = byCat[category] || (byCat[category] = { n: 0, rev: 0, net: 0, unavailable: false }); g.n++; if (genericEconExportUnavailable(p)) { g.unavailable = true; incomplete = true; } else { g.rev += num(p.revenue); g.net += num(p.netProfit); } });
       const totNet = Object.values(byCat).reduce((s2, g) => s2 + g.net, 0);
@@ -38922,7 +38942,7 @@ const Exp = {
       smallScaleCF(`F2:F${lastRow}`, [{ type: 'min' }, { type: 'num', value: 0 }, { type: 'max' }], threeScale)
     ] : [] });
     /* Тарифы всех маркетплейсов */
-    smallSheet('xl/worksheets/sheet3.xml', [
+    smallSheet('xl/worksheets/sheet4.xml', [
       ['mp','Маркетплейс',16], ['t','Область / Категория',42], ['c','Комиссия %',12], ['pt','Эквайринг %',14], ['ag','Приём платежа ₽/ед',18],
       ['b','Реклама %',12], ['x','Налог %',10], ['m','Доставка клиенту ₽',18], ['cr','Кроссрегион ₽',14], ['mm','Магистраль / средняя миля ₽',24],
       ['ex','Экспресс ₽',12], ['so','Сортировка/Drop-off ₽',18], ['ib','Бронирование ₽',15], ['l','Логистика доп. ₽/л или ₽/кг',22], ['lb','Базовая логистика ₽',16],
@@ -39034,7 +39054,7 @@ const Exp = {
       smallCellCF(`Z2:Z${lastRow}`, 'greaterThan', 2, softRed)
     ] : [] });
     /* PnL */
-    smallSheet('xl/worksheets/sheet4.xml', [['p', 'Период', 16], ['r', 'Выручка факт', 15], ['n', 'ЧП факт', 14], ['f', 'ЧП прогноз', 14], ['d', 'Δ ₽', 13], ['pc', 'Δ %', 9], ['o', 'Заказы', 10]], add => {
+    smallSheet('xl/worksheets/sheet5.xml', [['p', 'Период', 16], ['r', 'Выручка факт', 15], ['n', 'ЧП факт', 14], ['f', 'ЧП прогноз', 14], ['d', 'Δ ₽', 13], ['pc', 'Δ %', 9], ['o', 'Заказы', 10]], add => {
       let R = 2;
       pnlActualRows().forEach(x2 => {
         const fact=pnlGet(x2,'net_fact'), plan=pnlGet(x2,'net_forecast'), delta=fact===null || plan===null ? null : round(fact-plan),
@@ -39051,7 +39071,7 @@ const Exp = {
       smallBarCF(`G2:G${lastRow}`, 'FFF7B32B')
     ] : [] });
     /* Поставщики */
-    smallSheet('xl/worksheets/sheet5.xml', [['n', 'Поставщик', 30], ['i', 'ИНН', 13], ['t', 'Отсрочка, дн', 11], ['p', 'Предоплата %', 12], ['r', 'Рейтинг', 9], ['o', 'Заказов', 9], ['a', 'Сумма заказов, ₽', 16]], add => {
+    smallSheet('xl/worksheets/sheet6.xml', [['n', 'Поставщик', 30], ['i', 'ИНН', 13], ['t', 'Отсрочка, дн', 11], ['p', 'Предоплата %', 12], ['r', 'Рейтинг', 9], ['o', 'Заказов', 9], ['a', 'Сумма заказов, ₽', 16]], add => {
       let R = 2;
       S.sups.forEach(s2 => { const ord = S.orders.filter(o2 => o2.supplier === s2.name); add(R, [[s2.name], [s2.inn || ''], [num(s2.term_days), null, 3], [num(s2.prepay_pct), null, 3], [num(s2.rating), null, 4], [ord.length, null, 3], [round(ord.reduce((q, o2) => q + (o2.amount || 0), 0)), null, 3]]); R++; });
     }, { cf: lastRow => lastRow > 1 ? [
@@ -39062,7 +39082,7 @@ const Exp = {
       smallBarCF(`F2:F${lastRow}`, 'FF5C9DFF'), smallBarCF(`G2:G${lastRow}`, 'FFF7B32B')
     ] : [] });
     /* Сводка: SUM по колонкам главного листа + ссылки на исходные строки топ-10. */
-    smallSheet('xl/worksheets/sheet6.xml', [['a', 'Показатель / Артикул', 34], ['b', 'Значение', 20], ['c', 'Категория', 22], ['d', 'Цена безубыт.', 15], ['e', 'Маржа, %', 11]], add => {
+    smallSheet('xl/worksheets/sheet7.xml', [['a', 'Показатель / Артикул', 34], ['b', 'Значение', 20], ['c', 'Категория', 22], ['d', 'Цена безубыт.', 15], ['e', 'Маржа, %', 11]], add => {
       let R = 2;
       add(R, [['Unit-control — сводка экспорта (одна книга)']]); R++;
       add(R, [['Режим тарифов'], [S.tariffs.mode === 'api' ? 'API Яндекс Маркет' : 'ЛОКАЛЬНЫЙ EXCEL (СИМУЛЯЦИЯ)']]); R++;
@@ -39076,10 +39096,9 @@ const Exp = {
       [...reportableRows].sort((a2, b2) => num(b2.p.netProfit) - num(a2.p.netProfit)).slice(0, 10).forEach(({p, excelRow}) => {
         /* Stable row references work even when article is not the first selected
            column or two suppliers use the same article. Do not lookup by article. */
-        const vi = col => cat.findIndex(c2 => c2.k === col) + 1;
         const vl = (col, fallback, st) => {
-          const i2 = vi(col); if (i2 <= 0) return [fallback, null, st];
-          const target = `'Юнит-экономика'!$${COL_LET(i2 - 1)}$${excelRow}`;
+          const L = mainRef[col]; if (!L) return [fallback, null, st];
+          const target = `'Юнит-экономика'!$${L}$${excelRow}`;
           return [{ f: `IF(ISBLANK(${target}),"",${target})`, v: exportCellUnavailable(p, col) ? '' : fallback }, null, st];
         };
         add(R, [[p.article], vl('price', num(p.price), 3), vl('category', p.category || '', 0), vl('breakEvenPrice', num(p.breakEvenPrice), 3), vl('margin', num(p.margin), 4)]);
@@ -39416,7 +39435,7 @@ const Exp = {
     }
     const cat = exportCatalog(), g = { in: 0, custom: 0, calc: 0, ana: 0 };
     cat.forEach(c => g[c.g]++);
-    $('#expSheets').innerHTML = [['Юнит-экономика', cat.length + ' колонок · формулы + CF продаж/остатков/маржи/статусов'], ['Категории', 'CF выручки/прибыли/маржи'], ['Тарифы', S.tariffs.list.length + ' ставок · CF ставок и возвратов'], ['PnL', S.pnl.length + ' периодов · Δ + CF'], ['Поставщики', S.sups.length + ' · заказы ' + S.orders.length + ' · CF рейтинга'], ['Сводка', 'SUM/VLOOKUP · топ-10 + CF']]
+    $('#expSheets').innerHTML = [['Юнит-экономика', 'главный лист · результаты по всем маркетплейсам'], ['Вводы и ставки', 'габариты, ставки и расходы ₽/ед · формулы главного листа ссылаются сюда'], ['Категории', 'CF выручки/прибыли/маржи'], ['Тарифы', S.tariffs.list.length + ' ставок · CF ставок и возвратов'], ['PnL', S.pnl.length + ' периодов · Δ + CF'], ['Поставщики', S.sups.length + ' · заказы ' + S.orders.length + ' · CF рейтинга'], ['Сводка', 'SUM/VLOOKUP · топ-10 + CF']]
       .map(s => `<div class="kv"><span><i class="fa-solid fa-table" style="color:var(--blue);margin-right:6px"></i>${s[0]}</span><b style="font-weight:400;color:var(--mut);font-size:10.5px">${s[1]}</b></div>`).join('') +
       `<div class="sep"></div><div class="hint">Всего колонок: входные <b>${g.in}</b> · пользовательские <b>${g.custom}</b> · расчётные <b>${g.calc}</b> · аналитика <b>${g.ana}</b> = <b style="color:var(--amber)">${cat.length}</b></div>`;
     $('#expCols').innerHTML = cat.map(c => `<div class="kv" style="padding:3px 0"><span>${esc(c.n)}</span><b style="color:${c.g === 'calc' ? 'var(--teal)' : c.g === 'custom' ? 'var(--amber)' : 'var(--mut2)'};font-weight:400;font-size:10px">${c.g}</b></div>`).join('');
