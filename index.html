@@ -122,6 +122,16 @@
   v12.9.73 — ПРОДАЖИ ЗА МЕСЯЦ УБРАНЫ ИЗ СНОСКИ НЕДОСТАЮЩИХ ДАННЫХ: экономика
   считается на единицу товара (прибыль, маржа, безубыток, целевая цена), продажи
   за месяц для этого не нужны и больше не числятся недостающими данными.
+  v12.9.77 — ТАРГЕТНЫЕ REBUILDINDEX, DEDUPE И ЗАПИСЬ ДЕЛЬТЫ. (1) rebuildIndex
+  при импорте перестраивает OE-индекс только по связкам строк файла: импорт
+  лишь добавляет/сливает OE, поэтому прочие «Группы артикулов» не меняются
+  (затронутые держатели OE добираются через HVC.byOe). (2) dedupeCatalog:
+  полный проход — один раз на новый массив каталога, далее слияние дублей
+  проверяется только по связкам этого файла. (3) Запись в IndexedDB — только
+  изменённые строки при любой доле дельты (раньше полная перезапись при
+  дельте >= 2 %); исключение — слияние дублей, где строки удаляются.
+  Контроль: тесты эквивалентности таргетного и полного rebuildIndex на
+  OE-графе и таргетного dedupe; этап «индекс OE» виден в консоли импорта.
   v12.9.76 — ПАЙПЛАЙН НЕ ТРОГАЕТ НЕИЗМЕНЁННЫЕ СТРОКИ. Если набор изменённых
   строк известен (импорт любого размера, автоисправления, точечные правки),
   пайплайн больше не упаковывает и не нормализует остальные строки каталога:
@@ -13531,7 +13541,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.76-client+pipeline-unchanged-skip';
+const APP_VERSION = '12.9.77-client+targeted-rebuild-dedupe-persist';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -18888,8 +18898,12 @@ function tariffIndex() {
  * Пустой бренд не является доказательством совпадения с известным брендом;
  * противоречащие записи и ключи, защищённые после неоднозначного импорта,
  * остаются раздельными и не перезаписываются автоматически. */
-function dedupeCatalog() {
+function dedupeCatalog(onlyFull) {
   if (!S.rows.length) return 0;
+  /* v12.9.77: onlyFull (Set ключей «артикул|бренд») — слияние дублей проверяется
+     только для этих связок. Дубли остальных связок этот импорт создать не мог
+     (upsert идёт по ключу), а накопленные ранее разбирает полный проход,
+     который импорт выполняет при новой загрузке/замене каталога. */
   const byFull = new Map();   // артикул|бренд → строка
   const out = [];
   let merged = 0;
@@ -18913,11 +18927,12 @@ function dedupeCatalog() {
        объявления `const a` строкой ниже. На любом каталоге с посчитанной
        экономикой (p.mp) boot падал с TDZ-ошибкой и каталог после перезагрузки
        выглядел пустым. Агрегация живёт в Dash.agg — дубль удалён. */
-    codeFieldsToStr(p);
     const a = normArticle(p.article);
     if (!a) { out.push(p); continue; }
     const b = normArticle(p.brand);
     const full = a + '|' + b;
+    if (onlyFull && !onlyFull.has(full)) { out.push(p); continue; }
+    codeFieldsToStr(p);
     let target = byFull.get(full);
     if (target) {
       if (sourceSkuKey(target.article) !== sourceSkuKey(p.article) || sourceBrandKey(target.brand) !== sourceBrandKey(p.brand)) { out.push(p); continue; }
@@ -23891,8 +23906,34 @@ const HVC = {
     return out;
   },
   /* Перестроение индекса OE-связей + группировка артикулов от OE, ОДИН РАЗ на пакет. */
-  rebuildIndex(list) {
+  rebuildIndex(list, onlyKeys) {
     const rows = list || (typeof S !== 'undefined' && S.rows ? S.rows : []), scope=HVC.identityScope(rows);
+    /* v12.9.77 · ТАРГЕТНАЯ ПЕРЕСТРОЙКА (onlyKeys — связки изменённых строк).
+       Импорт только добавляет/сливает OE, поэтому измениться могут лишь:
+       OE-списки строк затронутых связок и «Группа артикулов» тех строк, чья
+       группа зависит от этих связок, — то есть держателей их OE (byOe).
+       Остальные строки получают ровно те же значения, что дал бы полный
+       проход, поэтому _groupOnly по всему каталогу не нужен. */
+    if (onlyKeys && onlyKeys.size) {
+      HVC.groupOeByKeyFromRows(rows, scope, onlyKeys);
+      const keyRows = rows.filter(p => { try { return onlyKeys.has(HVC.keyOf(p)); } catch (e) { return false; } });
+      HVC.syncOeByKey(keyRows, scope);
+      HVC._clearEnrichCaches();
+      if (HVC.enCol('group_articles')) {
+        const grpKeys = new Set(onlyKeys);
+        for (const k of onlyKeys) for (const on of (HVC.byArt.get(k) || [])) {
+          const holders = HVC.byOe.get(on); if (holders) for (const h of holders) grpKeys.add(h);
+        }
+        for (const p of rows) {
+          if (HVC.identityUnsafe(p,scope)) continue;
+          const k = HVC.keyOf(p); if (!grpKeys.has(k)) continue;
+          const g = HVC._groupOnly(k);
+          p.group_articles = g.join(OE_DELIMITERS[oeMode()].join);
+          p.groupSize = g.length;
+        }
+      }
+      return rows.length;
+    }
     HVC.groupOeByKeyFromRows(rows,scope);
     HVC.syncOeByKey(rows,scope);
     HVC._clearEnrichCaches();
@@ -26703,7 +26744,13 @@ const Import = {
       if (prog) prog('проверка дублей по артикулу…');
       const changedList = Array.from(new Set([...touched, ...visibilityUpdates, ...ambiguousProtected]));
       const changedTouched = changedList.length;
-      const dedup = S.pending.advisorTemplate ? 0 : dedupeCatalog();
+      /* v12.9.77: полный dedupe — один раз на новый массив каталога (загрузка,
+         серверная замена); дальше дубли могут появиться только в связках,
+         затронутых этим файлом, — проверяем таргетно. */
+      const _dedupeFull = S._dedupedRowsRef !== S.rows;
+      const _dedupeKeys = _dedupeFull ? null : new Set(changedList.map(p => normArticle(p && p.article) + '|' + normArticle(p && p.brand)));
+      const dedup = S.pending.advisorTemplate ? 0 : dedupeCatalog(_dedupeKeys);
+      if (!S.pending.advisorTemplate) S._dedupedRowsRef = S.rows;
       if (dedup) Prog.msg('объединено дублей: ' + fmt(dedup));
       /* v12.9.46: пересчёт сам пересоберёт OE-группы (если он не частичный),
          поэтому не делаем ту же работу дважды на 94k строк. */
@@ -26732,7 +26779,11 @@ const Import = {
            OE-индексы и сразу выставляет «Группа артикулов» от нормализованного OE.
            Обогащение пустых полей — только по строкам текущего файла. */
         if (prog) prog('Каталог V: OE-индекс и группировка артикулов…');
-        HVC.rebuildIndex(S.rows);
+        /* v12.9.77: перестраиваем индекс только по связкам строк этого файла
+           (полная перестройка остаётся для загрузки и ручных операций). */
+        const _rbKeys = new Set();
+        for (const r of touchedUnique) { try { const k = HVC.keyOf(r); if (k && k !== '|') _rbKeys.add(k); } catch (e) { } }
+        HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined);
         _mark('индекс OE');
         /* v12.9.60: prajs postavshchika sam ne obogashchaetsya. Esli v fajle net ni
            odnogo polya-istochnika (vesogabaritы, obъem, OE-nomera, kategoriya,
@@ -26846,7 +26897,11 @@ const Import = {
       try {
         await runPipeline(true, {
           changedRows, preserveView: nothingChanged, persist: !nothingChanged,
-          smallDelta, persistChangedOnly: smallDelta && changedTouched > 0,
+          /* v12.9.77: запись только изменённых строк — при любой доле дельты,
+             а не только < 2 %. Полная перезапись нужна лишь при слиянии
+             дублей (dedup удаляет строки из каталога). Слияния OE по связкам
+             и группы артикулов загрузка выводит заново из записанных строк. */
+          smallDelta, persistChangedOnly: changedTouched > 0 && !dedup,
           changedList, onProgress: prog, stepRange: [78, 97]
         });
       }

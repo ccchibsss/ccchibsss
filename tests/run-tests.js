@@ -70,7 +70,7 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.76-client+pipeline-unchanged-skip'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
 // v12.9.70: ошибка выгрузки не теряет данные
 assert(app.includes('async function exportGuard'), 'страж выгрузки');
 assert(app.includes('ensureCatalogSafeBeforeExport'), 'запись каталога на диск перед выгрузкой');
@@ -104,7 +104,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.76-client+pipeline-unchanged-skip'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -144,7 +144,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.76-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.76-client+pipeline-unchanged-skip'), 'версия клиента обновлена');
+assert(app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -231,13 +231,101 @@ console.log('OK: все тесты пройдены (' + rows.length + ' стр�
 // v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
 assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
 assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
-assert(app.includes('12.9.76-client+pipeline-unchanged-skip'), 'версия клиента обновлена');
+assert(app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
 assert(app.includes('if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
-assert(app.includes('12.9.76-client+pipeline-unchanged-skip'), 'версия клиента обновлена');
+assert(app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
 
 assert(app.includes("classList.contains('active')) UE.render()"), 'импорт: UE.render только для активного раздела');
 assert(app.includes("classList.contains('active')) Dash.render()"), 'импорт: Dash.render только для активного раздела');
+
+// v12.9.77: таргетный rebuildIndex эквивалентен полному на OE-графе
+{
+  const c3 = {};
+  vm.createContext(c3);
+  const hvcMethods =
+    'const HVC = {\n' +
+    '  parts: new Map(), oe: new Map(), byArt: new Map(), byOe: new Map(), bySku: new Map(), cross: new Map(), _agg: new Map(), _graph: new Map(),\n' +
+    '  normalizeKey(s) { return normArticle(s); },\n' +
+    '  identityScope() { return {}; }, identityUnsafe() { return false; }, identityUnsafeKey() { return false; },\n' +
+    '  enCol() { return true; }, _clearEnrichCaches() {},\n' +
+    '  ensureNorm(p) { if (!p.oe_norm) p.oe_norm = codeList(p.oe_numbers).map(t => normArticle(t)).filter(Boolean).join(OE_DELIMITERS[oeMode()].join); return p; },\n' +
+    '  keyOf(p) { return HVC.normalizeKey(p.article) + "|" + HVC.normalizeKey(p.brand || ""); },\n' +
+    '  ' + grab(/groupOeByKeyFromRows\(list,scope,onlyKeys\) \{[\s\S]*?\n    return changed;\n  \},/) + '\n' +
+    '  ' + grab(/syncOeByKey\(list,scope\) \{[\s\S]*?\n    return changed;\n  \},/) + '\n' +
+    '  ' + grab(/_groupOnly\(key\) \{[\s\S]*?\n    return out;\n  \},/) + '\n' +
+    '  ' + grab(/rebuildIndex\(list, onlyKeys\) \{[\s\S]*?\n  \},\n/) + '\n};\nthis.HVC = HVC;';
+  vm.runInContext(
+    'const _normArticleCache = new Map();\nconst S = { settings: { oeDelimiter: "auto" }, rows: [] };\n' +
+    grab(/const normArticle = s => \{[\s\S]*?\n\};\n/) +
+    grab(/const OE_DELIMITERS = \{[\s\S]*?\n\}\nfunction mergeCodeLists\(\) \{[\s\S]*?\n\}\n/) +
+    hvcMethods, c3);
+  const mkRows = () => ([
+    { article: 'A1', brand: 'B', oe_numbers: '111', oe_list: '' },
+    { article: 'A1', brand: 'B', oe_numbers: '222', oe_list: '' },
+    { article: 'C1', brand: 'D', oe_numbers: '222', oe_list: '' },
+    { article: 'E1', brand: 'F', oe_numbers: '999', oe_list: '' },
+    { article: 'G1', brand: 'H', oe_numbers: '555', oe_list: '' }
+  ]);
+  const prep = rows => { // реестр parts + первичная ПОЛНАЯ перестройка (как при загрузке)
+    for (const p of rows) { const k = c3.HVC.keyOf(p); if (!c3.HVC.parts.has(k)) c3.HVC.parts.set(k, { artikul: p.article, brand: p.brand }); }
+    c3.HVC.rebuildIndex(rows);
+  };
+  const rowsFull = mkRows(); prep(rowsFull);
+  const HVC2parts = new Map(c3.HVC.parts);
+  // сброс реестра ко второму экземпляру: пересобираем состояние вручную через JSON-снимок карт нельзя —
+  // поэтому второй набор строк обрабатываем тем же HVC после очистки индексов:
+  const snap = r => r.map(p => [p.oe_numbers, p.oe_list, p.oe_norm, p.group_articles, p.groupSize].join('~')).join('\n');
+  rowsFull[0].oe_numbers = '111 / 999'; // импорт: связка A получила OE 999 (мост к E)
+  c3.HVC.rebuildIndex(rowsFull);        // полный проход
+  const rowsTg = mkRows();
+  // реестр возвращаем к исходному: полная перестройка на исходных строках, затем таргетная после той же мутации
+  c3.HVC.byArt.clear(); c3.HVC.byOe.clear(); c3.HVC.bySku.clear(); c3.HVC.cross.clear(); c3.HVC.oe.clear();
+  prep(rowsTg);
+  rowsTg[0].oe_numbers = '111 / 999';
+  c3.HVC.rebuildIndex(rowsTg, new Set(['A1|B'])); // таргетный проход
+  assert.strictEqual(snap(rowsTg), snap(rowsFull), 'таргетный rebuildIndex == полный (OE, группы, размеры)');
+  assert.ok(rowsTg[2].group_articles.includes('A1'), 'группа связанной связки C обновилась через byOe');
+  assert.ok(rowsTg[3].group_articles.includes('A1'), 'группа связки E обновилась через новый OE');
+}
+// v12.9.77: таргетный dedupe сливает только заданные связки, полный — все
+{
+  const c4 = {};
+  vm.createContext(c4);
+  vm.runInContext(
+    'const _normArticleCache = new Map();\n' +
+    'const S = { settings: { oeDelimiter: "auto" }, rows: [] };\n' +
+    'const CODE_FIELDS = ["article","originalArticle","barcode","markCode"];\n' +
+    'function articleText(v) { return String(v); }\n' +
+    grab(/const normArticle = s => \{[\s\S]*?\n\};\n/) +
+    grab(/const OE_DELIMITERS = \{[\s\S]*?\n\}\nfunction mergeCodeLists\(\) \{[\s\S]*?\n\}\n/) +
+    grab(/function codeFieldsToStr\(p\) \{[\s\S]*?\n\}\n/) +
+    'function sourceSkuKey(v) { return String(v || ""); }\nfunction sourceBrandKey(v) { return String(v || ""); }\n' +
+    'function ozonSourceMap() { return {}; }\nfunction isRemovedDbsName() { return false; }\n' +
+    'const CategoryTnved = { typeInfo() { return { value: "", conflict: false }; }, findCode() { return ""; } };\n' +
+    grab(/function dedupeCatalog\(onlyFull\) \{[\s\S]*?\n  return merged;\n\}\n/) +
+    'this.S = S; this.dedupeCatalog = dedupeCatalog;', c4);
+  const mk = () => ([
+    { article: 'X1', brand: 'B', price: 100, name: 'первый' },
+    { article: 'X1', brand: 'B', price: 100, name: 'первый', stock: 5 },
+    { article: 'Y1', brand: 'B', price: 200, name: 'второй' },
+    { article: 'Y1', brand: 'B', price: 200, name: 'второй', stock: 7 }
+  ]);
+  c4.S.rows = mk();
+  const mT = c4.dedupeCatalog(new Set(['X1|B']));
+  assert.strictEqual(mT, 1, 'таргетный dedupe: слита одна пара');
+  assert.strictEqual(c4.S.rows.length, 3, 'чужая дублирующая пара не тронута');
+  assert.strictEqual(c4.S.rows[0].stock, 5, 'поля слиты в первую строку');
+  c4.S.rows = mk();
+  const mF = c4.dedupeCatalog(null);
+  assert.strictEqual(mF, 2, 'полный dedupe: слиты обе пары');
+  assert.strictEqual(c4.S.rows.length, 2);
+}
+// v12.9.77: импорт — таргетные rebuildIndex/dedupe и запись дельты при любой доле
+assert(app.includes('HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined)'), 'импорт: таргетный rebuildIndex');
+assert(app.includes('dedupeCatalog(_dedupeKeys)'), 'импорт: таргетный dedupe после первого полного');
+assert(app.includes('persistChangedOnly: changedTouched > 0 && !dedup'), 'импорт: запись только дельты, если не было слияний');
+assert(app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
