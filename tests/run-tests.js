@@ -70,7 +70,7 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.74-client+solver-first-crossing'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.75-client+import-delta-oe'), 'версия клиента обновлена');
 // v12.9.70: ошибка выгрузки не теряет данные
 assert(app.includes('async function exportGuard'), 'страж выгрузки');
 assert(app.includes('ensureCatalogSafeBeforeExport'), 'запись каталога на диск перед выгрузкой');
@@ -104,7 +104,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.74-client+solver-first-crossing'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.75-client+import-delta-oe'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -144,7 +144,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.74-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.74-client+solver-first-crossing'), 'версия клиента обновлена');
+assert(app.includes('12.9.75-client+import-delta-oe'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -189,3 +189,46 @@ assert(app.includes('12.9.74-client+solver-first-crossing'), 'версия кл�
 }
 
 console.log('OK: все тесты пройдены (' + rows.length + ' строк CSV пересчитано)');
+
+// v12.9.75: таргетная группировка OE (onlyKeys) эквивалентна полной для затронутых связок
+{
+  const c2 = {};
+  vm.createContext(c2);
+  const src =
+    'const _normArticleCache = new Map();\n' +
+    'const S = { settings: { oeDelimiter: "auto" }, rows: [] };\n' +
+    grab(/const normArticle = s => \{[\s\S]*?\n\};\n/) +
+    grab(/const OE_DELIMITERS = \{[\s\S]*?\n\}\nfunction mergeCodeLists\(\) \{[\s\S]*?\n\}\n/) +
+    'const HVC = {\n' +
+    '  normalizeKey(s) { return normArticle(s); },\n' +
+    '  identityUnsafe() { return false; },\n' +
+    '  ensureNorm(p) { if (!p.oe_norm) p.oe_norm = codeList(p.oe_numbers).map(t => normArticle(t)).filter(Boolean).join(OE_DELIMITERS[oeMode()].join); return p; },\n' +
+    '  keyOf(p) { return HVC.normalizeKey(p.article) + "|" + HVC.normalizeKey(p.brand || ""); },\n' +
+    '  ' + grab(/groupOeByKeyFromRows\(list,scope,onlyKeys\) \{[\s\S]*?\n    return changed;\n  \},/) + '\n};\n' +
+    'this.HVC = HVC; this.normArticle = normArticle;';
+  vm.runInContext(src, c2);
+  const mk = () => ([
+    { article: 'A1', brand: 'B', oe_numbers: '111 / 222', oe_list: '' },
+    { article: 'a1', brand: 'b', oe_numbers: '333', oe_list: '' },
+    { article: 'C9', brand: 'D', oe_numbers: '999', oe_list: '' },
+    { article: 'C9', brand: 'D', oe_numbers: '888', oe_list: '' }
+  ]);
+  const full = mk(); c2.HVC.groupOeByKeyFromRows(full, {});
+  // изменилась только связка A1|B — добавляем OE в одну её строку
+  const delta = mk(); delta[0].oe_numbers = '111 / 222 / 777';
+  c2.HVC.groupOeByKeyFromRows(delta, {}, new Set(['A1|B']));
+  assert.strictEqual(delta[0].oe_numbers, '111 / 222 / 777 / 333', 'таргет: OE связки слиты в одну строку');
+  assert.strictEqual(delta[1].oe_numbers, '111 / 222 / 777 / 333', 'таргет: OE разошлись по связке как при полном проходе');
+  assert.ok(delta[1].oe_norm.includes('777'), 'oe_norm обновлён');
+  assert.strictEqual(delta[2].oe_numbers, '999', 'чужая связка не тронута таргетным проходом');
+  assert.strictEqual(delta[3].oe_numbers, '888', 'чужая связка не слита таргетным проходом');
+  const fullDelta = mk(); fullDelta[0].oe_numbers = '111 / 222 / 777';
+  c2.HVC.groupOeByKeyFromRows(fullDelta, {});
+  assert.strictEqual(delta[0].oe_numbers, fullDelta[0].oe_numbers, 'эквивалентность полной группировке (строка 1)');
+  assert.strictEqual(delta[1].oe_numbers, fullDelta[1].oe_numbers, 'эквивалентность полной группировке (строка 2)');
+  assert.strictEqual(delta[1].oe_norm, fullDelta[1].oe_norm, 'эквивалентность oe_norm');
+}
+// v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
+assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
+assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
+assert(app.includes('12.9.75-client+import-delta-oe'), 'версия клиента обновлена');

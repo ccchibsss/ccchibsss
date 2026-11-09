@@ -122,6 +122,17 @@
   v12.9.73 — ПРОДАЖИ ЗА МЕСЯЦ УБРАНЫ ИЗ СНОСКИ НЕДОСТАЮЩИХ ДАННЫХ: экономика
   считается на единицу товара (прибыль, маржа, безубыток, целевая цена), продажи
   за месяц для этого не нужны и больше не числятся недостающими данными.
+  v12.9.75 — ИМПОРТ: МЕНЬШЕ ПОЛНЫХ ПРОХОДОВ ПО КАТАЛОГУ. При применении
+  импорта два этапа повторяли работу по всем SKU, хотя менялась лишь дельта:
+  (1) syncOeByKey() после rebuildIndex (который сам включает sync по всему
+  каталогу) — теперь синхронизируются только изменённые и связанные строки;
+  распространение OE внутри связки доделывает группировка пайплайна.
+  (2) Группировка OE в пайплайне при малой дельте (<2 % каталога) — теперь
+  таргетная (groupOeByKeyFromRows получил необязательный набор связок):
+  OE-списки чужих связок не разбираются заново. Результат каталога не меняется:
+  OE строки зависят только от строк её связки Артикул+Бренд. Контроль — тесты
+  (эквивалентность полной и таргетной группировки) и построчный замер этапов
+  «OE по связке»/«пересчёт и запись» в консоли ([UC] импорт: …).
   v12.9.74 — РЕШАТЕЛЬ ИЩЕТ ПЕРВОЕ ПЕРЕСЕЧЕНИЕ: при ступенчатом тарифе прибыль
   может идти «+ − +» (положительна, провал на новой ступени логистики, снова
   положительна); бисекция находила второе пересечение и завышала безубыточную
@@ -13511,7 +13522,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.74-client+solver-first-crossing';
+const APP_VERSION = '12.9.75-client+import-delta-oe';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21230,7 +21241,13 @@ function runPipeline(full, options) {
        объединяем OE строк одной СВЯЗКИ Артикул+Бренд прямо из каталога. */
     /* v12.9.54: при точечной подстановке ОВХ ключи артикул+бренд и OE-номера не
        меняются, поэтому пересборка OE-групп по всему каталогу не нужна. */
-    if (!preserveView && !(deltaFast && options.skipGroups) && typeof HVC !== 'undefined') { try { HVC.groupOeByKeyFromRows(); } catch (e) { console.warn('[UC] groupOeByKey:', e); } }
+    /* v12.9.75: при малой дельте полная группировка OE по каталогу заменяется
+       таргетной — только связки изменённых строк (options.changedList). Смысл
+       тот же: OE внутри связки зависят только от её строк. */
+    const _grpOnlyKeys = (deltaFast && Array.isArray(options.changedList) && options.changedList.length && typeof HVC !== 'undefined')
+      ? new Set(options.changedList.map(p => { try { return HVC.keyOf(p); } catch (e) { return ''; } }).filter(k => k && k !== '|'))
+      : null;
+    if (!preserveView && !(deltaFast && options.skipGroups) && typeof HVC !== 'undefined') { try { HVC.groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys); } catch (e) { console.warn('[UC] groupOeByKey:', e); } }
     for (let start = 0; start < total; start += CHUNK) {
       const end = Math.min(start + CHUNK, total);
       if (prog) prog(`расчёт SKU ${fmt(start + 1)}–${fmt(end)} из ${fmt(total)}`);
@@ -23633,7 +23650,7 @@ const HVC = {
    * объединённое множество OE из её строк, затем записывает результат через " / ".
    * Строки с тем же артикулом, но ДРУГИМ брендом, в одну связку НЕ сливаются —
    * они объединятся только через общий OE-номер (см. relatedGraph). */
-  groupOeByKeyFromRows(list,scope) {
+  groupOeByKeyFromRows(list,scope,onlyKeys) {
     const rows = list || S.rows, identityScope=scope || HVC.identityScope(rows);
     /* v12.9.10: исходный OE поставщика запоминаем ДО слияния по связке артикул+бренд,
        чтобы шаблоны могли вывести {{source_oem}} ровно так, как он был в прайсе. */
@@ -23642,10 +23659,15 @@ const HVC = {
        Артикул+Бренд (article_norm|brand_norm). Все строки одной связки сливают свои
        OE в единый список; параллельно копится нормализованный список (oe_norm). */
     const byKey = new Map(); // art_norm|brand_norm → { seen:Set, order:[orig], norms:[norm] }
+    /* v12.9.75: onlyKeys (Set связок) — обрабатываем только строки этих связок.
+       Остальные связки этим проходом не меняются: их OE-списки зависят лишь от
+       собственных строк, а они не трогались. Экономит разбор OE-списков всего
+       каталога при точечных импортах (малая дельта). */
     for (const p of rows) {
       if (HVC.identityUnsafe(p,identityScope)) continue;
       HVC.ensureNorm(p);
       const key = HVC.keyOf(p); if (!key || key === '|') continue;
+      if (onlyKeys && !onlyKeys.has(key)) continue;
       let bag = byKey.get(key);
       if (!bag) { bag = { seen: new Set(), order: [], norms: [] }; byKey.set(key, bag); }
       for (const t of codeList(mergeCodeLists(p.oe_numbers, p.oe_list))) {
@@ -23657,6 +23679,7 @@ const HVC = {
     for (const p of rows) {
       if (HVC.identityUnsafe(p,identityScope)) continue;
       const key = HVC.keyOf(p); if (!key || key === '|') continue;
+      if (onlyKeys && !onlyKeys.has(key)) continue;
       const bag = byKey.get(key); if (!bag) continue;
       p.oe_norm = bag.norms.join(OE_DELIMITERS[oeMode()].join);
       if (!bag.order.length) continue;
@@ -26783,7 +26806,13 @@ const Import = {
          транзитивным объединением групп артикулов, но сам OE-список через выбранный разделитель должен
          накапливаться независимо от него. */
       if (prog) prog('группировка OE по связке Артикул+Бренд…');
-      try { HVC.syncOeByKey(); } catch (e) { console.warn('[UC] syncOeByKey:', e); }
+      /* v12.9.75: полный syncOeByKey по каталогу здесь избыточен — его только что
+         выполнил rebuildIndex(S.rows) выше (этап «индекс OE»), а после него OE
+         могли измениться лишь у строк этого импорта и связанных (changedList).
+         Распространение OE на остальные строки тех же связок доберёт таргетная
+         группировка пайплайна. Раньше проход стоил Set+разбор OE на каждую
+         строку каталога при любом, даже точечном, импорте. */
+      try { HVC.syncOeByKey(changedList); } catch (e) { console.warn('[UC] syncOeByKey:', e); }
       _mark('OE по связке');
       /* v12.9.7-mem: без изменённых строк пересобирать OE-группы не нужно. */
       if (changedTouched && $('#impOe').classList.contains('on') && (nothingChanged || smallDelta)) { if (prog) prog('группировка по OE-номерам…'); await rebuildGroups(); }
