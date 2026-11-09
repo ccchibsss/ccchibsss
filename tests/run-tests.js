@@ -38,6 +38,18 @@ assert.strictEqual(round(-313.635, 2), -313.64);
 assert.strictEqual(solveEcoInteger(15306, p => p * 0.785 - 11285.17), 14377);
 assert.strictEqual(solveEcoInteger(900, p => p * 0.8 - 700 - (p >= 1000 ? 500 : 0)), 875);
 const band = solveEcoInteger(100, p => (p >= 500 && p <= 600) ? 10 : -Math.abs(p - 550));
+// v12.9.74: «+ − +» ступенчатого тарифа — первое пересечение, не второе (регрессия аудита расчётов)
+assert.strictEqual(solveEcoInteger(1000, p => p * 0.5468438030438701 - 2294.911242553457 - (p >= 4612 ? 463.87214682245263 : 0)), 4197, 'первое пересечение при провале ступени');
+assert.strictEqual(solveEcoInteger(1000, p => p * 0.3085886478464066 - 1034.5393632233793 - (p >= 3972 ? 543.2384493496448 : 0)), 3353, 'полоса целиком внутри сегмента сетки');
+{ // решатель против полного перебора на случайных линейных/ступенчатых функциях
+  let seed = 42; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const brute = (f, cap) => { for (let p = 1; p <= cap; p++) if (f(p) >= 0) return p; return 10000000; };
+  for (let i = 0; i < 100; i++) {
+    const r = 0.3 + rnd() * 0.6, F = 100 + rnd() * 20000, at = 500 + Math.floor(rnd() * 5000), st = rnd() * 800;
+    const f = p => p * r - F - (p >= at ? st : 0);
+    assert.strictEqual(solveEcoInteger(1000, f), brute(f, 100000), 'solver != brute, случай ' + i);
+  }
+}
 assert(band >= 500 && band <= 600, 'интервальная прибыль должна находиться, получено ' + band);
 assert.strictEqual(solveEcoInteger(100, () => -5), 10000000, 'нет прибыли — CAP');
 
@@ -58,7 +70,7 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.72-client+econ-missing-note2'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.74-client+solver-first-crossing'), 'версия клиента обновлена');
 // v12.9.70: ошибка выгрузки не теряет данные
 assert(app.includes('async function exportGuard'), 'страж выгрузки');
 assert(app.includes('ensureCatalogSafeBeforeExport'), 'запись каталога на диск перед выгрузкой');
@@ -92,7 +104,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.72-client+econ-missing-note2'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.74-client+solver-first-crossing'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -132,7 +144,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.72-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.72-client+econ-missing-note2'), 'версия клиента обновлена');
+assert(app.includes('12.9.74-client+solver-first-crossing'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -167,9 +179,10 @@ assert(app.includes('12.9.72-client+econ-missing-note2'), 'версия клие
   assert(bad.el.innerHTML.includes('ставка комиссии не подтверждена'), 'расширенная сноска: неподтверждённая ставка');
   assert(bad.el.innerHTML.includes('% невыкупа не задан'), 'расширенная сноска: % невыкупа');
   assert(bad.el.innerHTML.includes('постоянные расходы не заданы'), 'расширенная сноска: постоянные расходы');
-  const good = mkCtx([{ price: 100, cost: 50, weight: 1, length: 10, width: 10, height: 10, sales: 5, category: 'Фильтры', fixed: 10, noBuyRateSource: 'SKU · импорт/проверено' }]);
+  assert(!bad.el.innerHTML.includes('нет продаж за месяц'), 'продажи за месяц не числятся недостающими: экономика на единицу');
+  const good = mkCtx([{ price: 100, cost: 50, weight: 1, length: 10, width: 10, height: 10, sales: 0, category: 'Фильтры', fixed: 10, noBuyRateSource: 'SKU · импорт/проверено' }]);
   good.c.renderEconMissingNote();
-  assert(good.el.innerHTML.includes('данные полны'), 'при полных данных сноска подтверждает полноту');
+  assert(good.el.innerHTML.includes('данные полны'), 'без продаж за месяц данные всё равно полны: расчёт на единицу');
   const empty = mkCtx([]);
   empty.c.renderEconMissingNote();
   assert(empty.el.style.display === 'none', 'при пустом каталоге сноска скрыта');

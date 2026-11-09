@@ -119,6 +119,15 @@
   нет категории для ставки комиссии, ставка не подтверждена (прибыль оценочная),
   не заданы обязательные расходы/логистика, не выбрана схема FBS/FBO,
   % невыкупа не задан или некорректен, постоянные расходы не заданы.
+  v12.9.73 — ПРОДАЖИ ЗА МЕСЯЦ УБРАНЫ ИЗ СНОСКИ НЕДОСТАЮЩИХ ДАННЫХ: экономика
+  считается на единицу товара (прибыль, маржа, безубыток, целевая цена), продажи
+  за месяц для этого не нужны и больше не числятся недостающими данными.
+  v12.9.74 — РЕШАТЕЛЬ ИЩЕТ ПЕРВОЕ ПЕРЕСЕЧЕНИЕ: при ступенчатом тарифе прибыль
+  может идти «+ − +» (положительна, провал на новой ступени логистики, снова
+  положительна); бисекция находила второе пересечение и завышала безубыточную
+  цену (контрольный пример: 5 045 вместо 4 197). Теперь сегментный скан с
+  точным проходом по целым ценам внутри скобки. Сверка: перебор 300 случайных
+  линейных/ступенчатых функций — 0 расхождений.
   v12.9.66 — ПЕРВЫЙ ФАЙЛ ГРУЗИТСЯ БЫСТРЕЕ. Замер по журналу показал, где уходят
   минуты: на прайсе 124 454 строки (122 930 SKU) импорт занимал 168 с, из них
   151 с — пересчёт конвейера, а в нём 70 с computeEconomics, 36 с типизации Ozon
@@ -13502,7 +13511,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.72-client+econ-missing-note2';
+const APP_VERSION = '12.9.74-client+solver-first-crossing';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -20146,6 +20155,40 @@ function solveEcoInteger(initial, metric) {
   };
   let startRoot = localRoot(start);
   if (startRoot !== null) return startRoot;
+  /* v12.9.74: первое пересечение нуля на отрезке при f(lo) < 0. Ступенчатый
+     тариф может дать «+ − +»: обычная бисекция находит второе пересечение и
+     завышает безубыточную цену. Ищем сегментным сканом с уменьшающимся шагом,
+     внутри скобки — точным проходом по целым ценам. */
+  /* Сканирование внутренности отрезка: положительная полоса ступенчатого
+     тарифа может целиком лежать между двумя отрицательными концами. */
+  const scanBand = (lo, hi) => {
+    if (evalAt(lo) >= 0) return lo;
+    const w = hi - lo; if (w <= 0) return null;
+    const step = w > 1000000 ? 25000 : w > 100000 ? 2500 : w > 10000 ? 250 : w > 1000 ? 25 : w > 256 ? 4 : 1;
+    let prev = lo;
+    for (let p = lo + step; ; p += step) {
+      const pp = Math.min(p, hi);
+      if (evalAt(pp) >= 0) return firstCrossing(prev, pp);
+      prev = pp;
+      if (pp >= hi) return null;
+    }
+  };
+  const firstCrossing = (lo, hi) => {
+    if (evalAt(lo) >= 0) return lo;
+    if (evalAt(hi) < 0) return null;
+    const w = hi - lo;
+    const step = w > 1000000 ? 25000 : w > 100000 ? 2500 : w > 10000 ? 250 : w > 1000 ? 25 : 1;
+    let prev = lo;
+    for (let p = lo + step; ; p += step) {
+      const pp = Math.min(p, hi);
+      if (evalAt(pp) >= 0) {
+        if (pp - prev <= 1) return pp;
+        return firstCrossing(prev, pp);
+      }
+      prev = pp;
+      if (pp >= hi) return null;
+    }
+  };
   /* v12.9.67: ступенчатые тарифы могут давать прибыль только в интервале цен.
      Грубый геометрический скан находит смену знака там, где монотонный поиск
      от стартовой цены её не видит; дальше работает обычный localRoot. */
@@ -20154,13 +20197,8 @@ function solveEcoInteger(initial, metric) {
     let prev = 0;
     for (const gp of grid) {
       if (gp === start) { prev = gp; continue; }
-      if (evalAt(gp) >= 0) {
-        const r = localRoot(gp);
-        if (r !== null) return r;
-        let lo = prev, hi = gp;
-        while (hi - lo > 1) { const mid = Math.floor((lo + hi) / 2); if (evalAt(mid) >= 0) hi = mid; else lo = mid; }
-        return hi;
-      }
+      const fc = scanBand(prev, gp);
+      if (fc !== null) return fc;
       prev = gp;
     }
   }
@@ -20194,30 +20232,19 @@ function solveEcoInteger(initial, metric) {
       lo = hi; step *= 2; hi = Math.min(CAP, lo + step);
     }
     if (evalAt(hi) < 0) {
-      /* v12.9.67: монотонный поиск не нашёл цены — ступенчатый тариф мог дать
-         прибыль только в узком интервале. Точный скан с растущим шагом
-         (только для этого редкого случая) ищет первую смену знака. */
-      const seg = [[0, 10000, 25], [10000, 100000, 250], [100000, 1000000, 2500], [1000000, CAP, 25000]];
-      let prevP = 0;
-      for (const [a, b, step] of seg) {
-        for (let pp = Math.max(a, step); pp <= b; pp += step) {
-          if (evalAt(pp) >= 0) {
-            let lo = prevP, hi2 = pp;
-            while (hi2 - lo > 1) { const mid = Math.floor((lo + hi2) / 2); if (evalAt(mid) >= 0) hi2 = mid; else lo = mid; }
-            return hi2;
-          }
-          prevP = pp;
-        }
+      /* v12.9.74: монотонный поиск не нашёл цены — ступенчатый тариф мог дать
+         прибыль только в узком интервале или по схеме «+ − +». Первое
+         пересечение ищем по всему диапазону сегментным сканом. */
+      for (const segHi of [10000, 100000, 1000000, CAP]) {
+        const fc = scanBand(segHi === 10000 ? 0 : segHi === 100000 ? 10000 : segHi === 1000000 ? 100000 : 1000000, segHi);
+        if (fc !== null) return fc;
       }
       return CAP;
     }
   }
-  let guard = 0;
-  while (hi - lo > 1 && guard++ < 40) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (evalAt(mid) >= 0) hi = mid; else lo = mid;
-  }
-  return hi;
+  /* v12.9.74: внутри скобки тоже возможно «+ − +» — первое пересечение, не бисекция. */
+  const fcFinal = firstCrossing(lo, hi);
+  return fcFinal === null ? hi : fcFinal;
 }
 
 function solveMarketplacePrices(evaluate, baseEco, targetMargin, discontinuityAt) {
@@ -21804,10 +21831,10 @@ function renderEconMissingNote() {
     price: 'нет ни цены продажи, ни себестоимости',
     cost: 'нет себестоимости',
     dims: 'нет весогабаритов (нужен вес и/или длина×ширина×высота)',
-    sales: 'нет продаж за месяц (нужны только для помесячной выручки/прибыли и ABC/XYZ)',
     tariff: 'нет подтверждённой ставки тарифа'
   };
-  const parts = r.missing.map(m =>
+  /* v12.9.73: продажи за месяц не нужны — экономика считается на единицу. */
+  const parts = r.missing.filter(m => m.key !== 'sales').map(m =>
     '<b style="color:#ffd98a">' + esc(labels[m.key] || m.key) + '</b> — ' + fmt(m.count) + ' SKU (' + m.pct + '%)' +
     (m.columns && m.columns.length ? ', догрузить: ' + esc(m.columns.join(', ')) : ''));
   /* v12.9.72: расширенный перечень — не только столбцы прайса, но и то, без
