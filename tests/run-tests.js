@@ -58,7 +58,7 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.72-client+econ-missing-note2'), 'версия клиента обновлена');
 // v12.9.70: ошибка выгрузки не теряет данные
 assert(app.includes('async function exportGuard'), 'страж выгрузки');
 assert(app.includes('ensureCatalogSafeBeforeExport'), 'запись каталога на диск перед выгрузкой');
@@ -92,7 +92,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.70-client+export-guard'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.72-client+econ-missing-note2'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -126,6 +126,53 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.70-cl
   assert.strictEqual(p2.category, 'Фильтры', 'категория заполнена');
   assert(/Артикул \+ Бренд/.test(p2._sources.category.file), 'по умолчанию категория — от пары Артикул+Бренд, не от OE: ' + p2._sources.category.file);
   assert.strictEqual(p2.tnved, '8421230000', 'ТН ВЭД заполнен из пары Артикул+Бренд');
+}
+
+// v12.9.71: сноска «чего не хватает для юнит-экономики» в разделе «Данные»
+assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
+assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
+assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
+assert(app.includes('12.9.72-client+econ-missing-note2'), 'версия клиента обновлена');
+{
+  const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
+  const src = specSrc
+    + grab(/function econSpecOf\(key\)[^\n]*\n/)
+    + grab(/function econReadiness\(rows\) \{[\s\S]*?\n\}\n/)
+    + grab(/function renderEconMissingNote\(\) \{[\s\S]*?\n\}\n/);
+  const mkCtx = rows => {
+    const el = { style: {}, innerHTML: '' };
+    const c = {
+      S: { rows, settings: { activeMarketplace: 'WB' }, tariffs: {} },
+      document: { getElementById: () => el },
+      num: v => { const n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) ? n : 0; },
+      fmt: v => String(v),
+      esc: s => String(s == null ? '' : s),
+      ozonActiveScheme: () => 'FBS', ozonRoutePresent: () => true
+    };
+    c.globalThis = c; vm.createContext(c);
+    vm.runInContext(src + '\nthis.renderEconMissingNote=renderEconMissingNote;', c);
+    return { c, el };
+  };
+  const bad = mkCtx([
+    { price: 100, cost: 50, weight: 1, length: 10, width: 10, height: 10, sales: 5, category: 'Фильтры', fixed: 10, noBuyRateSource: 'SKU · импорт/проверено' },
+    { price: 0, cost: 0, weight: 0, length: 0, width: 0, height: 0, sales: 0, tariffMissing: true, category: '', fixed: 0,
+      priceInputsIncomplete: true, priceInputsReason: 'ставка Ozon не подтверждена', noBuyRateSource: 'Общая настройка · проверьте по площадке' }
+  ]);
+  bad.c.renderEconMissingNote();
+  assert(bad.el.style.display === 'block', 'сноска видна при неполных данных');
+  assert(bad.el.innerHTML.includes('Для полной юнит-экономики не хватает данных'), 'сноска перечисляет недостающее');
+  assert(bad.el.innerHTML.includes('нет себестоимости') && bad.el.innerHTML.includes('1 SKU (50%)'), 'счётчики недостающих данных верны: ' + bad.el.innerHTML);
+  assert(bad.el.innerHTML.includes('Себестоимость'), 'указаны столбцы для догрузки');
+  assert(bad.el.innerHTML.includes('нет категории для ставки комиссии'), 'расширенная сноска: категория для ставки');
+  assert(bad.el.innerHTML.includes('ставка комиссии не подтверждена'), 'расширенная сноска: неподтверждённая ставка');
+  assert(bad.el.innerHTML.includes('% невыкупа не задан'), 'расширенная сноска: % невыкупа');
+  assert(bad.el.innerHTML.includes('постоянные расходы не заданы'), 'расширенная сноска: постоянные расходы');
+  const good = mkCtx([{ price: 100, cost: 50, weight: 1, length: 10, width: 10, height: 10, sales: 5, category: 'Фильтры', fixed: 10, noBuyRateSource: 'SKU · импорт/проверено' }]);
+  good.c.renderEconMissingNote();
+  assert(good.el.innerHTML.includes('данные полны'), 'при полных данных сноска подтверждает полноту');
+  const empty = mkCtx([]);
+  empty.c.renderEconMissingNote();
+  assert(empty.el.style.display === 'none', 'при пустом каталоге сноска скрыта');
 }
 
 console.log('OK: все тесты пройдены (' + rows.length + ' строк CSV пересчитано)');
