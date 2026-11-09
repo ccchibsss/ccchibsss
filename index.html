@@ -122,6 +122,15 @@
   v12.9.73 — ПРОДАЖИ ЗА МЕСЯЦ УБРАНЫ ИЗ СНОСКИ НЕДОСТАЮЩИХ ДАННЫХ: экономика
   считается на единицу товара (прибыль, маржа, безубыток, целевая цена), продажи
   за месяц для этого не нужны и больше не числятся недостающими данными.
+  v12.9.76 — ПАЙПЛАЙН НЕ ТРОГАЕТ НЕИЗМЕНЁННЫЕ СТРОКИ. Если набор изменённых
+  строк известен (импорт любого размера, автоисправления, точечные правки),
+  пайплайн больше не упаковывает и не нормализует остальные строки каталога:
+  раньше это делалось при дельте >= 2 % (сотни тысяч лишних упаковок и
+  нормализаций на повторных прайсах). Неизменённая строка уже упакована прошлым
+  полным проходом и сохраняет свои расчётные поля; карантинная проверка для неё
+  сохранена. Таргетная группировка OE (12.9.75) распространена с малой дельты
+  на любой импорт с известным списком изменений. Числа расчёта не меняются:
+  тяжёлая ветка для изменённых строк выполняется в прежнем объёме.
   v12.9.75 — ИМПОРТ: МЕНЬШЕ ПОЛНЫХ ПРОХОДОВ ПО КАТАЛОГУ. При применении
   импорта два этапа повторяли работу по всем SKU, хотя менялась лишь дельта:
   (1) syncOeByKey() после rebuildIndex (который сам включает sync по всему
@@ -13522,7 +13531,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.75-client+import-delta-oe';
+const APP_VERSION = '12.9.76-client+pipeline-unchanged-skip';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21244,7 +21253,7 @@ function runPipeline(full, options) {
     /* v12.9.75: при малой дельте полная группировка OE по каталогу заменяется
        таргетной — только связки изменённых строк (options.changedList). Смысл
        тот же: OE внутри связки зависят только от её строк. */
-    const _grpOnlyKeys = (deltaFast && Array.isArray(options.changedList) && options.changedList.length && typeof HVC !== 'undefined')
+    const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList) && options.changedList.length && typeof HVC !== 'undefined')
       ? new Set(options.changedList.map(p => { try { return HVC.keyOf(p); } catch (e) { return ''; } }).filter(k => k && k !== '|'))
       : null;
     if (!preserveView && !(deltaFast && options.skipGroups) && typeof HVC !== 'undefined') { try { HVC.groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys); } catch (e) { console.warn('[UC] groupOeByKey:', e); } }
@@ -21259,7 +21268,12 @@ function runPipeline(full, options) {
          упаковывается ДО расчёта, а не после него. */
       for (let i = start; i < end; i++) {
         const old = S.rows[i];
-        if (deltaFast && !changedRows.has(old)) continue;
+        /* v12.9.76: пропускаем неизменённые строки при ЛЮБОМ известном наборе
+           изменений, а не только при малой дельте. Неизменённая строка уже была
+           упакована прошлым полным проходом (загрузка/первый пересчёт), а её
+           расчётные поля с тех пор никто не трогал — повторная упаковка и
+           интернирование были чистым расходом на импортах с дельтой >= 2 %. */
+        if (changedRows && !changedRows.has(old)) continue;
         const compact = compactRowNumeric(internRowStrings(old));
         if (compact !== old) {
           compactReplacement.set(old, compact);
@@ -21270,6 +21284,10 @@ function runPipeline(full, options) {
       for (let idx = start; idx < end; idx++) {
         const p = S.rows[idx];
         if (deltaFast && !isChangedRow(p)) continue;
+        /* v12.9.76: неизменённая строка — только карантинная проверка, без
+           повторной нормализации артикула/OE и гварда дат: её поля не менялись
+           с прошлого прохода, где это уже сделано. */
+        if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p); continue; }
         try {
           /* Только дешёвая нормализация ключевых колонок. Тяжёлое HVC-обогащение
              выполняется один раз после импорта или по кнопке «Обогатить сейчас»,
@@ -21281,9 +21299,6 @@ function runPipeline(full, options) {
            * при следующем сохранении в IndexedDB. */
           for (const nk of NUMERIC_DATE_GUARD) { if (p[nk] instanceof Date) p[nk] = 0; }
           if (typeof HVC !== 'undefined') HVC.ensureNorm(p);
-          /* v12.9.7-mem: untouched rows retain their previous policy results. */
-          const skipHeavy = changedRows ? !isChangedRow(p) : false;
-          if (skipHeavy) { if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p); continue; }
           p.excluded = false;
           p.deletePending = false;
           p.policyAction = '';
@@ -26856,7 +26871,13 @@ const Import = {
       }
       _mark('автосверка OE');
       if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.renderAutoOeSummary();
-      UI.fillFilters(); Dash.render(); UE.render();
+      UI.fillFilters();
+      /* v12.9.76: дашборд и юнит-экономику перерисовываем только если раздел
+         сейчас на экране. Скрытый раздел всё равно перерисует UI.go при входе,
+         а полный Dash.agg + UE.render по каталогу после каждого импорта —
+         секунды впустую. */
+      if (document.getElementById('v-dashboard') && document.getElementById('v-dashboard').classList.contains('active')) Dash.render();
+      if (document.getElementById('v-unit') && document.getElementById('v-unit').classList.contains('active')) UE.render();
       if (!changedTouched) { Table.paint(); }   /* v12.9.7-mem: вид не менялся */
       $('#mImport').classList.remove('on');
       /* Итог по времени: видно, какой этап «съел» минуты. */
