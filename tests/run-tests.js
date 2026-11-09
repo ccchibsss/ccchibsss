@@ -70,7 +70,7 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.78-client+delta-anomaly-fullcalc-trigger'), 'версия клиента обновлена');
 // v12.9.70: ошибка выгрузки не теряет данные
 assert(app.includes('async function exportGuard'), 'страж выгрузки');
 assert(app.includes('ensureCatalogSafeBeforeExport'), 'запись каталога на диск перед выгрузкой');
@@ -104,7 +104,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.78-client+delta-anomaly-fullcalc-trigger'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -144,7 +144,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.77-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
+assert(app.includes('12.9.78-client+delta-anomaly-fullcalc-trigger'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -231,13 +231,13 @@ console.log('OK: все тесты пройдены (' + rows.length + ' стр�
 // v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
 assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
 assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
-assert(app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
+assert(app.includes('12.9.78-client+delta-anomaly-fullcalc-trigger'), 'версия клиента обновлена');
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
 assert(app.includes('if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
-assert(app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
+assert(app.includes('12.9.78-client+delta-anomaly-fullcalc-trigger'), 'версия клиента обновлена');
 
 assert(app.includes("classList.contains('active')) UE.render()"), 'импорт: UE.render только для активного раздела');
 assert(app.includes("classList.contains('active')) Dash.render()"), 'импорт: Dash.render только для активного раздела');
@@ -328,4 +328,57 @@ assert(app.includes("classList.contains('active')) Dash.render()"), 'импор�
 assert(app.includes('HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined)'), 'импорт: таргетный rebuildIndex');
 assert(app.includes('dedupeCatalog(_dedupeKeys)'), 'импорт: таргетный dedupe после первого полного');
 assert(app.includes('persistChangedOnly: changedTouched > 0 && !dedup'), 'импорт: запись только дельты, если не было слияний');
-assert(app.includes('12.9.77-client+targeted-rebuild-dedupe-persist'), 'версия клиента обновлена');
+assert(app.includes('12.9.78-client+delta-anomaly-fullcalc-trigger'), 'версия клиента обновлена');
+
+// v12.9.78: автосверка аномалий находит донора через реестр byOe (функционально, настоящий AnomalyOE+DimPolicy)
+;(async () => {
+  const c5 = { console, Set, Map, WeakMap, WeakSet, JSON, Math, Number, String, Array, Object, Date, RegExp, Error, Promise, performance, setTimeout,
+    normArticle: s => String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9А-ЯЁ]/g, ''),
+    num: v => { const n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) ? n : 0; },
+    fmt: v => String(v), round: (v, d = 2) => { const p = 10 ** d; return Math.round(v * p) / p; },
+    nowISO: () => '2026-01-01', productVolumeIsExplicit: () => false,
+    Toast: { info() {}, warn() {}, err() {}, ok() {} },
+    STD: [{ k: 'weight', n: 'Вес, кг' }, { k: 'length', n: 'Длина, см' }, { k: 'width', n: 'Ширина, см' }, { k: 'height', n: 'Высота, см' }],
+    S: { rows: [], catalogVersion: 0, settings: {} },
+    HVC: { oe: new Map(), byOe: new Map(), byArt: new Map(), parts: new Map(), cross: new Map(), ozonRevision: 0 },
+    AnomalyDetector: { found: [], log: [], renderLog() {}, save() {}, evaluate: () => ({ issues: [] }), getLimit: () => ({ category: '', maxW: 0, maxL: 0, maxVol: 0 }), signature: () => 'sig' },
+    runPipeline: async () => 0,
+    withProgress: async (t, s2, fn) => fn(() => {}) };
+  c5.globalThis = c5;
+  c5.codeList = v => { const out = [], seen = new Set(); for (const part of (Array.isArray(v) ? v : [v])) for (const x of String(part == null ? '' : part).split(/[\/;,|]+/)) { const t = x.trim(); if (t && !seen.has(t)) { seen.add(t); out.push(t); } } return out; };
+  vm.createContext(c5);
+  vm.runInContext(grab(/const DimPolicy = \{[\s\S]*?\n\};\n/) + grab(/const AnomalyOE = \{[\s\S]*?\n\};\n/) + '\nthis.AnomalyOE=AnomalyOE;', c5);
+  const A = c5.AnomalyOE; A.render = () => {};
+  const T = { article: 'T1', brand: 'B', oe_numbers: 'OE1', oe_list: '', weight: 0, length: 0, width: 0, height: 0, dimensionAnomalyBlocked: true, category: 'Фильтры' };
+  const D = { article: 'D1', brand: 'B', oe_numbers: 'OE1', oe_list: '', weight: 1, length: 10, width: 5, height: 5, category: 'Фильтры',
+    _dimensionAutoEvidence: { file: 'dims.csv', row: 7, identity: 'D1|B', weight: 1, length: 10, width: 5, height: 5, entries: [{ code: 'OE1' }] } };
+  const U = { article: 'U1', brand: 'Z', oe_numbers: 'OE9', oe_list: '', weight: 2, length: 20, width: 6, height: 6, category: 'Фильтры' };
+  c5.S.rows = [T, D, U];
+  c5.HVC.byOe.set('OE1', new Set(['D1|B'])); c5.HVC.byArt.set('D1|B', new Set(['OE1'])); c5.HVC.byArt.set('T1|B', new Set(['OE1']));
+  c5.AnomalyDetector.found = [{ p: T }];
+  const res = await A.find({ automatic: true });
+  assert.strictEqual(res.checked, 1, 'автосверка: проверена одна цель');
+  assert.ok(A.preview[0].choice, 'автосверка: донор найден через реестр byOe, без прохода по каталогу');
+  assert.strictEqual(T.length, 10, 'автосверка: габариты донора применены');
+  assert.ok(T._dimensionOeReview, 'автосверка: строка помечена к проверке упаковки');
+})().catch(e => { console.error(e); process.exit(1); });
+// v12.9.78: триггер полного пересчёта по отпечатку глобальных параметров
+{
+  const store = new Map();
+  const c6 = { S: { settings: { ozonCommissionPct: 14, ozonLogisticsManual: 0, gasUrl: 'x' }, tariffs: { fixed: 1000, list: [1, 2] }, cats: [{}], rules: [], excs: [] },
+    num: v => { const n = parseFloat(v); return isFinite(n) ? n : 0; },
+    lsGet: k => store.get(k) || null, lsSet: (k, v) => store.set(k, v) };
+  vm.createContext(c6);
+  vm.runInContext(grab(/function globalParamsFp\(\) \{[\s\S]*?\n\}\nfunction fullRecalcStale\(\) \{[\s\S]*?\n\}\n/) + '\nthis.globalParamsFp=globalParamsFp; this.fullRecalcStale=fullRecalcStale;', c6);
+  assert.strictEqual(c6.fullRecalcStale(), false, 'нет сохранённого отпечатка — не устарело');
+  c6.lsSetRef = null; store.set('uc.fullCalcFp', c6.globalParamsFp());
+  assert.strictEqual(c6.fullRecalcStale(), false, 'отпечаток актуален — не устарело');
+  c6.S.settings.ozonCommissionPct = 20;
+  assert.strictEqual(c6.fullRecalcStale(), true, 'ставка изменилась после полного пересчёта — устарело');
+  c6.S.settings.ozonCommissionPct = 14; c6.S.settings.gasUrl = 'другой';
+  assert.strictEqual(c6.fullRecalcStale(), false, 'неэкономическая настройка триггер не дёргает');
+}
+assert(app.includes('const donorRows=[];'), 'автосверка: отбор доноров по реестру');
+assert(app.includes("lsSet('uc.fullCalcFp', globalParamsFp())"), 'полный пересчёт фиксирует отпечаток параметров');
+assert(app.includes('профиль дельты: изменено строк'), 'журнал импорта: профиль дельты');
+assert(app.includes('12.9.78-client+delta-anomaly-fullcalc-trigger'), 'версия клиента обновлена');
