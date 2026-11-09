@@ -122,6 +122,16 @@
   v12.9.73 — ПРОДАЖИ ЗА МЕСЯЦ УБРАНЫ ИЗ СНОСКИ НЕДОСТАЮЩИХ ДАННЫХ: экономика
   считается на единицу товара (прибыль, маржа, безубыток, целевая цена), продажи
   за месяц для этого не нужны и больше не числятся недостающими данными.
+  v12.9.78 — ДЕЛЬТА-РЕЖИМ ДОВЕДЁН ДО КОНЦА. (1) Автосверка аномалий OE
+  собирает доноров через реестр HVC.byOe и идентичности целей, а не проходом
+  по всему каталогу с разбором OE каждой строки. (2) Триггер полного
+  пересчёта: отпечаток глобальных параметров (ставки, логистика, налоги,
+  постоянные расходы, словарь категорий, правила) запоминается при полном
+  пересчёте; если параметры изменились, а пересчёт был только дельтой,
+  сноска недостающих данных честно предупреждает, что цифры неизменённых
+  строк могут устареть (доля постоянных расходов на единицу зависит от
+  числа SKU и дельтой не обновится). (3) В консоль импорта добавлен профиль
+  дельты: изменено строк / всего в каталоге / % / новых SKU.
   v12.9.77 — ТАРГЕТНЫЕ REBUILDINDEX, DEDUPE И ЗАПИСЬ ДЕЛЬТЫ. (1) rebuildIndex
   при импорте перестраивает OE-индекс только по связкам строк файла: импорт
   лишь добавляет/сливает OE, поэтому прочие «Группы артикулов» не меняются
@@ -13541,7 +13551,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.77-client+targeted-rebuild-dedupe-persist';
+const APP_VERSION = '12.9.78-client+delta-anomaly-fullcalc-trigger';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21217,6 +21227,27 @@ function tariffFor(p, ignoreOffer) {
 }
 /** Неблокирующая пауза — отдаём управление браузеру между чанками (та же техника, что и в экспорте). */
 const _pipelineYield = () => new Promise(r => setTimeout(r, 0));
+/* v12.9.78: отпечаток ГЛОБАЛЬНЫХ параметров экономики (настройки ставок/
+   логистики/налогов, тарифы, словарь категорий, правила). Дельта-пересчёт
+   импорта честно не обновляет неизменённые строки при смене этих параметров
+   (например, доля постоянных расходов на единицу зависит от числа SKU),
+   поэтому смена отпечатка после последнего ПОЛНОГО пересчёта показывается
+   пользователю, а не маскируется устаревшими цифрами. */
+function globalParamsFp() {
+  try {
+    const st = (typeof S !== 'undefined' && S.settings) || {};
+    const eco = {};
+    for (const k of Object.keys(st)) if (/tariff|comm|logist|tax|fixed|fulfill|scheme|margin|markup|fbs|fbo|storage|return|acquir|boost|pack|delivery|lastmile|processing|handover|courier|pvz/i.test(k)) eco[k] = st[k];
+    return JSON.stringify([eco, num(S.tariffs && S.tariffs.fixed), (S.tariffs && S.tariffs.list || []).length,
+      (S.cats || []).length, (S.rules || []).length, (S.excs || []).length]);
+  } catch (e) { return ''; }
+}
+function fullRecalcStale() {
+  try {
+    const last = lsGet('uc.fullCalcFp'); if (!last) return false;
+    const now = globalParamsFp(); return !!now && now !== last;
+  } catch (e) { return false; }
+}
 function runPipeline(full, options) {
   options = options || {};
   /* v12.9.54: пока пайплайн идёт, воркер фильтра не освобождаем — иначе к концу
@@ -21420,6 +21451,9 @@ function runPipeline(full, options) {
          Расчётные поля обновлены в памяти и пересчитаются при следующем открытии. */
       if (prog) prog(options.persistMessage || 'пересчёт завершён — кэш при старте не переписываем'); _step(96);
     }
+    /* v12.9.78: полный проход (без набора изменённых строк) — фиксируем
+       отпечаток глобальных параметров, к которому относятся цифры каталога. */
+    if (!changedRows) { try { lsSet('uc.fullCalcFp', globalParamsFp()); } catch (e) { } }
     const tEnd = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const elapsedMs = Math.max(1, Math.round(tEnd - tStart));
     const speedSkuSec = Math.round(total / (elapsedMs / 1000));
@@ -21898,6 +21932,10 @@ function renderEconMissingNote() {
   addExtra('постоянные расходы не заданы — помесячная прибыль завышена', num(S.tariffs && S.tariffs.fixed) > 0 ? 0 : cnt(p => !(num(p.fixed) > 0)), '; поле «Фикс» у SKU или общие расходы в тарифах');
   for (const s of (r.settingsMissing || []))
     parts.push('<b style="color:#ffd98a">' + esc(s.label) + '</b> — ' + fmt(s.count) + ' SKU; задаётся: ' + esc(s.where) + ' (' + esc(s.effect) + ')');
+  /* v12.9.78: глобальные параметры изменились после последнего полного
+     пересчёта — цифры неизменённых строк могли устареть. */
+  if (typeof fullRecalcStale === 'function' && fullRecalcStale())
+    parts.push('<b style="color:#ffd98a">глобальные параметры (тарифы/настройки/словарь) изменились после последнего полного пересчёта</b> — цифры неизменённых строк могут быть устаревшими; выполните «Пересчёт» по всему каталогу');
   el.style.display = 'block';
   el.innerHTML = parts.length
     ? '<i class="fa-solid fa-circle-info" style="color:#5c9dff"></i> <b>Для полной юнит-экономики не хватает данных:</b> ' + parts.join(' · ') +
@@ -26941,6 +26979,8 @@ const Import = {
         .sort((a, b) => b[1] - a[1])
         .map(([k, ms]) => k + ' ' + (ms >= 1000 ? (ms / 1000).toFixed(1).replace('.', ',') + ' с' : Math.round(ms) + ' мс'))
         .join(' · ');
+      console.info('[UC] импорт · профиль дельты: изменено строк ' + fmt(changedTouched) + ' из каталога ' + fmt(S.rows.length) +
+        ' (' + (S.rows.length ? Math.round(1000 * changedTouched / S.rows.length) / 10 : 0) + '%)' + (dedup ? ' · объединено дублей ' + fmt(dedup) : '') + ' · новых SKU ' + fmt(added));
       console.info('[UC] импорт: ' + fmt(_stageTotal) + ' мс всего' + (_stageText ? ' · ' + _stageText : '') +
         ' · кэш ' + Math.round(performance.memory ? performance.memory.usedJSHeapSize / 1048576 : 0) + ' МБ' +
         (performance.memory && performance.memory.jsHeapSizeLimit ? ' (' + Math.round(100 * performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit) + '%)' : '') +
@@ -41821,9 +41861,23 @@ const AnomalyOE = {
           if(!list){byIdentity.set(entry.identity,[entry]);return;}
           if(list.length<MAX_IDENT && !list.some(x=>x.ref===entry.ref && x.ekey===entry.ekey)) list.push(entry);
         };
-        for(let i=0;i<rows.length;i++) {
+        /* v12.9.78: доноры — не проходом по всему каталогу с разбором OE каждой
+           строки, а по реестру: связки-держатели нужных OE (HVC.byOe) плюс
+           идентичности целей. По каталогу остаётся лёгкий отбор по ключу
+           связки; строки со служебными OE-доказательствами импорта добавляются
+           явно — их коды могут не попадать в byOe. Порядок строк каталога и
+           логика владельцев/кандидатов ниже не меняются. */
+        const donorKeys=new Set(targetIdentities);
+        for(const code of need){ const holders=HVC.byOe.get(normArticle(code)); if(holders) for(const k of holders) donorKeys.add(k); }
+        const donorRows=[];
+        for(let i=0;i<rows.length;i++){
+          const q=rows[i]; if(!q) continue;
+          if(donorKeys.has(this.key(q)) || q._dimensionAutoOeEvidence) donorRows.push(q);
+          if(i && i%50000===0) await new Promise(r=>setTimeout(r,0));
+        }
+        for(let i=0;i<donorRows.length;i++) {
           if(i && i%500===0 && stale()) throw new Error('Поиск отменён: каталог изменился. Запустите его снова.');
-          const q=rows[i], identity=q && this.key(q);
+          const q=donorRows[i], identity=q && this.key(q);
           const codes=q ? this.codes(q,automatic) : [], matches=codes.filter(x=>need.has(x));
           /* Однозначность владельца проверяем только для нужных артикулов и
              доноров по искомым OE, а не для всего каталога. */
@@ -41844,7 +41898,7 @@ const AnomalyOE = {
               if(complete) addIdentity(entry);
             }
           }
-          if(i && i%3000===0){ if(prog)prog(`Каталог: ${fmt(i)} / ${fmt(rows.length)}`); await new Promise(r=>setTimeout(r,0));
+          if(i && i%3000===0){ if(prog)prog(`Каталог: доноры ${fmt(i)} / ${fmt(donorRows.length)}`); await new Promise(r=>setTimeout(r,0));
             if(S.rows!==rows || (S.catalogVersion||0)!==revision || (HVC.ozonRevision||0)!==hvcRevision) throw new Error('Каталог изменился во время поиска. Запустите поиск снова.'); }
         }
         /* Реестр parts исторически дозаполняется ПО ПОЛЯМ. Используем только
