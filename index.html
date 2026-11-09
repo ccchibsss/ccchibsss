@@ -13551,7 +13551,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.84-client+enrich-keys-oe-analog';
+const APP_VERSION = '12.9.85-client+enrich-oe-key-only';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26404,33 +26404,34 @@ const Import = {
       const enrichOnlyRef = enrichOnlyOn && S.rows.length > 0;
       let enrichOnlySkipped = 0;
       const keyMode = S.settings.keyMode;
-      /* v12.9.84: расширенный поиск SKU прайса для обогащения. Если артикул файла
-         не совпал, ищем уникальный SKU прайса по OE-номерам файла, затем по
-         аналогам/группе артикулов прайса. Индекс строится один раз лениво по
-         строкам, которые были в каталоге на старте импорта (текущий прайс);
-         неоднозначные OE/аналоги (несколько SKU) не используются. */
+      /* v12.9.84 → v12.9.85: расширенный поиск SKU прайса для обогащения — только
+         два ключа: артикул+бренд (выше) и OE-номер. Если артикул файла не совпал,
+         ищем уникальный SKU прайса по OE-номерам файла. Поиск по аналогам не
+         используется. Индекс OE строится один раз лениво по строкам каталога на
+         старте импорта (текущий прайс); OE, принадлежащий нескольким SKU,
+         не используется (неоднозначно). */
       const oeMaps = mapped.filter(x => ['oe_numbers','oe_list','oe'].includes(x.target));
-      let oeAnalogIdx = null;
+      let oeIdx = null;
       const AMBIG = {};
-      const findByOeAnalog = (r, artNorm) => {
-        if (!oeAnalogIdx) {
-          const oeMap = new Map(), analogMap = new Map();
-          const put = (map, k, row) => { if (!k) return; const prev = map.get(k); if (prev && prev !== row) map.set(k, AMBIG); else map.set(k, row); };
+      const findByOe = r => {
+        if (!oeMaps.length) return null;
+        if (!oeIdx) {
+          oeIdx = new Map();
           for (const row of S.rows) {
-            for (const oe of codeList(mergeCodeLists(row.oe_numbers, row.oe_list))) put(oeMap, HVC.normalizeKey(oe), row);
-            const self = normArticle(row.article);
-            for (const a of codeList(mergeCodeLists(row.analog_list, row.group_articles))) { const k = normArticle(a); if (k && k !== self) put(analogMap, k, row); }
+            for (const oe of codeList(mergeCodeLists(row.oe_numbers, row.oe_list))) {
+              const k = HVC.normalizeKey(oe); if (!k) continue;
+              const prev = oeIdx.get(k);
+              if (prev && prev !== row) oeIdx.set(k, AMBIG); else oeIdx.set(k, row);
+            }
           }
-          oeAnalogIdx = { oeMap, analogMap };
         }
         for (const cm of oeMaps) {
           for (const oe of codeList(r[cm.col])) {
-            const hit = oeAnalogIdx.oeMap.get(HVC.normalizeKey(oe));
+            const hit = oeIdx.get(HVC.normalizeKey(oe));
             if (hit && hit !== AMBIG) return hit;
           }
         }
-        const byArt = oeAnalogIdx.analogMap.get(artNorm);
-        return byArt && byArt !== AMBIG ? byArt : null;
+        return null;
       };
       // Detect collisions in the whole file first: do not import the first variant
       // before discovering another literal with the same normalized key.
@@ -26558,10 +26559,10 @@ const Import = {
             p = idxArt.get(art);
             if (p) mergedByArticle++;
           }
-          /* Расширенные ключи: уникальный OE или аналог текущего прайса. */
+          /* Расширенный ключ: уникальный OE текущего прайса. */
           let matchedByKey = false;
           if (!p) {
-            const hit = findByOeAnalog(r, art);
+            const hit = findByOe(r);
             if (hit) { p = hit; matchedByKey = true; matchedByOeAnalog++; }
           }
           const existing = !!p;
@@ -27030,7 +27031,7 @@ const Import = {
         ' · на SKU ' + Math.round((performance.memory ? performance.memory.usedJSHeapSize : 0) / Math.max(1, S.rows.length) / 1024) + ' КБ');
       Toast[S._cacheWriteError || S._volatileStorage ? 'warn' : 'ok'](S._cacheWriteError || S._volatileStorage ? 'Импорт в памяти — сохранение не завершено' : 'Импорт завершён', `новых ${fmt(added)} · обновлено ${fmt(updated)} · пропущено ${fmt(skipped)} · колонок ${enabled.length}` +
         (mergedByArticle ? ` · сопоставлено по артикулу (без бренда в файле): ${fmt(mergedByArticle)}` : '') +
-        (matchedByOeAnalog ? ` · сопоставлено по OE/аналогам прайса: ${fmt(matchedByOeAnalog)}` : '') +
+        (matchedByOeAnalog ? ` · сопоставлено по OE прайса: ${fmt(matchedByOeAnalog)}` : '') +
         (dedup ? ` · объединено дублей: ${fmt(dedup)}` : '') + ` · всего SKU: ${fmt(S.rows.length)}` +
         (S.lastOeAutoCheck ? (S.lastOeAutoCheck.error ? ' · автосверка OE прервана' : ` · авто-OE на проверку: ${fmt(S.lastOeAutoCheck.changed || 0)}, без замены: ${fmt(S.lastOeAutoCheck.noChoice || 0)}`) : ' · автосверка OE выключена') +
         (_stageText ? ` · время: ${_stageText}` : '') +
