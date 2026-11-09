@@ -111,6 +111,14 @@
   любой ошибке выгрузки каталог в памяти не трогается, таблица перерисовывается и
   пользователь видит «данные НЕ потеряны: N SKU». Прямые кнопки Ozon CSV/XLSX/
   калькулятора, раньше не имевшие перехвата ошибок, обёрнуты тем же стражем.
+  v12.9.71 — СНОСКА «ЧЕГО НЕ ХВАТАЕТ ДЛЯ ЮНИТ-ЭКОНОМИКИ» в разделе «Данные»:
+  под таблицей каталога перечисляется, каких входных данных не хватает и у
+  скольких SKU (себестоимость, весогабариты, цена, ставка тарифа, продажи,
+  логистика Ozon), со столбцами для догрузки. Источник — econReadiness().
+  v12.9.72 — СНОСКА О НЕДОСТАЮЩИХ ДАННЫХ РАСШИРЕНА: кроме столбцов прайса —
+  нет категории для ставки комиссии, ставка не подтверждена (прибыль оценочная),
+  не заданы обязательные расходы/логистика, не выбрана схема FBS/FBO,
+  % невыкупа не задан или некорректен, постоянные расходы не заданы.
   v12.9.66 — ПЕРВЫЙ ФАЙЛ ГРУЗИТСЯ БЫСТРЕЕ. Замер по журналу показал, где уходят
   минуты: на прайсе 124 454 строки (122 930 SKU) импорт занимал 168 с, из них
   151 с — пересчёт конвейера, а в нём 70 с computeEconomics, 36 с типизации Ozon
@@ -7155,6 +7163,7 @@ html { -webkit-text-size-adjust: 100%; }
       <button type="button" class="btn sm gh" id="btnExportSel"><i class="fa-solid fa-file-export"></i> Экспорт выделенных</button>
     </div>
   </div>
+  <div class="hint" id="econMissingNote" style="display:none;margin-top:10px;line-height:1.7;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#131830"></div>
 </section>
 
 <!-- Помощник строится поверх существующего каталога и единой модели Ozon. -->
@@ -13493,7 +13502,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.70-client+export-guard';
+const APP_VERSION = '12.9.72-client+econ-missing-note2';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21784,6 +21793,44 @@ function econReadiness(rows) {
        и габаритов число будет заведомо неверным, а не просто пустым */
     canComputeProfit: (n - noCost) > 0 && (n - noDims) > 0 };
 }
+/* v12.9.71: сноска под таблицей каталога — каких данных не хватает для
+   юнит-экономики и у скольких SKU. Считается по всему каталогу. */
+function renderEconMissingNote() {
+  const el = document.getElementById('econMissingNote'); if (!el) return;
+  const rows = S.rows || [];
+  if (!rows.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const r = econReadiness(rows);
+  const labels = {
+    price: 'нет ни цены продажи, ни себестоимости',
+    cost: 'нет себестоимости',
+    dims: 'нет весогабаритов (нужен вес и/или длина×ширина×высота)',
+    sales: 'нет продаж за месяц (нужны только для помесячной выручки/прибыли и ABC/XYZ)',
+    tariff: 'нет подтверждённой ставки тарифа'
+  };
+  const parts = r.missing.map(m =>
+    '<b style="color:#ffd98a">' + esc(labels[m.key] || m.key) + '</b> — ' + fmt(m.count) + ' SKU (' + m.pct + '%)' +
+    (m.columns && m.columns.length ? ', догрузить: ' + esc(m.columns.join(', ')) : ''));
+  /* v12.9.72: расширенный перечень — не только столбцы прайса, но и то, без
+     чего ставка/прибыль остаются оценкой или расчёт приостановлен. */
+  const cnt = pred => rows.reduce((n, p) => n + (pred(p) ? 1 : 0), 0);
+  const pctOf = c => rows.length ? Math.round(c / rows.length * 100) : 0;
+  const addExtra = (label, count, hint) => { if (count > 0) parts.push('<b style="color:#ffd98a">' + esc(label) + '</b> — ' + fmt(count) + ' SKU (' + pctOf(count) + '%)' + (hint || '')); };
+  addExtra('нет категории для ставки комиссии', cnt(p => !String(p.category || '').trim() || /^без категории$/i.test(String(p.category).trim())), ', догрузить: Категория');
+  addExtra('ставка комиссии не подтверждена — прибыль оценочная', cnt(p => !!p.priceInputsIncomplete && /ставк/i.test(String(p.priceInputsReason || ''))), '; подтвердите ставку в разделе тарифов');
+  addExtra('не заданы обязательные расходы или логистика схемы', cnt(p => !!p.priceInputsIncomplete && /не заданы обязательные расходы/i.test(String(p.priceInputsReason || ''))), '; проверьте настройки схемы доставки');
+  addExtra('не выбрана схема FBS/FBO — расчёт приостановлен', cnt(p => !!p.modelReviewRequired), '; задаётся в настройках маркетплейса');
+  addExtra('некорректный % невыкупа (100%) — цена и прибыль не определены', cnt(p => !!p.noBuyInconsistent), ', догрузить: Процент невыкупа');
+  addExtra('% невыкупа не задан (ни у SKU, ни у категории — берётся общая настройка)', cnt(p => String(p.noBuyRateSource || '').indexOf('Общая настройка') === 0), ', догрузить: Процент невыкупа');
+  addExtra('постоянные расходы не заданы — помесячная прибыль завышена', num(S.tariffs && S.tariffs.fixed) > 0 ? 0 : cnt(p => !(num(p.fixed) > 0)), '; поле «Фикс» у SKU или общие расходы в тарифах');
+  for (const s of (r.settingsMissing || []))
+    parts.push('<b style="color:#ffd98a">' + esc(s.label) + '</b> — ' + fmt(s.count) + ' SKU; задаётся: ' + esc(s.where) + ' (' + esc(s.effect) + ')');
+  el.style.display = 'block';
+  el.innerHTML = parts.length
+    ? '<i class="fa-solid fa-circle-info" style="color:#5c9dff"></i> <b>Для полной юнит-экономики не хватает данных:</b> ' + parts.join(' · ') +
+      '. По таким SKU прибыль считается оценкой или не считается вовсе; догрузите столбцы импортом/дозагрузкой либо заполните в карточке товара.'
+    : '<i class="fa-solid fa-circle-check" style="color:#2fd6a3"></i> <b>Для юнит-экономики данные полны:</b> у всех ' + fmt(r.total) +
+      ' SKU есть себестоимость, весогабариты и ставки; расчёт прибыли не опирается на оценки из-за пустых входных данных.';
+}
 function qualityMask(p) {
   let m = 0;
   if (num(p.price) <= 0) m |= QMASK.PRICE;
@@ -21796,6 +21843,7 @@ function qualityMask(p) {
 /* Обновление счётчиков/баннера после любого применения фильтра (sync или worker). */
 function filterUI() {
   const rc = $('#rowCount'); if (rc) rc.textContent = fmt(S.view.length);
+  try { renderEconMissingNote(); } catch (e) { console.warn('[UC] econ note:', e); }
   /* Диагностика «пустой таблицы»: каталог не пуст, но ни одна строка не прошла.
    * Показываем конкретную причину и быстрое действие, чтобы данные не «пропадали» молча. */
   const excl = excludedCount(); /* v10.7: кэш на версию каталога */
