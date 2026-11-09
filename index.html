@@ -13551,7 +13551,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.79-client+light-export-unit-calc';
+const APP_VERSION = '12.9.80-client+compact24-unit-calc';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -32042,7 +32042,7 @@ const OzonExport = {
     return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   },
 
-  /* v12.9.79: компактный калькулятор НА ЕДИНИЦУ товара. Без месячных расчётов,
+  /* v12.9.80: компактный калькулятор НА ЕДИНИЦУ товара. Без месячных расчётов,
      планов и двойных проходов: только «купил у поставщика за X → продал за Y →
      вот прибыль ₽/ед, маржа % и заработок на закупку %». Все результаты —
      живые формулы Excel от редактируемых вводов (цена, акция, закупка, вес,
@@ -32055,17 +32055,12 @@ const OzonExport = {
       ['price','Цена продажи, ₽ — ввод',16],['promoPct','Скидка акции, % — ввод',16],
       ['cost','Закупка у поставщика, ₽/ед — ввод',20],
       ['weightKg','Вес, кг — ввод',12],['lenCm','Длина, см — ввод',12],['widCm','Ширина, см — ввод',12],['heiCm','Высота, см — ввод',12],
-      ['volumeL','Объём, л — формула',12],
-      ['commissionPct','Вознаграждение Ozon, % — ввод',18],['transferPct','Эквайринг/перевод, % — ввод',18],
-      ['adsPct','Реклама, % — ввод',14],['cofinPct','Кофинансирование, % — ввод',18],['taxPct','Налог, % от цены — ввод',16],
-      ['logisticsRub','Логистика, ₽/ед — ввод',16],['lastMileRub','Последняя миля, ₽/ед — ввод',18],
-      ['handoverRub','Сдача отправления, ₽/ед — ввод',20],['packRub','Упаковка, ₽/ед — ввод',16],
-      ['storageRub','Хранение, ₽/ед — ввод',16],['returnsRub','Возвраты/невыкуп, ₽/ед — ввод',20],
-      ['otherRub','Прочие расходы, ₽/ед — ввод',18],['targetMarginPct','Целевая маржа, % — ввод',17],
+      ['commissionPct','Вознаграждение Ozon, % — ввод',18],['adsPct','Реклама, % — ввод',14],
+      ['otherPct','Остальные %, от цены — ввод',20],
+      ['logisticsRub','Логистика и доставка, ₽/ед — ввод',22],['packStorageRub','Упаковка и хранение, ₽/ед — ввод',22],
+      ['returnsOtherRub','Возвраты и прочие, ₽/ед — ввод',22],['targetMarginPct','Целевая маржа, % — ввод',17],
       ['effPrice','Цена после акции, ₽/ед — формула',20],
-      ['commissionRub','Вознаграждение, ₽/ед — формула',20],
-      ['pctOtherRub','Остальные % расходы, ₽/ед — формула',24],
-      ['fixedRub','Закупка + все ₽ расходы, ₽/ед — формула',26],
+      ['allCostsRub','Все затраты, ₽/ед — формула',20],
       ['profitUnit','Прибыль, ₽/ед — формула',18],
       ['marginPct','Маржа, % — формула',15],
       ['markupPct','Заработок на закупку, % — формула',22],
@@ -32091,12 +32086,11 @@ const OzonExport = {
         price:price0, promoPct:0,
         cost:Math.max(0, num(eco.cost !== undefined ? eco.cost : p.cost)),
         weightKg:Math.max(0, num(dims.weight)), lenCm:Math.max(0, num(dims.length)), widCm:Math.max(0, num(dims.width)), heiCm:Math.max(0, num(dims.height)),
-        commissionPct:Math.max(0, num(eco.commissionPct)), transferPct:Math.max(0, num(eco.paymentTransferPct)),
-        adsPct:Math.max(0, num(eco.adsPct)), cofinPct:Math.max(0, num(eco.cofinPct)), taxPct,
-        logisticsRub:Math.max(0, num(eco.logisticsRub)), lastMileRub:Math.max(0, num(eco.lastMileRub)),
-        handoverRub:Math.max(0, num(eco.scDeliveryRub)), packRub:Math.max(0, num(eco.packRub)),
-        storageRub:Math.max(0, num(eco.storageRub)), returnsRub:Math.max(0, num(eco.returnsRub)),
-        otherRub:Math.max(0, num(eco.transitPackRub) + num(eco.returnStorageRub) + num(eco.processingRub) + num(eco.penaltiesRub) + num(eco.listingRub) + num(eco.nonStdRub) + num(eco.lateShipRub)),
+        commissionPct:Math.max(0, num(eco.commissionPct)), adsPct:Math.max(0, num(eco.adsPct)),
+        otherPct:Math.max(0, num(eco.paymentTransferPct) + num(eco.cofinPct) + taxPct),
+        logisticsRub:Math.max(0, num(eco.logisticsRub) + num(eco.lastMileRub) + num(eco.scDeliveryRub)),
+        packStorageRub:Math.max(0, num(eco.packRub) + num(eco.storageRub)),
+        returnsOtherRub:Math.max(0, num(eco.returnsRub) + num(eco.transitPackRub) + num(eco.returnStorageRub) + num(eco.processingRub) + num(eco.penaltiesRub) + num(eco.listingRub) + num(eco.nonStdRub) + num(eco.lateShipRub)),
         targetMarginPct:Math.max(0, keepZero(S.settings.tgtMargin, 20)),
         note:(!eco.mp ? 'СЦЕНАРИЙ — модель Ozon отсутствует; проверьте исходные данные'
           : statusReasons.length ? 'СЦЕНАРИЙ — ' + statusReasons.join('; ')
@@ -32110,31 +32104,26 @@ const OzonExport = {
       };
       /* JS-зеркало формул для cached values (предпросмотр без открытия в Excel). */
       const eff = round(values.price * (1 - values.promoPct / 100), 2);
-      const varPct = values.commissionPct + values.transferPct + values.adsPct + values.cofinPct + values.taxPct;
-      const commissionRub = round(eff * values.commissionPct / 100, 2);
-      const pctOtherRub = round(eff * (varPct - values.commissionPct) / 100, 2);
-      const fixedRub = round(values.cost + values.logisticsRub + values.lastMileRub + values.handoverRub + values.packRub + values.storageRub + values.returnsRub + values.otherRub, 2);
-      const profit = round(eff - commissionRub - pctOtherRub - fixedRub, 2);
+      const varPct = values.commissionPct + values.adsPct + values.otherPct;
+      const fixedRub = round(values.cost + values.logisticsRub + values.packStorageRub + values.returnsOtherRub, 2);
+      const allCosts = round(fixedRub + eff * varPct / 100, 2);
+      const profit = round(eff - allCosts, 2);
       const a = 1 - values.promoPct / 100, v = varPct / 100, m = values.targetMarginPct / 100;
       const be = (a * (1 - v)) > 0 ? Math.ceil(fixedRub / (a * (1 - v))) : '';
       const tgt = (a * (1 - v - m)) > 0 && be !== '' ? Math.max(be, Math.ceil(fixedRub / (a * (1 - v - m)))) : '';
-      setFormula('volumeL', `IF(OR(${ref('lenCm')}<=0,${ref('widCm')}<=0,${ref('heiCm')}<=0),"",ROUND(${ref('lenCm')}*${ref('widCm')}*${ref('heiCm')}/1000,3))`,
-        (values.lenCm > 0 && values.widCm > 0 && values.heiCm > 0) ? round(values.lenCm * values.widCm * values.heiCm / 1000, 3) : '');
       setFormula('effPrice', `ROUND(${ref('price')}*(1-${ref('promoPct')}/100),2)`, eff);
-      setFormula('commissionRub', `ROUND(${ref('effPrice')}*${ref('commissionPct')}/100,2)`, commissionRub);
-      setFormula('pctOtherRub', `ROUND(${ref('effPrice')}*(${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100,2)`, pctOtherRub);
-      setFormula('fixedRub', `ROUND(${ref('cost')}+${ref('logisticsRub')}+${ref('lastMileRub')}+${ref('handoverRub')}+${ref('packRub')}+${ref('storageRub')}+${ref('returnsRub')}+${ref('otherRub')},2)`, fixedRub);
-      setFormula('profitUnit', `ROUND(${ref('effPrice')}-${ref('commissionRub')}-${ref('pctOtherRub')}-${ref('fixedRub')},2)`, profit);
+      setFormula('allCostsRub', `ROUND(${ref('cost')}+${ref('logisticsRub')}+${ref('packStorageRub')}+${ref('returnsOtherRub')}+${ref('effPrice')}*(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100,2)`, allCosts);
+      setFormula('profitUnit', `ROUND(${ref('effPrice')}-${ref('allCostsRub')},2)`, profit);
       setFormula('marginPct', `IF(${ref('effPrice')}>0,ROUND(${ref('profitUnit')}/${ref('effPrice')}*100,1),"")`, eff > 0 ? round(profit / eff * 100, 1) : '');
       setFormula('markupPct', `IF(${ref('cost')}>0,ROUND(${ref('profitUnit')}/${ref('cost')}*100,1),"")`, values.cost > 0 ? round(profit / values.cost * 100, 1) : '');
-      setFormula('breakEvenPrice', `IF((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100)<=0,"",MAX(0,ROUNDUP(${ref('fixedRub')}/((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100)),0)))`, be);
-      setFormula('targetPrice', `IF(OR(${ref('breakEvenPrice')}="",(1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100-${ref('targetMarginPct')}/100)<=0),"",MAX(${ref('breakEvenPrice')},ROUNDUP(${ref('fixedRub')}/((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('transferPct')}+${ref('adsPct')}+${ref('cofinPct')}+${ref('taxPct')})/100-${ref('targetMarginPct')}/100)),0)))`, tgt);
+      setFormula('breakEvenPrice', `IF((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100)<=0,"",MAX(0,ROUNDUP((${ref('cost')}+${ref('logisticsRub')}+${ref('packStorageRub')}+${ref('returnsOtherRub')})/((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100)),0)))`, be);
+      setFormula('targetPrice', `IF(OR(${ref('breakEvenPrice')}="",(1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100-${ref('targetMarginPct')}/100)<=0),"",MAX(${ref('breakEvenPrice')},ROUNDUP((${ref('cost')}+${ref('logisticsRub')}+${ref('packStorageRub')}+${ref('returnsOtherRub')})/((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100-${ref('targetMarginPct')}/100)),0)))`, tgt);
       /* ПВЗ с процентной сдачей: сумма зависит от цены продажи. */
       if (eco.fulfillment === 'FBS' && eco.handoverMode === 'pvz_pct') {
         const units = Math.max(1, keepZero(S.settings.ozonFbsUnitsPerShipment, 1));
         const pct = Math.max(0, keepZero(S.settings.ozonPvzPct, 2));
         const cap = Math.max(0, keepZero(S.settings.ozonPvzCapRub, 45));
-        setFormula('handoverRub', `ROUND(MIN(${ref('price')}*${units}*${pct}/100,${cap})/${units},2)`, values.handoverRub);
+        setFormula('logisticsRub', `ROUND(${Math.max(0, num(eco.logisticsRub) + num(eco.lastMileRub))}+MIN(${ref('price')}*${units}*${pct}/100,${cap})/${units},2)`, values.logisticsRub);
       }
       aoa.push(row);
       if (i > 0 && i % 500 === 0) { if (prog) prog(`Ozon калькулятор: ${fmt(i + 1)} из ${fmt(rows.length)} SKU…`); await Exp._yield(); }
@@ -32143,8 +32132,8 @@ const OzonExport = {
       ['Ozon — калькулятор на единицу товара'],
       ['Как читать', 'Купили у поставщика за «Закупка» → продали за «Цена продажи» → «Прибыль, ₽/ед», «Маржа, %» (доля прибыли в цене) и «Заработок на закупку, %» (прибыль к вложенной закупке) считаются живыми формулами.'],
       ['Что можно менять', 'Любой ввод: цену, скидку акции, закупку, вес, габариты, все % ставки и все расходы ₽/ед, целевую маржу. Результаты справа пересчитаются сами.'],
-      ['Вес и габариты', 'Объём в литрах считается формулой из габаритов. Тарифная таблица Ozon в файл не вшита: если от веса/объёма меняется логистика — поправьте «Логистика, ₽/ед» вручную по тарифу кабинета.'],
-      ['Налог', 'Задан одной эффективной ставкой «% от цены», предзаполненной из расчёта приложения. Налоговый режим в этом компактном файле отдельно не моделируется — при необходимости измените процент.'],
+      ['Вес и габариты', 'Объём в литрах = Длина×Ширина×Высота/1000. Тарифная таблица Ozon в файл не вшита: если от веса/объёма меняется логистика — поправьте «Логистика и доставка, ₽/ед» вручную по тарифу кабинета.'],
+      ['Остальные %', 'Эквайринг + кофинансирование + налог одной суммой % от цены (налог — эффективной ставкой из расчёта приложения). По отдельности не разбиты ради компактности: правится суммарный процент.'],
       ['Безубыточность и целевая цена', 'Формулы от тех же вводов: цена безубыточности — прибыль 0; цена для целевой маржи — не ниже безубыточности. Если % расходы съедают цену, ячейка остаётся пустой.'],
       ['Чего здесь нет', 'Месячных расчётов, планов продаж и планирования закупок — только единица товара.'],
       ['Дата выгрузки', nowISO()]
