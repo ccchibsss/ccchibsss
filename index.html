@@ -13551,7 +13551,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.80-client+compact24-unit-calc';
+const APP_VERSION = '12.9.81-client+split-calc-sheets';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -32042,23 +32042,19 @@ const OzonExport = {
     return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   },
 
-  /* v12.9.80: компактный калькулятор НА ЕДИНИЦУ товара. Без месячных расчётов,
-     планов и двойных проходов: только «купил у поставщика за X → продал за Y →
-     вот прибыль ₽/ед, маржа % и заработок на закупку %». Все результаты —
-     живые формулы Excel от редактируемых вводов (цена, акция, закупка, вес,
-     габариты, % ставки и ₽/ед расходы): поменял ввод — всё пересчиталось. */
+  /* v12.9.81: калькулятор на единицу товара в два листа. «Калькулятор» —
+     компактная главная таблица (13 колонок): цена, акция и закупка вводятся
+     прямо в ней, дальше только результаты формулами. Все ставки, расходы ₽/ед,
+     вес и габариты живут на листе «Вводы и ставки» (там же свёрнутая группа
+     габаритов), главный лист ссылается на него формулами — как в шаблонах
+     других селлеров. Месячных расчётов и планов здесь нет. */
   async generateEconomicsXlsx(rows, opts, prog) {
     if (typeof XLSX === 'undefined' || !XLSX.utils) throw new Error('Библиотека XLSX (SheetJS) не загрузилась — калькулятор недоступен');
     if (rows.length > 20000) throw new Error('Формульный калькулятор ограничен 20 000 SKU за файл. Отфильтруйте каталог или выгрузите несколько частей.');
-    const columns = [
+    const mainCols = [
       ['article','Артикул',18],['name','Название',34],
       ['price','Цена продажи, ₽ — ввод',16],['promoPct','Скидка акции, % — ввод',16],
       ['cost','Закупка у поставщика, ₽/ед — ввод',20],
-      ['weightKg','Вес, кг — ввод',12],['lenCm','Длина, см — ввод',12],['widCm','Ширина, см — ввод',12],['heiCm','Высота, см — ввод',12],
-      ['commissionPct','Вознаграждение Ozon, % — ввод',18],['adsPct','Реклама, % — ввод',14],
-      ['otherPct','Остальные %, от цены — ввод',20],
-      ['logisticsRub','Логистика и доставка, ₽/ед — ввод',22],['packStorageRub','Упаковка и хранение, ₽/ед — ввод',22],
-      ['returnsOtherRub','Возвраты и прочие, ₽/ед — ввод',22],['targetMarginPct','Целевая маржа, % — ввод',17],
       ['effPrice','Цена после акции, ₽/ед — формула',20],
       ['allCostsRub','Все затраты, ₽/ед — формула',20],
       ['profitUnit','Прибыль, ₽/ед — формула',18],
@@ -32066,80 +32062,101 @@ const OzonExport = {
       ['markupPct','Заработок на закупку, % — формула',22],
       ['breakEvenPrice','Цена безубыточности, ₽ — формула',22],
       ['targetPrice','Цена для целевой маржи, ₽ — формула',24],
-      ['note','Примечание',52]
+      ['note','Примечание',46]
     ];
-    const pos = {}; columns.forEach((c, i) => { pos[c[0]] = i; });
-    const aoa = [columns.map(c => c[1])];
+    const inCols = [
+      ['article','Артикул',18],
+      ['weightKg','Вес, кг — ввод',12],['lenCm','Длина, см — ввод',12],['widCm','Ширина, см — ввод',12],['heiCm','Высота, см — ввод',12],
+      ['commissionPct','Вознаграждение Ozon, % — ввод',18],['adsPct','Реклама, % — ввод',14],
+      ['otherPct','Остальные %, от цены — ввод',20],
+      ['logisticsRub','Логистика и доставка, ₽/ед — ввод',22],['packStorageRub','Упаковка и хранение, ₽/ед — ввод',22],
+      ['returnsOtherRub','Возвраты и прочие, ₽/ед — ввод',22],['targetMarginPct','Целевая маржа, % — ввод',17]
+    ];
+    const posM = {}, posI = {};
+    mainCols.forEach((c, i) => { posM[c[0]] = i; });
+    inCols.forEach((c, i) => { posI[c[0]] = i; });
+    const aoaMain = [mainCols.map(c => c[1])], aoaIn = [inCols.map(c => c[1])];
     for (let i = 0; i < rows.length; i++) {
       const p = rows[i], rr = i + 2;
       const eco = calcMarketplacesEconomics(p, null, { currentOzonOnly:true }).ozonEco;
-      const ref = key => XLSX.utils.encode_col(pos[key]) + rr;
+      const refM = key => XLSX.utils.encode_col(posM[key]) + rr;
+      const refI = key => `'Вводы и ставки'!` + XLSX.utils.encode_col(posI[key]) + rr;
       const dims = (typeof exportDimsFor === 'function') ? exportDimsFor(p) : { weight:num(p.weight), length:num(p.length), width:num(p.width), height:num(p.height) };
       const price0 = Math.max(0, num(eco.effPrice !== undefined ? eco.effPrice : (p.effPrice || p.price)));
-      /* Налог — эффективная ставка % от цены (из расчёта приложения), а не режим:
-         в компактном файле пользователь правит именно процент. */
+      /* Налог — эффективная ставка % от цены, внутри «Остальные %». */
       const taxPct = price0 > 0 ? Math.max(0, Math.min(100, round(num(eco.taxRub) / price0 * 100, 2))) : 0;
       const statusReasons = [eco.comparisonReasons, p.modelReviewRequired ? 'требуется проверка модели' : '',
         eco.returnRateInvalid ? 'некорректный процент невыкупа' : ''].filter(Boolean);
-      const values = {
+      const vM = {
         article:String(p.article || ''), name:String(p.name || ''),
         price:price0, promoPct:0,
         cost:Math.max(0, num(eco.cost !== undefined ? eco.cost : p.cost)),
+        note:(!eco.mp ? 'СЦЕНАРИЙ — модель Ozon отсутствует; проверьте исходные данные'
+          : statusReasons.length ? 'СЦЕНАРИЙ — ' + statusReasons.join('; ')
+          : 'Ставки и расходы — на листе «Вводы и ставки», сверьте с кабинетом Ozon')
+      };
+      const vI = {
+        article:String(p.article || ''),
         weightKg:Math.max(0, num(dims.weight)), lenCm:Math.max(0, num(dims.length)), widCm:Math.max(0, num(dims.width)), heiCm:Math.max(0, num(dims.height)),
         commissionPct:Math.max(0, num(eco.commissionPct)), adsPct:Math.max(0, num(eco.adsPct)),
         otherPct:Math.max(0, num(eco.paymentTransferPct) + num(eco.cofinPct) + taxPct),
         logisticsRub:Math.max(0, num(eco.logisticsRub) + num(eco.lastMileRub) + num(eco.scDeliveryRub)),
         packStorageRub:Math.max(0, num(eco.packRub) + num(eco.storageRub)),
         returnsOtherRub:Math.max(0, num(eco.returnsRub) + num(eco.transitPackRub) + num(eco.returnStorageRub) + num(eco.processingRub) + num(eco.penaltiesRub) + num(eco.listingRub) + num(eco.nonStdRub) + num(eco.lateShipRub)),
-        targetMarginPct:Math.max(0, keepZero(S.settings.tgtMargin, 20)),
-        note:(!eco.mp ? 'СЦЕНАРИЙ — модель Ozon отсутствует; проверьте исходные данные'
-          : statusReasons.length ? 'СЦЕНАРИЙ — ' + statusReasons.join('; ')
-          : 'Тарифы предзаполнены из расчёта приложения — сверьте с кабинетом Ozon')
+        targetMarginPct:Math.max(0, keepZero(S.settings.tgtMargin, 20))
       };
-      const row = columns.map(c => values[c[0]] !== undefined ? values[c[0]] : '');
-      const setFormula = (key, formula, cached) => {
+      const rowM = mainCols.map(c => vM[c[0]] !== undefined ? vM[c[0]] : '');
+      const rowI = inCols.map(c => vI[c[0]] !== undefined ? vI[c[0]] : '');
+      const setF = (row, pos, key, formula, cached) => {
         const n = Number(cached);
-        if (cached === '' || cached === null || !Number.isFinite(n)) { row[pos[key]] = { t:'str', f:formula, v:cached == null ? '' : String(cached) }; values[key] = cached == null ? '' : cached; }
-        else { row[pos[key]] = { t:'n', f:formula, v:n }; values[key] = n; }
+        if (cached === '' || cached === null || !Number.isFinite(n)) { row[pos[key]] = { t:'str', f:formula, v:cached == null ? '' : String(cached) }; }
+        else { row[pos[key]] = { t:'n', f:formula, v:n }; }
+        return cached;
       };
-      /* JS-зеркало формул для cached values (предпросмотр без открытия в Excel). */
-      const eff = round(values.price * (1 - values.promoPct / 100), 2);
-      const varPct = values.commissionPct + values.adsPct + values.otherPct;
-      const fixedRub = round(values.cost + values.logisticsRub + values.packStorageRub + values.returnsOtherRub, 2);
+      /* JS-зеркало формул для cached values. */
+      const eff = round(vM.price * (1 - vM.promoPct / 100), 2);
+      const varPct = vI.commissionPct + vI.adsPct + vI.otherPct;
+      const fixedRub = round(vM.cost + vI.logisticsRub + vI.packStorageRub + vI.returnsOtherRub, 2);
       const allCosts = round(fixedRub + eff * varPct / 100, 2);
       const profit = round(eff - allCosts, 2);
-      const a = 1 - values.promoPct / 100, v = varPct / 100, m = values.targetMarginPct / 100;
+      const a = 1 - vM.promoPct / 100, v = varPct / 100, m = vI.targetMarginPct / 100;
       const be = (a * (1 - v)) > 0 ? Math.ceil(fixedRub / (a * (1 - v))) : '';
       const tgt = (a * (1 - v - m)) > 0 && be !== '' ? Math.max(be, Math.ceil(fixedRub / (a * (1 - v - m)))) : '';
-      setFormula('effPrice', `ROUND(${ref('price')}*(1-${ref('promoPct')}/100),2)`, eff);
-      setFormula('allCostsRub', `ROUND(${ref('cost')}+${ref('logisticsRub')}+${ref('packStorageRub')}+${ref('returnsOtherRub')}+${ref('effPrice')}*(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100,2)`, allCosts);
-      setFormula('profitUnit', `ROUND(${ref('effPrice')}-${ref('allCostsRub')},2)`, profit);
-      setFormula('marginPct', `IF(${ref('effPrice')}>0,ROUND(${ref('profitUnit')}/${ref('effPrice')}*100,1),"")`, eff > 0 ? round(profit / eff * 100, 1) : '');
-      setFormula('markupPct', `IF(${ref('cost')}>0,ROUND(${ref('profitUnit')}/${ref('cost')}*100,1),"")`, values.cost > 0 ? round(profit / values.cost * 100, 1) : '');
-      setFormula('breakEvenPrice', `IF((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100)<=0,"",MAX(0,ROUNDUP((${ref('cost')}+${ref('logisticsRub')}+${ref('packStorageRub')}+${ref('returnsOtherRub')})/((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100)),0)))`, be);
-      setFormula('targetPrice', `IF(OR(${ref('breakEvenPrice')}="",(1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100-${ref('targetMarginPct')}/100)<=0),"",MAX(${ref('breakEvenPrice')},ROUNDUP((${ref('cost')}+${ref('logisticsRub')}+${ref('packStorageRub')}+${ref('returnsOtherRub')})/((1-${ref('promoPct')}/100)*(1-(${ref('commissionPct')}+${ref('adsPct')}+${ref('otherPct')})/100-${ref('targetMarginPct')}/100)),0)))`, tgt);
-      /* ПВЗ с процентной сдачей: сумма зависит от цены продажи. */
+      const varSum = `(${refI('commissionPct')}+${refI('adsPct')}+${refI('otherPct')})`;
+      const fixedSum = `(${refM('cost')}+${refI('logisticsRub')}+${refI('packStorageRub')}+${refI('returnsOtherRub')})`;
+      const aF = `(1-${refM('promoPct')}/100)`;
+      setF(rowM, posM, 'effPrice', `ROUND(${refM('price')}*(1-${refM('promoPct')}/100),2)`, eff);
+      setF(rowM, posM, 'allCostsRub', `ROUND(${fixedSum}+${refM('effPrice')}*${varSum}/100,2)`, allCosts);
+      setF(rowM, posM, 'profitUnit', `ROUND(${refM('effPrice')}-${refM('allCostsRub')},2)`, profit);
+      setF(rowM, posM, 'marginPct', `IF(${refM('effPrice')}>0,ROUND(${refM('profitUnit')}/${refM('effPrice')}*100,1),"")`, eff > 0 ? round(profit / eff * 100, 1) : '');
+      setF(rowM, posM, 'markupPct', `IF(${refM('cost')}>0,ROUND(${refM('profitUnit')}/${refM('cost')}*100,1),"")`, vM.cost > 0 ? round(profit / vM.cost * 100, 1) : '');
+      setF(rowM, posM, 'breakEvenPrice', `IF(${aF}*(1-${varSum}/100)<=0,"",MAX(0,ROUNDUP(${fixedSum}/(${aF}*(1-${varSum}/100)),0)))`, be);
+      setF(rowM, posM, 'targetPrice', `IF(OR(${refM('breakEvenPrice')}="",${aF}*(1-${varSum}/100-${refI('targetMarginPct')}/100)<=0),"",MAX(${refM('breakEvenPrice')},ROUNDUP(${fixedSum}/(${aF}*(1-${varSum}/100-${refI('targetMarginPct')}/100)),0)))`, tgt);
+      /* ПВЗ с процентной сдачей: часть «Логистики и доставки» зависит от цены главного листа. */
       if (eco.fulfillment === 'FBS' && eco.handoverMode === 'pvz_pct') {
         const units = Math.max(1, keepZero(S.settings.ozonFbsUnitsPerShipment, 1));
         const pct = Math.max(0, keepZero(S.settings.ozonPvzPct, 2));
         const cap = Math.max(0, keepZero(S.settings.ozonPvzCapRub, 45));
-        setFormula('logisticsRub', `ROUND(${Math.max(0, num(eco.logisticsRub) + num(eco.lastMileRub))}+MIN(${ref('price')}*${units}*${pct}/100,${cap})/${units},2)`, values.logisticsRub);
+        const fixedPart = Math.max(0, num(eco.logisticsRub) + num(eco.lastMileRub));
+        setF(rowI, posI, 'logisticsRub', `ROUND(${fixedPart}+MIN('Калькулятор'!${refM('price')}*${units}*${pct}/100,${cap})/${units},2)`, vI.logisticsRub);
       }
-      aoa.push(row);
+      aoaMain.push(rowM); aoaIn.push(rowI);
       if (i > 0 && i % 500 === 0) { if (prog) prog(`Ozon калькулятор: ${fmt(i + 1)} из ${fmt(rows.length)} SKU…`); await Exp._yield(); }
     }
     const instructions = [
       ['Ozon — калькулятор на единицу товара'],
-      ['Как читать', 'Купили у поставщика за «Закупка» → продали за «Цена продажи» → «Прибыль, ₽/ед», «Маржа, %» (доля прибыли в цене) и «Заработок на закупку, %» (прибыль к вложенной закупке) считаются живыми формулами.'],
-      ['Что можно менять', 'Любой ввод: цену, скидку акции, закупку, вес, габариты, все % ставки и все расходы ₽/ед, целевую маржу. Результаты справа пересчитаются сами.'],
-      ['Вес и габариты', 'Объём в литрах = Длина×Ширина×Высота/1000. Тарифная таблица Ozon в файл не вшита: если от веса/объёма меняется логистика — поправьте «Логистика и доставка, ₽/ед» вручную по тарифу кабинета.'],
-      ['Остальные %', 'Эквайринг + кофинансирование + налог одной суммой % от цены (налог — эффективной ставкой из расчёта приложения). По отдельности не разбиты ради компактности: правится суммарный процент.'],
+      ['Как читать', 'Лист «Калькулятор»: купили у поставщика за «Закупка» → продали за «Цена продажи» → «Прибыль, ₽/ед», «Маржа, %» и «Заработок на закупку, %» считаются живыми формулами.'],
+      ['Где вводы', 'Цена, скидка акции и закупка меняются прямо на листе «Калькулятор». Ставки %, расходы ₽/ед, вес, габариты и целевая маржа — на листе «Вводы и ставки»: главный лист ссылается на него формулами, строка в строку по артикулу.'],
+      ['Свёрнутые колонки', 'На листе «Вводы и ставки» вес и габариты свёрнуты в группу — кнопка «+» над заголовками колонок разворачивает их, «−» сворачивает обратно. На расчёт это не влияет.'],
+      ['Вес и габариты', 'Объём в литрах = Длина×Ширина×Высота/1000. Тарифная таблица Ozon в файл не вшита: если от веса/объёма меняется логистика — поправьте «Логистика и доставка, ₽/ед» на листе вводов вручную по тарифу кабинета.'],
+      ['Остальные %', 'Эквайринг + кофинансирование + налог одной суммой % от цены (налог — эффективной ставкой из расчёта приложения). Отдельно оставлены только вознаграждение Ozon и реклама.'],
       ['Безубыточность и целевая цена', 'Формулы от тех же вводов: цена безубыточности — прибыль 0; цена для целевой маржи — не ниже безубыточности. Если % расходы съедают цену, ячейка остаётся пустой.'],
       ['Чего здесь нет', 'Месячных расчётов, планов продаж и планирования закупок — только единица товара.'],
       ['Дата выгрузки', nowISO()]
     ];
     const sheets = [
-      { name:'Ozon калькулятор', aoa, widths:columns.map(c => c[2]) },
+      { name:'Калькулятор', aoa:aoaMain, widths:mainCols.map(c => c[2]) },
+      { name:'Вводы и ставки', aoa:aoaIn, widths:inCols.map(c => c[2]), colGroups:[{ from:1, to:4, hidden:true }] },
       { name:'Инструкция', aoa:instructions, widths:[28,120], autoFilter:false }
     ];
     const wb = XLSX.utils.book_new();
@@ -32150,7 +32167,11 @@ const OzonExport = {
         return safe !== v ? { v:safe, t:'s', quotePrefix:1 } : v;
       }));
       const ws = XLSX.utils.aoa_to_sheet(safeAoa);
-      ws['!cols'] = sh.widths.map(w => ({ wch:w || 12 }));
+      ws['!cols'] = sh.widths.map((w, ci) => {
+        const col = { wch:w || 12 };
+        if ((sh.colGroups || []).some(g => ci >= g.from && ci <= g.to && g.hidden)) col.hidden = true;
+        return col;
+      });
       XLSX.utils.book_append_sheet(wb, ws, sh.name);
     });
     wb.Workbook = { CalcPr:{ calcMode:'auto', fullCalcOnLoad:true, forceFullCalc:true } };
@@ -39269,6 +39290,26 @@ const Exp = {
       }
       if (sh.autoFilter !== false && rowCount > 1 && colCount > 0 && !/<autoFilter\b/.test(sheetXml)) {
         addOns.push(`<autoFilter ref="A1:${columnLetter(colCount - 1)}${rowCount}"/>`);
+      }
+      /* v12.9.81: группировка колонок (кнопки +/- в Excel). SheetJS пишет только
+         hidden, outlineLevel добавляем прямо в <col>, иначе группы не будет. */
+      const colGroups = sh.colGroups || [];
+      if (colGroups.length && /<cols>[\s\S]*?<\/cols>/.test(sheetXml)) {
+        sheetXml = sheetXml.replace(/<cols>([\s\S]*?)<\/cols>/, (m, inner) => {
+          const patched = inner.replace(/<col\b[^>]*\/>/g, tag => {
+            const mn = Number((tag.match(/min="(\d+)"/) || [])[1]), mx = Number((tag.match(/max="(\d+)"/) || [])[1]);
+            if (!mn) return tag;
+            const g = colGroups.find(g2 => (mn - 1) >= g2.from && (mx - 1) <= g2.to);
+            if (!g) return tag;
+            let t = tag.replace(/\s*\/>$/, '');
+            if (!/outlineLevel=/.test(t)) t += ' outlineLevel="1"';
+            if (g.hidden && !/hidden=/.test(t)) t += ' hidden="1"';
+            return t + '/>';
+          });
+          return '<cols>' + patched + '</cols>';
+        });
+        if (!/<sheetPr\b/.test(sheetXml)) sheetXml = sheetXml.replace(/(<worksheet\b[^>]*>)/, '$1<sheetPr><outlinePr summaryBelow="0"/></sheetPr>');
+        changed = true;
       }
       const rules = sh.conditionalFormatting || sh.cf || [];
       if (rules.length) {
