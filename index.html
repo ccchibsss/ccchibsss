@@ -106,6 +106,11 @@
   (enrichCatMode, по умолчанию «только Артикул+Бренд» — OE-аналоги категорию и код
   не приносят); название/применимость/ОВХ обогащаются общим способом (enrichMode).
   Категория по OE — только при единогласии всех доноров этого OE.
+  v12.9.70 — ОШИБКА ВЫГРУЗКИ НЕ ТЕРЯЕТ ДАННЫЕ: перед формированием файла экспорт
+  дожидается записи каталога в IndexedDB (если были несохранённые изменения), а при
+  любой ошибке выгрузки каталог в памяти не трогается, таблица перерисовывается и
+  пользователь видит «данные НЕ потеряны: N SKU». Прямые кнопки Ozon CSV/XLSX/
+  калькулятора, раньше не имевшие перехвата ошибок, обёрнуты тем же стражем.
   v12.9.66 — ПЕРВЫЙ ФАЙЛ ГРУЗИТСЯ БЫСТРЕЕ. Замер по журналу показал, где уходят
   минуты: на прайсе 124 454 строки (122 930 SKU) импорт занимал 168 с, из них
   151 с — пересчёт конвейера, а в нём 70 с computeEconomics, 36 с типизации Ozon
@@ -13488,7 +13493,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.69-client+enrich-catmode';
+const APP_VERSION = '12.9.70-client+export-guard';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -22147,6 +22152,7 @@ const Table = {
    Раньше persist был обёрнут в debounce, возвращавший undefined: все ожидания записи
    продолжали работу ДО фактической записи, а тосты «сохранено» врали. */
 let _cancelPersistSoon = null, _persistQueue = Promise.resolve(), _persistPending = 0;
+let _persistDirty = false; /* v12.9.70: есть изменения, ещё не записанные на диск */
 function persistNow(changedList) {
   /* До окончания запуска S.rows может быть пустым или прочитанным частично.
      pagehide и другие вызовы не должны принимать его за новую версию каталога. */
@@ -22342,7 +22348,7 @@ async function _persistNowImpl(changedList) {
       StorageCtl.acceptCatalog(committedCatalog);
     }
     _tWriteDone = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    S.settings.lastPersistError = ''; S._cacheWriteError = '';
+    S.settings.lastPersistError = ''; S._cacheWriteError = ''; _persistDirty = false;
     if (S._volatileStorage) {
       S._cacheWriteError = 'IndexedDB недоступен: данные только в памяти вкладки';
       StorageCtl.refresh(); return false;
@@ -22491,11 +22497,49 @@ function scheduleCloudSync_(reason){
   },2500);
 }
 const persistSoon = debounce(() => {
+  _persistDirty = true;
   Promise.resolve(persistNow()).catch(e => console.warn('[UC] persistSoon:', e));
   scheduleCloudSync_('local-change');
 }, 900);
 _cancelPersistSoon = persistSoon.cancel;
 const persist = persistSoon;
+/* v12.9.70: страж выгрузки. Перед формированием файла дожидаемся записи
+   каталога на диск (только если есть несохранённые изменения — полной
+   перезаписи на каждый экспорт нет). При любой ошибке выгрузки каталог
+   в памяти не трогаем: восстанавливаем ссылку на строки, перерисовываем
+   таблицу и прямо говорим пользователю, что данные не потеряны. */
+async function ensureCatalogSafeBeforeExport() {
+  try {
+    if (typeof S === 'undefined' || !S.rows || !S.rows.length) return true;
+    if (S._bootReady !== true || S._bootError || S._volatileStorage) return false;
+    if (_persistDirty || _persistPending > 0) {
+      const ok = await persistNow();
+      if (ok === false) return false;
+    }
+    return !S.settings.lastPersistError;
+  } catch (e) { console.warn('[UC] export pre-persist:', e); return false; }
+}
+let _exportUnsafeWarned = false;
+async function exportGuard(name, fn) {
+  const rowsRef = S.rows, n0 = rowsRef ? rowsRef.length : 0;
+  const saved = await ensureCatalogSafeBeforeExport();
+  try {
+    const r = await fn();
+    if (!saved && !_exportUnsafeWarned && S.rows && S.rows.length) {
+      _exportUnsafeWarned = true;
+      Toast.warn('Каталог не записан на диск', 'Файл выгрузки сформирован, но каталог сейчас только в памяти вкладки. Не закрывайте её: проверьте хранилище (место/доступ IndexedDB) на дашборде или сделайте снапшот.');
+    }
+    return r;
+  } catch (e) {
+    if (S.rows !== rowsRef) S.rows = rowsRef;
+    try { applyFilter(); Table.paint(); Dash.render(); } catch (_) { }
+    try { if (e && typeof e === 'object') e._ucShown = true; } catch (_) { }
+    Toast.err('Ошибка выгрузки — данные НЕ потеряны',
+      name + ': ' + String(e && e.message || e).slice(0, 140) + '. Каталог на месте: ' + fmt(S.rows.length) + ' SKU' +
+      (saved ? ', и он сохранён на диск' : '') + '. Заново загружать файлы не нужно — просто повторите выгрузку.');
+    return null;
+  }
+}
 /* Предупреждаем до закрытия, если запись ещё не закончилась или была ошибка.
    Браузер показывает своё стандартное подтверждение и может его не показать
    без недавнего действия пользователя; при аварии страницы оно не гарантировано. */
@@ -32217,7 +32261,8 @@ const OzonExport = {
       </tbody></table>`;
   },
 
-  async run() {
+  async run() { return exportGuard('Экспорт в OZON', () => this._runImpl()); },
+  async _runImpl() {
     const opts = this.getOptions();
     if (opts.split && opts.split !== 'one') return this.runSplit(opts.split);
     /* v12.1: вместо тупика «фильтр не содержит товаров» — выгрузка всего каталога
@@ -32279,13 +32324,13 @@ const OzonExport = {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_рабочая_выгрузка_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.csv`;
-      await withProgress('Экспорт в OZON CSV', `${fmt(rows.length)} SKU · 46 полей + 2 справочные колонки…`, async prog => {
+      await exportGuard('Экспорт в OZON CSV', () => withProgress('Экспорт в OZON CSV', `${fmt(rows.length)} SKU · 46 полей + 2 справочные колонки…`, async prog => {
         const blob = await OzonExport.generateCsv(rows, opts, prog);
         Exp.download(blob, fn);
         const note = OzonExport._truncatedNote();
         if (note) Toast.warn('Экспорт OZON готов (текст обрезан)', `Файл «${fn}» · ${fmt(rows.length)} SKU. ${note}`);
         else Toast.ok('Экспорт OZON готов', `Файл «${fn}» сформирован (${fmt(rows.length)} SKU)`);
-      });
+      }));
     });
 
     bindBtn('#btnExportOzonXlsxDirect', async () => {
@@ -32297,13 +32342,13 @@ const OzonExport = {
       const now = new Date();
       const pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_рабочая_выгрузка_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.xlsx`;
-      await withProgress('Экспорт в OZON XLSX', `${fmt(rows.length)} SKU · 46 полей + 2 справочные колонки…`, async prog => {
+      await exportGuard('Экспорт в OZON XLSX', () => withProgress('Экспорт в OZON XLSX', `${fmt(rows.length)} SKU · 46 полей + 2 справочные колонки…`, async prog => {
         const blob = await OzonExport.generateXlsx(rows, opts, prog);
         Exp.download(blob, fn);
         const note = OzonExport._truncatedNote();
         if (note) Toast.warn('Экспорт OZON готов (текст обрезан)', `Файл «${fn}» · ${fmt(rows.length)} SKU. ${note}`);
         else Toast.ok('Экспорт OZON готов', `Файл «${fn}» сформирован (${fmt(rows.length)} SKU)`);
-      });
+      }));
     });
 
 
@@ -32314,14 +32359,14 @@ const OzonExport = {
       if (!rows.length) return Toast.warn('Нет строк для калькулятора', OzonExport.emptyReason(pick.stats));
       const now = new Date(), pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_калькулятор_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.xlsx`;
-      await withProgress('Ozon — калькулятор юнит-экономики', `${fmt(rows.length)} SKU · числовые исходные данные и формулы Excel…`, async prog => {
+      await exportGuard('Ozon — калькулятор юнит-экономики', () => withProgress('Ozon — калькулятор юнит-экономики', `${fmt(rows.length)} SKU · числовые исходные данные и формулы Excel…`, async prog => {
         const blob = await OzonExport.generateEconomicsXlsx(rows, opts, prog);
         Exp.download(blob, fn);
         const scenarios = rows.filter(p => !p.mp || !p.mp.OZON || p.mp.OZON.comparisonEligible === false).length;
         const text = `Файл «${fn}» · ${fmt(rows.length)} SKU. Меняйте цену, расходы и целевую маржу: прибыль, безубыток и рекомендуемая цена пересчитаются в Excel.`;
         if (scenarios) Toast.warn('Калькулятор готов; есть сценарные строки', `${text} СЦЕНАРИЙ: ${fmt(scenarios)} — причины указаны в последних колонках.`);
         else Toast.ok('Калькулятор Ozon готов', text);
-      });
+      }));
     });
 
     bindBtn('#btnExportOzonConfigModal', () => OzonExport.open());
@@ -38444,7 +38489,8 @@ const Exp = {
   },
 
   /* ГЛАВНЫЙ ЭКСПОРТ: одна книга XLSX (или один CSV) независимо от объёма. */
-  async run(forceRows) {
+  async run(forceRows) { return exportGuard('Экспорт', () => this._runImpl(forceRows)); },
+  async _runImpl(forceRows) {
     const activeMps = this.activeMps();
     const picked = Exp.pick || {};
     const cat = exportCatalog().filter(c => picked[c.k] && !exportColumnExcluded(c, activeMps));
