@@ -13562,7 +13562,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.97-client+review-queue';
+const APP_VERSION = '12.9.98-client+audit-fixes';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19104,7 +19104,7 @@ const ExprLang = (function () {
   const FUNCS = {
     pi: () => Math.PI, e: () => Math.E,   // математические константы для формул
     num: v => NN(v, 'num'),
-    round: (v, d) => { notDate(v, 'round'); const p = Math.pow(10, d === undefined ? 2 : (+d || 0)); return Math.round((+v || 0) * p) / p; },
+    round: (v, d) => { notDate(v, 'round'); const dd = d === undefined ? 2 : (+d || 0); const p = Math.pow(10, dd); const x = (+v || 0) * p; const a = Math.abs(x), i = Math.floor(a), fr = a - i; const q = (fr > 0.5 - 1e-9 && fr < 0.5) ? Math.floor(Number(a.toPrecision(15)) + 0.5) : Math.floor(a + 0.5); return (x < 0 ? -q : q) / p; },
     min: (...a) => { a.forEach((x, i) => notDate(x, 'min#' + (i + 1))); return Math.min(...a.map(x => +x || 0)); },
     max: (...a) => { a.forEach((x, i) => notDate(x, 'max#' + (i + 1))); return Math.max(...a.map(x => +x || 0)); },
     abs: v => Math.abs(N1(v, 'abs')), ceil: v => Math.ceil(N1(v, 'ceil')), floor: v => Math.floor(N1(v, 'floor')),
@@ -26569,7 +26569,9 @@ const ReviewQueue = {
         let sharedOe = false;
         for (const oe of A.oe) if (B.oe.has(oe)) { sharedOe = true; break; }
         if (sharedOe) continue;
-        if (String(A.p.analog_list || '').toUpperCase().includes(B.art) || String(B.p.analog_list || '').toUpperCase().includes(A.art)) continue;
+        const aAnalogs = codeList(A.p.analog_list).map(x => normArticle(x));
+        const bAnalogs = codeList(B.p.analog_list).map(x => normArticle(x));
+        if (aAnalogs.includes(B.art) || bAnalogs.includes(A.art)) continue;
         const d = this._lev(A.art, B.art, 2);
         if (d > 2) continue;
         const jac = this._jaccard(A.nameT, B.nameT);
