@@ -70,9 +70,9 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.99-client+audit2-fixes'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.100-client+audit-fixes-all'), 'версия клиента обновлена');
 // v12.9.79: светлый экспорт + компактный поштучный калькулятор без месячных расчётов
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия 12.9.79');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия 12.9.79');
 assert(!app.includes('FF1B2140'), 'чёрной заливки шапки экспорта не осталось');
 assert(app.includes("['markupPct','Заработок на закупку, % — формула'"), 'калькулятор: заработок на закупку');
 assert(app.includes("['logisticsRub','Логистика и доставка, ₽/ед — ввод'"), 'калькулятор 24: объединённая логистика');
@@ -161,7 +161,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.99-client+audit2-fixes'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.100-client+audit-fixes-all'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -201,7 +201,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.99-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия клиента обновлена');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -288,13 +288,13 @@ console.log('OK: все тесты пройдены (' + rows.length + ' стр�
 // v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
 assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
 assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия клиента обновлена');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия клиента обновлена');
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
 assert(app.includes('if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия клиента обновлена');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия клиента обновлена');
 
 assert(app.includes("classList.contains('active')) UE.render()"), 'импорт: UE.render только для активного раздела');
 assert(app.includes("classList.contains('active')) Dash.render()"), 'импорт: Dash.render только для активного раздела');
@@ -385,7 +385,7 @@ assert(app.includes("classList.contains('active')) Dash.render()"), 'импор�
 assert(app.includes('HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined)'), 'импорт: таргетный rebuildIndex');
 assert(app.includes('dedupeCatalog(_dedupeKeys)'), 'импорт: таргетный dedupe после первого полного');
 assert(app.includes('persistChangedOnly: changedTouched > 0 && !dedup'), 'импорт: запись только дельты, если не было слияний');
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия клиента обновлена');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия клиента обновлена');
 
 // v12.9.78: автосверка аномалий находит донора через реестр byOe (функционально, настоящий AnomalyOE+DimPolicy)
 ;(async () => {
@@ -438,7 +438,7 @@ assert(app.includes('12.9.99-client+audit2-fixes'), 'версия клиента
 assert(app.includes('const donorRows=[];'), 'автосверка: отбор доноров по реестру');
 assert(app.includes("lsSet('uc.fullCalcFp', globalParamsFp())"), 'полный пересчёт фиксирует отпечаток параметров');
 assert(app.includes('профиль дельты: изменено строк'), 'журнал импорта: профиль дельты');
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия клиента обновлена');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия клиента обновлена');
 
 // v12.9.93: потоковый CSV-парсер — разрезы чанков в любом месте не меняют результат
 {
@@ -472,7 +472,7 @@ assert(html.includes('id="btnDiskImport"'), 'кнопка дискового и�
 assert(app.includes('skipEconomics: true, persist: false, onProgress: prog, stepRange: [82, 97]'), 'дисковый импорт: экономика лениво, запись одной порцией');
 
 // v12.9.94: пакет оптимизаций
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия 12.9.94');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия 12.9.94');
 assert(app.includes('econSkipFresh'), 'пропуск пересчёта актуальной экономики');
 assert(app.includes("S._econFreshKey = _econFreshKey"), 'отметка актуальности экономики фиксируется');
 assert(app.includes('расчётные поля экономики (досчёт при экспорте)'), 'MemGuard: автосброс экономики при давлении памяти');
@@ -522,7 +522,7 @@ assert(app.includes('запись каталога одной порцией'), 
   assert.strictEqual(rows8[0][2], '149,81', 'воркер XLSX: значение ячейки текстом');
 }
 // v12.9.95: остальные разделы пакета
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия 12.9.95');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия 12.9.95');
 assert(app.includes('warnQuarantinedBeforeExport'), 'карантин: предупреждение перед выгрузкой');
 assert(app.includes("await CsvStream.rows(file, r => { table.push(r); }"), 'обычный импорт: потоковый разбор CSV');
 assert(app.includes('let first = true;'), 'дисковый импорт: заголовок файла не попадает в данные');
@@ -538,7 +538,7 @@ assert(app.includes('const UCCancel = {'), 'токен отмены присут
 assert(app.includes("e._ucCancelled = true"), 'отмена помечается для мягкой обработки');
 assert(app.includes("if (typeof UCCancel !== 'undefined') UCCancel.check();"), 'проверки отмены в длинных циклах');
 assert(app.includes("Toast.warn('Отменено пользователем'"), 'отмена — предупреждение, а не ошибка');
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия 12.9.96');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия 12.9.96');
 // токен отмены работает как чистая логика
 {
   const c9 = {};
@@ -589,7 +589,7 @@ assert(app.includes('const ReviewQueue = {'), 'модуль очереди пр�
 assert(app.includes('uc.reviewDecisions'), 'память решений оператора');
 assert(app.includes('Артикулы пришли числами (XLSX)'), 'QA: артикулы-числа в XLSX');
 assert(html.includes('id="btnReviewExport"') && html.includes('id="btnReviewImport"'), 'кнопки очереди проверки');
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия 12.9.97');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия 12.9.97');
 
 // v12.9.98 (аудит): round() в формулах = Excel-стиль, как round() приложения
 {
@@ -604,7 +604,7 @@ assert(app.includes('12.9.99-client+audit2-fixes'), 'версия 12.9.97');
   assert.strictEqual(E.eval('1 + 2 * 3', {}), 7, 'формулы: приоритет операций');
   assert.strictEqual(E.eval('10 / 4', {}), 2.5, 'формулы: деление');
 }
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия 12.9.98');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия 12.9.98');
 assert(app.includes('aAnalogs.includes(B.art)'), 'очередь: аналоги сравниваются токенами, не подстрокой');
 
 // v12.9.99 (аудит-2): cloneRowForCalc не теряет компактные поля (объём!)
@@ -626,6 +626,25 @@ assert(app.includes('aAnalogs.includes(B.art)'), 'очередь: аналоги
   assert.strictEqual(c.article, 'V1', 'клон для расчёта: обычные поля сохранены');
   c.volume = 9; assert.strictEqual(src.volume, 3.5, 'клон независим от оригинала');
 }
-assert(app.includes('12.9.99-client+audit2-fixes'), 'версия 12.9.99');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия 12.9.99');
 assert(app.includes('computeEconomics(cloneRowForCalc(p))'), 'WhatIf считает на полном клоне');
 assert(app.includes('const c = cloneRowForCalc(p);'), 'сценарий «что если» на полном клоне');
+
+// v12.9.100 (аудит — закрытие находок): ступенчатое хранение WB, ноль продаж, if()
+{
+  const c13 = { console };
+  vm.createContext(c13);
+  vm.runInContext(grab(/const ExprLang = \(function \(\) \{[\s\S]*?\n\}\)\(\);\n/) + '\nthis.ExprLang=ExprLang;', c13);
+  const E = c13.ExprLang;
+  // невыбранная ветка if() не вычисляется: дата там не должна ломать формулу
+  assert.strictEqual(E.eval('if(1, 10, num(d))', { d: new Date() }), 10, 'if(): ленивая ветка');
+  assert.throws(() => E.eval('1.2.3 + 1', {}), /Некорректное число/, 'литерал 1.2.3 запрещён');
+}
+assert(app.includes('wbStorageDayRate'), 'хранение WB ступенчатое (первый литр + 7/15)');
+assert(html.includes('value="0.15" title="Ставка за ПЕРВЫЙ литр'), 'ставка хранения WB по умолчанию 0.15 ₽/л/день');
+assert(app.includes('if (!(num(baseEco.sales) > 0)) { baseEco.breakEvenPrice = 0; baseEco.tgtPrice = 0; return baseEco; }'), 'без прогноза продаж безубыток не выдумывается');
+assert(app.includes('eco.solverNetUnit = sales > 0 ? eco.netProfit / sales : eco.contribution;'), 'юнит при нулевых продажах = вклад единицы');
+assert(!app.includes('function fbsLogistics('), 'мёртвая fbsLogistics удалена');
+assert(html.includes('ttlSec <= 21600 + SKEW'), 'GAS: одноразовость только для токенов ≤ 6 ч');
+assert(html.includes('освобождение — до 20 млн ₽/год, 5% — до 272,5 млн ₽, 7% — до 490,5 млн ₽'), 'подсказка о порогах НДС УСН');
+assert(app.includes('12.9.100-client+audit-fixes-all'), 'версия 12.9.100');

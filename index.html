@@ -7340,7 +7340,7 @@ html { -webkit-text-size-adjust: 100%; }
         <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin-top:9px">
           <div><label class="f">Эквайринг WB, %</label><input id="wbAcquiringPct" type="number" step="0.1" value="1.5" title="Издержки эквайринга при переводе"></div>
           <div><label class="f">СПП WB, % · справочно</label><input id="wbSppPct" type="number" step="0.5" value="0" readonly title="Сохранённое прежнее значение, не влияет на расчёт. Введите эффективное удержание с цены продавца по отчёту; скидку WB не вычитайте второй раз."></div>
-          <div><label class="f">Хранение FBO, ₽/л·день</label><input id="wbStoragePerLDay" type="number" step="0.01" value="0.08" readonly title="Базовый тариф короба"></div>
+          <div><label class="f">Хранение FBO, ₽/л·день</label><input id="wbStoragePerLDay" type="number" step="0.01" value="0.15" title="Ставка за ПЕРВЫЙ литр в день. Каждый следующий литр считается по 7/15 этой ставки (опубликованный тариф 0,15 + 0,07 ₽/л/день до коэффициента хранения). Сверьте со своим складом."></div>
           <div><label class="f">Платная приёмка FBO, ₽/ед</label><input id="wbAcceptanceFee" type="number" value="0" title="Фактическая приёмка; может быть бесплатной"></div><div><label class="f">Коэф. склада на хранение</label><input id="wbStorageCoeff" type="number" step="0.05" value="1" title="Ручной общий коэффициент для всех товаров. Для новых поставок на склады РФ у обычных товаров 1,7, у СГТ 1,0; в других странах и для старых поставок проверьте условия WB. Смешанный каталог одной цифрой точно не посчитать. Сохранённые значения не меняются автоматически."></div>
           <div><label class="f">Хранение WB, дней/выкуп</label><input id="wbStorageDaysPerUnit" type="number" min="0" step="0.1" value="30" title="Расчётная доля платных дней на выкуп. Хранение непроданных остатков автоматически не распределяется."></div>
           <div><label class="f">Невыкуп WB целиком, ₽/случай</label><input id="wbFailedCostManual" type="number" min="0" step="0.01" placeholder="пусто = неполная оценка" title="Полная стоимость невыкупленного заказа, включая прямую и обратную доставку и прочие расходы. Явный ноль сохраняется; не дублируйте отдельные расходы."></div>
@@ -7485,7 +7485,7 @@ html { -webkit-text-size-adjust: 100%; }
         </div>
         <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-top:9px">
           <div><label class="f">ОСНО: расходы с вычетом НДС, %</label><input id="taxOsnoEligibleSharePct" type="number" min="0" max="100" step="0.1" value="0" title="Оценочная доля общих расходов, для которых подтверждён вычет входящего НДС по ставке 22%. Остальные расходы не дают вычета в модели. Уточните у бухгалтера; разные ставки и ограничения требуют отдельного расчёта."></div>
-          <div class="hint" style="grid-column:span 3;line-height:1.55">Все налоговые суммы — упрощённый прогноз по SKU, не декларация. Налог на прибыль, УСН доходы минус расходы и НДС ограничиваются снизу нулём отдельно по товару; это не учитывает периодическое объединение, переносы, зачёты или возмещение. Доля вычета по умолчанию — 0% до настройки. При пороге спецтарифа Яндекс Маркета 300 ₽ модель ищет безопасный верхний порог: ниже может быть отдельный прибыльный диапазон, а сразу выше 300 ₽ — убыток. ОСНО моделируется как юрлицо, все введённые расходы считаются признаваемыми для налога на прибыль; входящий НДС 22% учитывается только по указанной доле расходов. НПД не подходит для обычной перепродажи товаров; ставки зависят от покупателя. Разные ставки, минимум УСН, взносы, лимиты, документы и сроки сверяйте с бухгалтером.</div>
+          <div class="hint" style="grid-column:span 3;line-height:1.55">Все налоговые суммы — упрощённый прогноз по SKU, не декларация. Налог на прибыль, УСН доходы минус расходы и НДС ограничиваются снизу нулём отдельно по товару; это не учитывает периодическое объединение, переносы, зачёты или возмещение. Доля вычета по умолчанию — 0% до настройки. Право на ставки НДС УСН зависит от дохода: освобождение — до 20 млн ₽/год, 5% — до 272,5 млн ₽, 7% — до 490,5 млн ₽ (2026); приложение порог не проверяет — выберите режим по своему доходу, иначе налог будет посчитан по недоступной ставке. При пороге спецтарифа Яндекс Маркета 300 ₽ модель ищет безопасный верхний порог: ниже может быть отдельный прибыльный диапазон, а сразу выше 300 ₽ — убыток. ОСНО моделируется как юрлицо, все введённые расходы считаются признаваемыми для налога на прибыль; входящий НДС 22% учитывается только по указанной доле расходов. НПД не подходит для обычной перепродажи товаров; ставки зависят от покупателя. Разные ставки, минимум УСН, взносы, лимиты, документы и сроки сверяйте с бухгалтером.</div>
         </div>
         <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-top:9px">
           <div><label class="f">Делитель объём. веса (см³/кг)</label><input id="volDiv" type="number" value="5000"></div>
@@ -10215,13 +10215,13 @@ function verifyAuth_(e){
   if (pl.exp <= pl.iat) throw new Error('Некорректный токен: exp раньше или равен iat');
   if (pl.exp - pl.iat > MAX_TTL + SKEW) throw new Error('Срок жизни токена превышает максимум 40 суток');
   if (pl.cid && pl.cid !== cid) throw new Error('company_id в токене не совпадает с запросом — изоляция данных нарушена');
-  /* Одноразовость (jti) проверяется ТОЛЬКО у короткоживущих токенов (TTL ≤ 24 ч):
-     клиент минтит свежий токен на каждый запрос (по умолчанию 12 ч). Длинные
-     «ручные» токены (setup()/issueToken, до 40 суток) по своей природе
-     предъявляются многократно, поэтому для них одноразовость неприменима —
-     их защита остаётся на HMAC и ограниченном сроке жизни. */
+  /* Одноразовость (jti) гарантируется ТОЛЬКО у токенов с TTL ≤ 6 ч: дольше
+     CacheService запись не хранит (лимит 21600 с), и обещать одноразовость
+     сверх этого нельзя. Клиент с v12.9.100 минтит токены не дольше 6 ч.
+     Длинные «ручные» токены (setup()/issueToken, до 40 суток) по своей природе
+     предъявляются многократно — их защита на HMAC и сроке жизни. */
   var ttlSec = pl.exp - pl.iat;
-  if (pl.jti && ttlSec <= 86400 + SKEW){
+  if (pl.jti && ttlSec <= 21600 + SKEW){
     var jc = CacheService.getScriptCache(), jkey = 'JTI_'+cid+'_'+String(pl.jti);
     if (jc.get(jkey)) throw new Error('Повторное использование одноразового токена (jti)');
     jc.put(jkey, '1', Math.min(21600, Math.max(60, ttlSec + SKEW))); /* TTL кэша ≤6 ч */
@@ -13562,7 +13562,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.99-client+audit2-fixes';
+const APP_VERSION = '12.9.100-client+audit-fixes-all';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -17934,7 +17934,7 @@ const S = {
        тогда считаются все пять площадок, как раньше. */
     activeMarketplace: 'OZON', calcSelectedMpOnly: true,
     activeFulfillment: 'FBS', taxRegime: 'usn_income_6', taxOsnoEligibleSharePct: 0, tariffModelVersion: '2026-10-24-r2',
-    wbCommissionPct: 15, wbAcquiringPct: 1.5, wbBaseLogistics: 46, wbExtraLiter: 14, wbWarehouseCoeff: 1.7, wbReturnExtraFixed: 0, wbStoragePerLDay: 0.08, wbStorageCoeff: 1, wbAcceptanceFee: 0, wbBoostPct: 0, wbSppPct: 0, wbFulfillment: 'FBS',
+    wbCommissionPct: 15, wbAcquiringPct: 1.5, wbBaseLogistics: 46, wbExtraLiter: 14, wbWarehouseCoeff: 1.7, wbReturnExtraFixed: 0, wbStoragePerLDay: 0.15, wbStorageCoeff: 1, wbAcceptanceFee: 0, wbBoostPct: 0, wbSppPct: 0, wbFulfillment: 'FBS',
     wbFailedCostManual: null, ymFailedCostManual: null, mmFailedCostManual: null, avitoFailedCostManual: null, wbStorageDaysPerUnit: 30,
     ymProcessingPerUnit: null, ymStoragePerSale: 0,
     ozonCommissionPct: 14, ozonAcquiringPct: 1.5, ozonLogisticsManual: 0, ozonProcessingManual: 0, ozonFboProcessingManual: 0, ozonRealFbsDeliveryPerUnit: 0, ozonRealFbsReturnFeeManual: 0, ozonRealFbsServiceFeeRub: 20, ozonRealFbsUnitsPerShipment: 1, ozonFbsUnitsPerShipment: 1, ozonStorageDaysPerUnit: 30, ozonRateTtlDays: 30, ozonFailedCostManual: null, ozonLastMileFixed: 25, ozonReturnHandlingManual: 0, ozonStoragePerLDayManual: 0, ozonBoostPct: 0, ozonFulfillment: 'FBS',
@@ -19156,7 +19156,7 @@ const ExprLang = (function () {
     while (i < src.length) {
       const c = src[i];
       if (/\s/.test(c)) { i++; continue; }
-      if (isD(c) || (c === '.' && isD(src[i + 1]))) { let j = i; while (j < src.length && (isD(src[j]) || src[j] === '.')) j++; t.push({ t: 'num', v: parseFloat(src.slice(i, j)) }); i = j; continue; }
+      if (isD(c) || (c === '.' && isD(src[i + 1]))) { let j = i; while (j < src.length && (isD(src[j]) || src[j] === '.')) j++; const rawNum = src.slice(i, j); if ((rawNum.match(/\./g) || []).length > 1) throw new Error('Некорректное число в формуле: ' + rawNum); t.push({ t: 'num', v: parseFloat(rawNum) }); i = j; continue; }
       if (c === '"' || c === "'") { const q = c; let j = i + 1, s = ''; while (j < src.length && src[j] !== q) { if (src[j] === '\\') { s += src[j + 1]; j += 2; } else { s += src[j]; j++; } } i = j + 1; t.push({ t: 'str', v: s }); continue; }
       if (isId(c)) { let j = i; while (j < src.length && (isId(src[j]) || isD(src[j]))) j++; t.push({ t: 'id', v: src.slice(i, j) }); i = j; continue; }
       const three = src.substring(i, i + 3), two = src.substring(i, i + 2); // v10.6.1 (fix #10): substr deprecated
@@ -19191,6 +19191,9 @@ const ExprLang = (function () {
           pos++; const args = [];
           if (!(peek() && peek().t === ')')) { do { args.push(tern()); } while (eat(',')); }
           expect(')');
+          /* v12.9.100 (аудит P3): if() ленивый — невыбранная ветка не вычисляется
+             (раньше дата/ошибка в ней ломала формулу даже при ложном условии). */
+          if (name === 'if') return sc => (args[0] && args[0](sc)) ? (args[1] ? args[1](sc) : '') : (args[2] ? args[2](sc) : '');
           return sc => fn.apply(null, args.map(a => a(sc)));
         }
         /* v10.6.1 (fix #8): значения-функции запрещены на любом уровне доступа — закрывает дыру
@@ -19499,16 +19502,6 @@ function billableWeight(p, volumeL) {
   const lwh = num(p.length) * num(p.width) * num(p.height);  // см³
   const volKg = lwh > 0 ? round(lwh / div, 3) : (volumeL > 0 ? round(volumeL / (div / 1000), 3) : 0);
   return { fact, volKg, billable: Math.max(fact, volKg), airKg: Math.max(0, volKg - fact) };
-}
-
-/** Стоимость логистики FBS: базовая ставка за первую единицу веса + доплата за каждый следующий кг (ступенчато). */
-function fbsLogistics(billableKg, t) {
-  const base = num(t.logistics_base) || num(t.logistics_per_kg);  // если ступеней нет — работаем как линейная ставка
-  const perKgNext = num(t.logistics_next_kg);
-  const freeKg = num(t.logistics_free_kg) || 1;                    // кг, входящих в базовую ставку
-  if (!perKgNext) return round(base, 2);                           // одноставочный тариф
-  const extra = Math.max(0, Math.ceil(billableKg - freeKg));
-  return round(base + extra * perKgNext, 2);
 }
 
 /* v10.6 · Сценарий «что если»: клонирует строки, подменяет цену/продажи/ставки и считает Δ ЧП без мутации каталога. */
@@ -20040,7 +20033,7 @@ function ensureTariffModelSettings2026() {
      для старых поставок и других условий продавец проверяет своё значение. */
   const migrationDefaults = {
     tariffModelVersion: TARIFF_MODEL_VERSION,
-    wbBaseLogistics: 46, wbExtraLiter: 14, wbStoragePerLDay: 0.08,
+    wbBaseLogistics: 46, wbExtraLiter: 14, wbStoragePerLDay: 0.15,
     wbReturnExtraFixed: 0, wbStorageCoeff: 1,
     ozonLogisticsManual: 0, ozonProcessingManual: 0, ozonFboProcessingManual: 0,
     ozonRealFbsDeliveryPerUnit: 0, ozonRealFbsReturnFeeManual: 0, ozonRealFbsServiceFeeRub: 20,
@@ -20230,7 +20223,11 @@ function finalizeMarketplaceEco(eco, fixedTotal, solverOnly, invalidNoBuy) {
   eco.contribution = round(eco.effPrice - variableUnit, 4);
   // При нулевом прогнозе продаж решаем гипотетическую единицу, но месячный убыток
   // всё равно содержит фиксированные расходы.
-  eco.solverNetUnit = sales > 0 ? eco.netProfit / sales : eco.contribution - Math.max(0, num(fixedTotal));
+  /* v12.9.100 (аудит P1): при продажах 0 месячный фикс нельзя делить на объём
+     продаж; раньше одна гипотетическая единица «покрывала» весь месячный фикс,
+     и безубыток/маржа таких SKU были искажены. Теперь юнит = вклад единицы,
+     а месячный убыток по-прежнему виден в netProfit (0 выручки − фикс). */
+  eco.solverNetUnit = sales > 0 ? eco.netProfit / sales : eco.contribution;
   if (solverOnly) return eco;
   eco.netProfitUnit = round(eco.solverNetUnit, 2);
   eco.margin = eco.effPrice > 0 ? round(eco.solverNetUnit / eco.effPrice * 100, 1) : 0;
@@ -20375,6 +20372,9 @@ function solveEcoInteger(initial, metric) {
 
 function solveMarketplacePrices(evaluate, baseEco, targetMargin, discontinuityAt) {
   if (baseEco.returnRateInvalid) { baseEco.breakEvenPrice = 0; baseEco.tgtPrice = 0; return baseEco; }
+  /* v12.9.100 (аудит P1): без прогноза продаж безубыточная цена не определена —
+     не выдумываем цену, покрывающую месячный фикс одной единицей. */
+  if (!(num(baseEco.sales) > 0)) { baseEco.breakEvenPrice = 0; baseEco.tgtPrice = 0; return baseEco; }
   const guesses = initialEcoPriceGuesses(baseEco, targetMargin);
   /* BE и target часто probing'уют одни и те же целые цены. Делим лёгкий
      solver-результат между обоими проходами; полный monthly/UI-объект нужен
@@ -20494,8 +20494,12 @@ function calcMarketplacesEconomics(p, ov, meta) {
   const wbDirectLog = round(wbDirectBase * wbWarehouseCoeff * scenarioLogFactor('WB'), 2);
   const wbAcceptance = activeFulfillment === 'FBO' ? Math.max(0, num(cfg.wbAcceptanceFee)) : 0;
   const wbLogisticsRub = round(wbDirectLog + wbAcceptance, 2);
-  const wbStoragePerL = activeFulfillment === 'FBO' ? keepZero(cfg.wbStoragePerLDay, 0.08) : 0;
-  const wbStorageRub = activeFulfillment === 'FBO' ? round(v * Math.max(0, keepZero(cfg.wbStoragePerLDay, 0.08)) * Math.max(0, keepZero(cfg.wbStorageCoeff, 1)) * Math.max(0, keepZero(cfg.wbStorageDaysPerUnit, 30)), 2) : 0;
+  const wbStoragePerL = activeFulfillment === 'FBO' ? keepZero(cfg.wbStoragePerLDay, 0.15) : 0;
+  /* v12.9.100 (аудит P1): хранение СТУПЕНЧАТОЕ — первый литр по полной ставке,
+     каждый следующий по 7/15 (опубликованные 0.15 + 0.07 ₽/л/день). Раньше
+     плоские 0.08 ₽ на весь объём занижали хранение до ~2 раз. */
+  const wbStorageDayRate = v > 0 ? wbStoragePerL * Math.min(v, 1) + wbStoragePerL * (7 / 15) * Math.max(0, v - 1) : 0;
+  const wbStorageRub = activeFulfillment === 'FBO' ? round(wbStorageDayRate * Math.max(0, keepZero(cfg.wbStorageCoeff, 1)) * Math.max(0, keepZero(cfg.wbStorageDaysPerUnit, 30)), 2) : 0;
   const wbReturnExtra = Math.max(0, num(cfg.wbReturnExtraFixed));
   const wbFbsReturnNow = Date.now();
   const wbFbsPvwRateInPeriod = wbFbsReturnNow >= WB_FBS_PVZ_START && wbFbsReturnNow <= WB_FBS_PVZ_END;
@@ -24791,7 +24795,9 @@ async function tokenFor(cid, secret) {
      запрос gas(), поэтому короткий TTL не мешает работе, а утёкший живёт меньше. */
   /* v10.8.6: потолок клиентского токена — 7 суток, пол 1 час; старые
      настройки с tokenTtlDays=30 зажимаются автоматически. */
-  const ttlDays = Math.min(7, Math.max(1 / 24, num(S.settings.tokenTtlDays) || 0.5));
+  /* v12.9.100 (аудит P2): потолок 6 ч — дольше GAS не гарантирует одноразовость
+     jti (лимит CacheService 21600 с); настройка tokenTtlDays зажимается сюда. */
+  const ttlDays = Math.min(6 / 24, Math.max(1 / 24, num(S.settings.tokenTtlDays) || 0.25));
   const payload = { cid, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + Math.round(86400 * ttlDays), jti: uid('t') };
   const json = JSON.stringify(payload);
   const head = b64urlBytes_(new TextEncoder().encode(json));
@@ -34021,7 +34027,7 @@ const UE = {
     setv('#wbCommissionPct', S.settings.wbCommissionPct == null ? 15 : S.settings.wbCommissionPct);
     setv('#wbAcquiringPct', S.settings.wbAcquiringPct == null ? 1.5 : S.settings.wbAcquiringPct);
     setv('#wbSppPct', S.settings.wbSppPct || 0);
-    setv('#wbStoragePerLDay', 0.08);
+    setv('#wbStoragePerLDay', S.settings.wbStoragePerLDay == null ? 0.15 : S.settings.wbStoragePerLDay);
     setv('#wbStorageCoeff', S.settings.wbStorageCoeff == null ? 1 : S.settings.wbStorageCoeff);
     setv('#wbStorageDaysPerUnit', S.settings.wbStorageDaysPerUnit == null ? 30 : S.settings.wbStorageDaysPerUnit);
     setv('#wbAcceptanceFee', S.settings.wbAcceptanceFee || 0);
