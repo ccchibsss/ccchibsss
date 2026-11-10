@@ -70,9 +70,9 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.87-client+light-import-export-release'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.88-client+light-boot'), 'версия клиента обновлена');
 // v12.9.79: светлый экспорт + компактный поштучный калькулятор без месячных расчётов
-assert(app.includes('12.9.87-client+light-import-export-release'), 'версия 12.9.79');
+assert(app.includes('12.9.88-client+light-boot'), 'версия 12.9.79');
 assert(!app.includes('FF1B2140'), 'чёрной заливки шапки экспорта не осталось');
 assert(app.includes("['markupPct','Заработок на закупку, % — формула'"), 'калькулятор: заработок на закупку');
 assert(app.includes("['logisticsRub','Логистика и доставка, ₽/ед — ввод'"), 'калькулятор 24: объединённая логистика');
@@ -89,13 +89,18 @@ assert(app.includes('const skipEcon = options.skipEconomics === true;'), 'лёг
 assert(app.includes('if (skipEcon) { internRowStrings(old); continue; }'), 'лёгкий импорт: расчётные массивы строк не выделяются');
 assert(app.includes('async function ensureEconomics()'), 'лёгкий импорт: ленивый досчёт экономики');
 assert(app.includes('if (S._econPending) { await ensureEconomicsFor(rows); rows = refreshRowRefs(rows); }'), 'лёгкий импорт: экспорт досчитывает экономику своих строк');
-assert(app.includes("if (!skipEcon && !changedRows) S._econPending = false;"), 'лёгкий импорт: флаг ожидания снимает только полный расчёт');
+assert(app.includes("if (!skipEcon && !changedRows) { S._econPending = false; persistEconPending(); }"), 'лёгкий импорт: флаг ожидания снимает только полный расчёт');
 assert(app.includes('async function ensureEconomicsFor(rows)'), 'лёгкий экспорт: досчёт только строк выгрузки');
 assert(app.includes('changedRows: new WeakSet(rows), changedList: rows'), 'лёгкий экспорт: дельта-проход по строкам выгрузки');
 assert(app.includes('function refreshRowRefs(rows)'), 'лёгкий экспорт: обновление ссылок после упаковки строк');
 assert(app.includes('async function releaseEconomics()'), 'лёгкий экспорт: сброс расчётных данных после выгрузки');
 assert(app.includes('_releaseAfterExport()'), 'лёгкий экспорт: точка сброса в экспорте');
 assert(app.includes('usedEstMB()'), 'MemGuard: эвристика памяти без performance.memory');
+assert(app.includes('function persistEconPending()'), 'лёгкий старт: флаг ожидания сохраняется');
+assert(app.includes("lsGet('uc.econPending') === '1'"), 'лёгкий старт: флаг восстанавливается при загрузке');
+assert(app.includes('skipEconomics: S._econPending === true'), 'лёгкий старт: стартовый пайплайн пропускает экономику');
+assert(app.includes('if (estimated) { soft = 700; hard = 950; }'), 'MemGuard: для эвристики пороги выше');
+assert(app.includes('smallDelta: true, persist: false, suppressSummaryToast: true, preserveView: true'), 'лёгкий экспорт: срез таблицы не перестраивается');
 assert(app.includes('used = this.usedEstMB();'), 'MemGuard: check использует эвристику в Firefox/Safari');
 assert(app.includes('const findByOe = r => {'), 'импорт: поиск SKU прайса только по OE');
 assert(!app.includes('analogMap'), 'импорт: поиска по аналогам нет');
@@ -137,7 +142,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.87-client+light-import-export-release'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.88-client+light-boot'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -177,7 +182,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.87-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.87-client+light-import-export-release'), 'версия клиента обновлена');
+assert(app.includes('12.9.88-client+light-boot'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -264,13 +269,13 @@ console.log('OK: все тесты пройдены (' + rows.length + ' стр�
 // v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
 assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
 assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
-assert(app.includes('12.9.87-client+light-import-export-release'), 'версия клиента обновлена');
+assert(app.includes('12.9.88-client+light-boot'), 'версия клиента обновлена');
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
 assert(app.includes('if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
-assert(app.includes('12.9.87-client+light-import-export-release'), 'версия клиента обновлена');
+assert(app.includes('12.9.88-client+light-boot'), 'версия клиента обновлена');
 
 assert(app.includes("classList.contains('active')) UE.render()"), 'импорт: UE.render только для активного раздела');
 assert(app.includes("classList.contains('active')) Dash.render()"), 'импорт: Dash.render только для активного раздела');
@@ -361,7 +366,7 @@ assert(app.includes("classList.contains('active')) Dash.render()"), 'импор�
 assert(app.includes('HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined)'), 'импорт: таргетный rebuildIndex');
 assert(app.includes('dedupeCatalog(_dedupeKeys)'), 'импорт: таргетный dedupe после первого полного');
 assert(app.includes('persistChangedOnly: changedTouched > 0 && !dedup'), 'импорт: запись только дельты, если не было слияний');
-assert(app.includes('12.9.87-client+light-import-export-release'), 'версия клиента обновлена');
+assert(app.includes('12.9.88-client+light-boot'), 'версия клиента обновлена');
 
 // v12.9.78: автосверка аномалий находит донора через реестр byOe (функционально, настоящий AnomalyOE+DimPolicy)
 ;(async () => {
@@ -414,4 +419,4 @@ assert(app.includes('12.9.87-client+light-import-export-release'), 'версия
 assert(app.includes('const donorRows=[];'), 'автосверка: отбор доноров по реестру');
 assert(app.includes("lsSet('uc.fullCalcFp', globalParamsFp())"), 'полный пересчёт фиксирует отпечаток параметров');
 assert(app.includes('профиль дельты: изменено строк'), 'журнал импорта: профиль дельты');
-assert(app.includes('12.9.87-client+light-import-export-release'), 'версия клиента обновлена');
+assert(app.includes('12.9.88-client+light-boot'), 'версия клиента обновлена');
