@@ -70,9 +70,9 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.94-client+optimization'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.95-client+all-sections'), 'версия клиента обновлена');
 // v12.9.79: светлый экспорт + компактный поштучный калькулятор без месячных расчётов
-assert(app.includes('12.9.94-client+optimization'), 'версия 12.9.79');
+assert(app.includes('12.9.95-client+all-sections'), 'версия 12.9.79');
 assert(!app.includes('FF1B2140'), 'чёрной заливки шапки экспорта не осталось');
 assert(app.includes("['markupPct','Заработок на закупку, % — формула'"), 'калькулятор: заработок на закупку');
 assert(app.includes("['logisticsRub','Логистика и доставка, ₽/ед — ввод'"), 'калькулятор 24: объединённая логистика');
@@ -161,7 +161,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.94-client+optimization'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.95-client+all-sections'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -201,7 +201,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.94-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.94-client+optimization'), 'версия клиента обновлена');
+assert(app.includes('12.9.95-client+all-sections'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -288,13 +288,13 @@ console.log('OK: все тесты пройдены (' + rows.length + ' стр�
 // v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
 assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
 assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
-assert(app.includes('12.9.94-client+optimization'), 'версия клиента обновлена');
+assert(app.includes('12.9.95-client+all-sections'), 'версия клиента обновлена');
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
 assert(app.includes('if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
-assert(app.includes('12.9.94-client+optimization'), 'версия клиента обновлена');
+assert(app.includes('12.9.95-client+all-sections'), 'версия клиента обновлена');
 
 assert(app.includes("classList.contains('active')) UE.render()"), 'импорт: UE.render только для активного раздела');
 assert(app.includes("classList.contains('active')) Dash.render()"), 'импорт: Dash.render только для активного раздела');
@@ -385,7 +385,7 @@ assert(app.includes("classList.contains('active')) Dash.render()"), 'импор�
 assert(app.includes('HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined)'), 'импорт: таргетный rebuildIndex');
 assert(app.includes('dedupeCatalog(_dedupeKeys)'), 'импорт: таргетный dedupe после первого полного');
 assert(app.includes('persistChangedOnly: changedTouched > 0 && !dedup'), 'импорт: запись только дельты, если не было слияний');
-assert(app.includes('12.9.94-client+optimization'), 'версия клиента обновлена');
+assert(app.includes('12.9.95-client+all-sections'), 'версия клиента обновлена');
 
 // v12.9.78: автосверка аномалий находит донора через реестр byOe (функционально, настоящий AnomalyOE+DimPolicy)
 ;(async () => {
@@ -438,7 +438,7 @@ assert(app.includes('12.9.94-client+optimization'), 'версия клиента
 assert(app.includes('const donorRows=[];'), 'автосверка: отбор доноров по реестру');
 assert(app.includes("lsSet('uc.fullCalcFp', globalParamsFp())"), 'полный пересчёт фиксирует отпечаток параметров');
 assert(app.includes('профиль дельты: изменено строк'), 'журнал импорта: профиль дельты');
-assert(app.includes('12.9.94-client+optimization'), 'версия клиента обновлена');
+assert(app.includes('12.9.95-client+all-sections'), 'версия клиента обновлена');
 
 // v12.9.93: потоковый CSV-парсер — разрезы чанков в любом месте не меняют результат
 {
@@ -472,7 +472,7 @@ assert(html.includes('id="btnDiskImport"'), 'кнопка дискового и�
 assert(app.includes('skipEconomics: true, persist: false, onProgress: prog, stepRange: [82, 97]'), 'дисковый импорт: экономика лениво, запись одной порцией');
 
 // v12.9.94: пакет оптимизаций
-assert(app.includes('12.9.94-client+optimization'), 'версия 12.9.94');
+assert(app.includes('12.9.95-client+all-sections'), 'версия 12.9.94');
 assert(app.includes('econSkipFresh'), 'пропуск пересчёта актуальной экономики');
 assert(app.includes("S._econFreshKey = _econFreshKey"), 'отметка актуальности экономики фиксируется');
 assert(app.includes('расчётные поля экономики (досчёт при экспорте)'), 'MemGuard: автосброс экономики при давлении памяти');
@@ -481,3 +481,53 @@ assert(app.includes('дедупликация при загрузке пропу
 assert(app.includes('_diskAbort'), 'дисковый импорт: отмена пользователем');
 assert(app.includes('HVC.ingest(part)'), 'дисковый импорт: реестры Каталога V пополняются пакетами');
 assert(app.includes('запись каталога одной порцией'), 'дисковый импорт: без второй полной записи пайплайна');
+
+// v12.9.95: золотые фикстуры экономики (эталонные выгрузки владельца, 12 SKU)
+{
+  const readGolden = name => {
+    const txt = fs.readFileSync(__dirname + '/../' + name, 'utf8').replace(/^\uFEFF/, '');
+    const lines = txt.split(/\r?\n/).filter(l => l.trim());
+    const head = lines[0].split(';');
+    return lines.slice(1).map(l => { const c = l.split(';'); const o = {}; head.forEach((h, i) => o[h] = c[i]); return o; });
+  };
+  const rec = readGolden('UC_unit_economics_OZON_2026-11-06_recalculated.csv');
+  const fil = readGolden('UC_unit_economics_OZON_2026-11-06_filtered.csv');
+  assert.strictEqual(rec.length, 12, 'golden: 12 SKU в пересчитанной выгрузке');
+  assert.strictEqual(fil.length, 12, 'golden: 12 SKU в отфильтрованной выгрузке');
+  const byArt = rows => new Map(rows.map(r => [r['Артикул'], r]));
+  const rm = byArt(rec), fm = byArt(fil);
+  assert.deepStrictEqual([...rm.keys()].sort(), [...fm.keys()].sort(), 'golden: состав SKU совпадает');
+  for (const [art, r] of rm) {
+    assert.strictEqual(r['Цена, ₽/ед.'], fm.get(art)['Цена, ₽/ед.'], 'golden: цена SKU ' + art + ' стабильна между выгрузками');
+  }
+}
+// v12.9.95: воркер XLSX дискового импорта на настоящем SheetJS
+{
+  const c8 = { console, Uint8Array, Array, Object, String, Math, JSON, Promise, setTimeout };
+  c8.self = { msgs: [], postMessage(m) { this.msgs.push(m); } };
+  vm.createContext(c8);
+  vm.runInContext(scripts[1], c8);
+  assert(c8.XLSX, 'SheetJS поднялся в контексте воркера');
+  vm.runInContext(grab(/function DiskXlsxWorkerMain\(\) \{[\s\S]*?\n\}\n/) + '\nDiskXlsxWorkerMain();', c8);
+  const wb8 = c8.XLSX.utils.book_new();
+  c8.XLSX.utils.book_append_sheet(wb8, c8.XLSX.utils.aoa_to_sheet(
+    [['Бренд', 'Каталожный номер', 'Цена'], ['BOSCH', 'A100', '149,81'], ['MANN', 'B200', 200]]), 'Прайс');
+  const buf8 = c8.XLSX.write(wb8, { type: 'array', bookType: 'xlsx' });
+  c8.self.onmessage({ data: { type: 'load', buf: buf8 } });
+  const h8 = c8.self.msgs.find(m => m.type === 'headers');
+  assert(h8 && h8.rows[1] === 'Каталожный номер', 'воркер XLSX: заголовки получены');
+  c8.self.onmessage({ data: { type: 'go' } });
+  const rows8 = c8.self.msgs.filter(m => m.type === 'batch').flatMap(b => b.rows);
+  assert.strictEqual(rows8.length, 2, 'воркер XLSX: строки без заголовка');
+  assert.strictEqual(rows8[0][2], '149,81', 'воркер XLSX: значение ячейки текстом');
+}
+// v12.9.95: остальные разделы пакета
+assert(app.includes('12.9.95-client+all-sections'), 'версия 12.9.95');
+assert(app.includes('warnQuarantinedBeforeExport'), 'карантин: предупреждение перед выгрузкой');
+assert(app.includes("await CsvStream.rows(file, r => { table.push(r); }"), 'обычный импорт: потоковый разбор CSV');
+assert(app.includes('let first = true;'), 'дисковый импорт: заголовок файла не попадает в данные');
+assert(app.includes('покрытие OE: '), 'дисковый импорт: отчёт о покрытии кроссами');
+assert(app.includes('oePairSets'), 'дисковый импорт: неоднозначные OE считаются');
+assert(app.includes('_xlsxBegin'), 'дисковый импорт: XLSX через воркер');
+assert(app.includes('const SettingsSnapshot = {'), 'снимок настроек присутствует');
+assert(html.includes('id="btnSettingsSnapshot"'), 'кнопка снимка настроек в интерфейсе');
