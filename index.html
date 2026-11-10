@@ -7656,6 +7656,10 @@ html { -webkit-text-size-adjust: 100%; }
         <input type="checkbox" id="enAutoStdDims" style="accent-color:var(--teal)">
         <span>Стандартные ОВХ из справочника — только при выгрузке в пустые поля, жёлтой заливкой (в каталог не записываются)</span>
       </label>
+      <label style="display:flex;gap:7px;align-items:center;cursor:pointer;font-size:11.5px;margin-bottom:6px">
+        <input type="checkbox" id="enCalcStdDims" style="accent-color:var(--teal)">
+        <span>Пересчёт экономики по стандартным ОВХ: SKU без габаритов считаются по типовым значениям (только точное совпадение; в каталог не записываются, SKU помечается в «Качестве данных»)</span>
+      </label>
       <div class="hint" style="margin-bottom:6px">Правило ОВХ: только тот же артикул+бренд или схожий OE-номер; из допустимых полных записей выбирается меньший комплект вес+три стороны, который проходит лимиты аномалий категории. Между разными артикулами без схожего OE данные не переносятся. Заполняются только пустые значения, источник пишется в «Происхождение».</div>
       <div id="enCoverage" style="display:flex;gap:6px;flex-wrap:wrap"></div>
       <div id="enAuditReport" style="display:none;margin-top:10px;padding:10px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg)">
@@ -7713,6 +7717,7 @@ html { -webkit-text-size-adjust: 100%; }
         <div style="flex:1 1 210px"><label class="f" for="categoryTnvedSearch">Вид или код</label><input id="categoryTnvedSearch" placeholder="Поиск в справочнике" style="width:100%"></div>
         <button type="button" class="btn sm gh" id="categoryTnvedExport">Скачать справочник CSV</button>
         <button type="button" class="btn sm pri" id="applyStdDimsBtn">Применить весогабариты</button>
+        <button type="button" class="btn sm" id="recalcStdDimsBtn" title="Полный пересчёт каталога: для SKU без габаритов экономика считается по типовым стандартным ОВХ (в каталог они не записываются)">Пересчёт по стандартным ОВХ</button>
         <button type="button" class="btn sm" id="previewStdDimsBtn">Анализ весогабаритов</button>
       </div>
       <div class="hint" id="categoryTnvedStats" style="margin:8px 0"></div>
@@ -13552,7 +13557,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.90-client+reimport-kit-full';
+const APP_VERSION = '12.9.92-client+std-dims-highlight';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -20977,7 +20982,39 @@ function clearMissingTariffEconomics(p, reason) {
   p.economicsDataQuality='ПРОВЕРИТЬ: '+reason; p.recommendation='Расчёт цены приостановлен: '+reason; p.status=skuStatus(p);
   return p;
 }
+/* v12.9.91: пересчёт по стандартным ОВХ. Для SKU с пустыми габаритами на время
+   расчёта подставляются типовые значения из справочника StdDims — только точное
+   совпадение (категория/вид/название), только в пустые поля. В каталог значения
+   НЕ записываются (правило v12.9.67): после расчёта реальные поля возвращаются,
+   а SKU помечается _stdDimsCalc для «Качества данных» и отчётов. */
+function stdDimsSubstituteForCalc(p) {
+  if (!p || p.dimensionAnomalyBlocked || typeof StdDims === 'undefined' || !S.settings || S.settings.calcStdDims !== true) return null;
+  const missing = ['length', 'width', 'height', 'weight'].filter(k => !(num(p[k]) > 0));
+  if (!missing.length) return null;
+  let f = null;
+  try { f = StdDims.match(p, false); } catch (e) { return null; }
+  if (!f || f.status !== 'match' || f.match !== 'exact' || !f.std) return null;
+  const key = { length: 'l', width: 'w', height: 'h', weight: 'wt' };
+  const saved = { volume: p.volume }, used = [];
+  for (const k of missing) {
+    const v = num(f.std[key[k]]);
+    if (v > 0) { saved[k] = p[k]; p[k] = v; used.push(k); }
+  }
+  if (!used.length) return null;
+  return { saved, used, source: String(f.std.c || '') };
+}
 function computeEconomics(p, ov) {
+  const sub = stdDimsSubstituteForCalc(p);
+  try { return computeEconomicsInner(p, ov); }
+  finally {
+    if (sub) {
+      for (const k of sub.used) p[k] = sub.saved[k];
+      p.volume = sub.saved.volume;
+      p._stdDimsCalc = { source: sub.source, fields: sub.used.slice(), at: nowISO() };
+    } else if (p && p._stdDimsCalc) delete p._stdDimsCalc;
+  }
+}
+function computeEconomicsInner(p, ov) {
   if (p) { p.missingTariffBlocked = ''; p.priceInputsIncomplete=false; p.priceInputsReason=''; p.marketComparisonIncomplete=false; p.marketComparisonReasons=''; }
   if (p && p.dimensionAnomalyBlocked) return clearAnomalyEconomics(p);
   if (commonFulfillment() === 'SELECT_MODE') return clearUnsupportedFulfillmentEconomics(p);
@@ -21958,6 +21995,7 @@ function econQualityText(p) {
   if (p.priceModelUnavailable) return 'ПРОВЕРИТЬ: цена не найдена в диапазоне модели — не использовать для отправки';
   const cols = enrichColumnsText(p);
   const notes = [];
+  if (p._stdDimsCalc) notes.push('габариты для расчёта — СТАНДАРТНЫЕ (не измерены): ' + (p._stdDimsCalc.source || 'справочник'));
   if (ozonTariffReminderDue() && ['OZON','ALL'].includes(S.settings.activeMarketplace || 'ALL'))
     notes.push('Ozon: с 01.12.2026 сверьте новые тарифы; новая формула в этой версии не реализована');
   /* Закупка есть, цена продажи ещё не задана — это нормальный сценарий:
@@ -22485,7 +22523,7 @@ async function _persistNowImpl(changedList) {
     let nextProductId = 1;
     for (const row of S.rows) if (typeof row.id === 'number' && Number.isFinite(row.id)) nextProductId = Math.max(nextProductId, row.id + 1);
     const slimOf = src => {
-      const { _t, _bw, id, mp, ...o } = src;
+      const { _t, _bw, id, mp, _stdDimsCalc, ...o } = src;
       /* Source SKU also lives on the compact prototype and must survive reloads. */
       if (src.originalArticle !== undefined && src.originalArticle !== null) o.originalArticle = src.originalArticle;
       /* volume is a compact calculated field, but may also be explicit user input. */
@@ -30893,6 +30931,17 @@ const CategoryTnvedUI = {
     if (e) e.onclick=()=>this.download();
     const b=document.getElementById('applyStdDimsBtn');
     if (b) b.onclick=()=>{applyStdDims('apply');};
+    const rb=document.getElementById('recalcStdDimsBtn');
+    if (rb) rb.onclick=async ()=>{
+      S.settings.calcStdDims = true;
+      const sw = document.getElementById('enCalcStdDims'); if (sw) sw.checked = true;
+      try { await UI2.saveSettings(); } catch (e) { }
+      await runPipeline(true);
+      const n = (S.rows || []).filter(p => p._stdDimsCalc).length;
+      Toast.ok('Пересчёт по стандартным ОВХ выполнен', n
+        ? fmt(n) + ' SKU посчитано по типовым габаритам (пометка — в «Качестве данных»); реальные поля каталога не изменены.'
+        : 'SKU с пустыми габаритами и точным стандартным совпадением не найдено.');
+    };
     const pb=document.getElementById('previewStdDimsBtn');
     if (pb) pb.onclick=()=>{CategoryTnvedUI.renderStdDimsModal();};
   },
@@ -38775,6 +38824,10 @@ const Exp = {
     const cat = exportCatalog().filter(c => picked[c.k] && !exportColumnExcluded(c, activeMps));
     if (cat.some(c => ['weight','length','width','height'].includes(c.k)) && !cat.some(c => c.k === 'stdDimsExport'))
       cat.push({ g: 'in', k: 'stdDimsExport', n: 'ОВХ из стандартных при выгрузке', w: 34, txt: 1, src: p => (typeof exportDimsNote === 'function' ? exportDimsNote(p) : '') });
+    /* v12.9.92: SKU, посчитанные по стандартным ОВХ (v12.9.91), выгружаются с
+       колонкой-маркером и подсветкой #FFA07A в XLSX. */
+    if (!cat.some(c => c.k === 'stdDimsCalc'))
+      cat.push({ g: 'in', k: 'stdDimsCalc', n: 'ОВХ из стандартных при расчёте', w: 36, txt: 1, src: p => (p && p._stdDimsCalc ? 'СТАНДАРТ-РАСЧЁТ: ' + (p._stdDimsCalc.source || 'справочник') + (Array.isArray(p._stdDimsCalc.fields) && p._stdDimsCalc.fields.length ? ' (' + p._stdDimsCalc.fields.join(', ') + ')' : '') : '') });
     if (cat.some(c => ['category','category_type','tnved'].includes(c.k)) && !cat.some(c => c.k === 'autoFillNote'))
       cat.push({ g: 'in', k: 'autoFillNote', n: 'Автозаполнение (проверить)', w: 30, txt: 1, src: p => (typeof autoFillNote === 'function' ? autoFillNote(p) : '') });
     if (!cat.length) return Toast.warn('Колонки не выбраны', 'Отметьте хотя бы одну колонку');
@@ -39024,6 +39077,12 @@ const Exp = {
     if (ref.stdDimsExport) {
       ct('stdDimsExport', 'СТАНДАРТ', dYellow);
       for (const dk of ['weight','length','width','height']) if (mainRef[dk]) ce(dk, `${mainRef.stdDimsExport}2<>""`, dYellow);
+    }
+    /* v12.9.92: расчёт по стандартным ОВХ — подсветка #FFA07A (маркер и артикул). */
+    const dStdCalc = dxf('FFFFA07A', false, 'FF000000');
+    if (ref.stdDimsCalc) {
+      ct('stdDimsCalc', 'СТАНДАРТ-РАСЧЁТ', dStdCalc);
+      if (mainRef.article) ce('article', `${mainRef.stdDimsCalc}2<>""`, dStdCalc);
     }
     if (ref.autoFillNote) {
       ct('autoFillNote', 'АВТО', dYellow);
@@ -44361,6 +44420,16 @@ function bindAll() {
     autoStdSw.onchange = async () => {
       S.settings.autoStdDims = autoStdSw.checked;
       try { await UI2.saveSettings(); } catch (e) { }
+    };
+  }
+  const calcStdSw = $('#enCalcStdDims');
+  if (calcStdSw) {
+    calcStdSw.checked = S.settings.calcStdDims === true;
+    calcStdSw.onchange = async () => {
+      S.settings.calcStdDims = calcStdSw.checked;
+      try { await UI2.saveSettings(); } catch (e) { }
+      Toast.info('Стандартные ОВХ в расчёте ' + (calcStdSw.checked ? 'включены' : 'выключены'),
+        calcStdSw.checked ? 'Нажмите «Пересчёт» или кнопку «Пересчёт по стандартным ОВХ», чтобы применить к каталогу.' : 'Следующий пересчёт будет только по реальным габаритам.');
     };
   }
   Import.syncPriceIsCost();
