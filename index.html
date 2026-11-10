@@ -9091,6 +9091,7 @@ try {
       <label style="display:flex;gap:6px;align-items:center;max-width:270px" title="Не скрывает из-за цены/остатка во время импорта; явная видимость, политики и общее автоскрытие после запуска продолжают действовать"><input id="impKeepVisibility" type="checkbox" style="width:auto"><span class="hint">Не скрывать автоматически при импорте</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:360px" title="Источник — тот же артикул и бренд или схожий OE-номер. Из допустимых полных записей выбирается меньший комплект вес + три стороны, проверенный по лимитам категории. Старые значения сохраняются; товар остаётся в карантине до проверки."><input id="impAnomOeAuto" type="checkbox" style="width:auto"><span class="hint">Автосверка аномальных ОВХ по OE · с проверкой</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Первый файл — прайс: при пустом каталоге он создаёт SKU. Дальше, пока переключатель включён, любой новый файл (весогабариты, OE-кроссы, категории, цены, остатки) только обогащает SKU текущего прайса; строк вне прайса не добавляет. Выключите, чтобы файл мог создавать новые SKU."><input id="impEnrichOnly" type="checkbox" style="width:auto"><span class="hint">Только обогащение по текущему прайсу, новых SKU не создавать</span></label>
+      <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Импорт загружает и обогащает каталог, но НЕ считает юнит-экономику: каталог после импорта занимает заметно меньше памяти, а импорт проходит быстрее. Экономика посчитается автоматически при первом экспорте или входе в «Данные», дашборд и расчётные разделы."><input id="impLightMode" type="checkbox" style="width:auto"><span class="hint">Лёгкий импорт: экономику считать при экспорте, а не при загрузке</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Файлы, загружаемые после источника (весогабариты, OE-кроссы, названия), сразу расходятся по уже загруженному каталогу: строки, связанные тем же артикулом или общим OE-номером, получают недостающие поля и стандартные весогабариты. Пустые поля заполняются, существующие значения не меняются."><input id="impEnrichRelated" type="checkbox" style="width:auto"><span class="hint">Обогащать связанные строки каталога из этого файла</span></label>
       <div style="display:flex;gap:10px;align-items:center;height:28px;flex-wrap:wrap">
         <span class="hint" style="letter-spacing:.08em;text-transform:uppercase">Обогащать по OE:</span>
@@ -13551,7 +13552,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.85-client+enrich-oe-key-only';
+const APP_VERSION = '12.9.86-client+light-import-lazy-economics';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21291,7 +21292,13 @@ function runPipeline(full, options) {
        поля посчитаны прошлыми проходами. Раньше такой «точечный» пересчёт всё
        равно перебирал весь каталог — на 217 000 SKU это сотни секунд. */
     const deltaFast = !!(changedRows && options.smallDelta === true);
+    /* v12.9.86: лёгкий режим — строки нормализуются, категоризируются и
+       обогащаются, но computeEconomics не вызывается и компактные расчётные
+       массивы не выделяются. S._econPending помечает каталог как
+       «экономика не посчитана»; ensureEconomics() досчитывает её по требованию. */
+    const skipEcon = options.skipEconomics === true;
     const total = S.rows.length;
+    if (skipEcon && total > 0) S._econPending = true;
     /* Группировка OE выполняется ДО обогащения и НЕ зависит от графа HVC:
        объединяем OE строк одной СВЯЗКИ Артикул+Бренд прямо из каталога. */
     /* v12.9.54: при точечной подстановке ОВХ ключи артикул+бренд и OE-номера не
@@ -21320,6 +21327,7 @@ function runPipeline(full, options) {
            расчётные поля с тех пор никто не трогал — повторная упаковка и
            интернирование были чистым расходом на импортах с дельтой >= 2 %. */
         if (changedRows && !changedRows.has(old)) continue;
+        if (skipEcon) { internRowStrings(old); continue; }
         const compact = compactRowNumeric(internRowStrings(old));
         if (compact !== old) {
           compactReplacement.set(old, compact);
@@ -21414,8 +21422,10 @@ function runPipeline(full, options) {
           /* Обязательный барьер перед любыми производными полями.  Выполняется
              для каждого SKU при каждом полном и частичном запуске пайплайна. */
           if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p);
-          computeEconomics(p);
-          p.economicsDataQuality = econQualityText(p);   /* v12.9.8: почему нули в прибыли */
+          if (!skipEcon) {
+            computeEconomics(p);
+            p.economicsDataQuality = econQualityText(p);   /* v12.9.8: почему нули в прибыли */
+          }
           /* v12.9.6-mem: строка уже изменена на месте; клонирование через spread
              удваивало живые объекты каталога на каждом проходе (источник OOM). */
         } catch (e) {
@@ -21453,7 +21463,8 @@ function runPipeline(full, options) {
     }
     /* v12.9.78: полный проход (без набора изменённых строк) — фиксируем
        отпечаток глобальных параметров, к которому относятся цифры каталога. */
-    if (!changedRows) { try { lsSet('uc.fullCalcFp', globalParamsFp()); } catch (e) { } }
+    if (!changedRows && !skipEcon) { try { lsSet('uc.fullCalcFp', globalParamsFp()); } catch (e) { } }
+    if (!skipEcon && !changedRows) S._econPending = false;   /* v12.9.86: полный расчёт выполнен */
     const tEnd = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const elapsedMs = Math.max(1, Math.round(tEnd - tStart));
     const speedSkuSec = Math.round(total / (elapsedMs / 1000));
@@ -21461,6 +21472,7 @@ function runPipeline(full, options) {
     if (!savedOk) Toast.warn('Результат только в памяти', 'Сохранение в IndexedDB не завершилось. Экспортируйте данные, не закрывая вкладку.');
     else if (econErr) Toast.warn('Пайплайн завершён с ошибками', `экономика не рассчиталась у ${fmt(econErr)} SKU (${firstErr.slice(0, 100)}) — остальные пересчитаны за ${elapsedMs} мс`);
     else if (anomalyBlocked.length) Toast.err('Обязательная проверка габаритов', `${fmt(anomalyBlocked.length)} SKU заблокировано для расчётов и выгрузок: ` + anomalyBlocked.slice(0, 6).map(p => p.article).join(', ') + (anomalyBlocked.length > 6 ? '…' : '') + '. Исправьте значения или подтвердите их в разделе «Аномалии».');
+    else if (skipEcon) Toast.ok('Лёгкий импорт завершён', `${fmt(total)} SKU загружено и обогащено за ${elapsedMs} мс. Юнит-экономика не считалась — она посчитается при первом экспорте или входе в расчётные разделы.`);
     else Toast.ok('Пересчёт завершён', `⚡ ${fmt(total)} SKU за ${elapsedMs} мс (${fmt(speedSkuSec)} SKU/сек) · Все 5 маркетплейсов`);
     try {
       if (MarkStatus.unknown.size) Toast.info('Новые статусы Честного знака',
@@ -21480,6 +21492,18 @@ function runPipeline(full, options) {
     RecommendedPriceScenario.pipelineEnd();
     S._pipeActive = Math.max(0, (S._pipeActive || 1) - 1);
   });
+}
+
+/* v12.9.86: ленивый расчёт экономики после лёгкого импорта. Полный проход
+   пайплайна без набора изменённых строк: строки упаковываются и получают
+   расчётные поля, флаг ожидания снимается самим пайплайном. Повторные вызовы
+   во время идущего расчёта делят один промис. */
+let _econEnsureJob = null;
+async function ensureEconomics() {
+  if (!S._econPending || !S.rows.length) return false;
+  if (_econEnsureJob) return _econEnsureJob;
+  _econEnsureJob = (async () => { await runPipeline(true); return true; })();
+  try { return await _econEnsureJob; } finally { _econEnsureJob = null; }
 }
 
 /* v12.9.6-mem: нехватка памяти не должна оставлять пустую вкладку без объяснения.
@@ -25708,7 +25732,14 @@ const UI = {
     $('#main').scrollTop = 0;
     location.hash = v;
     const fn = { dashboard: () => Dash.render(), data: () => { buildCols(); applyFilter(); Table.head(); Table.paint(); UI.fillFilters(); }, unit: () => { UE.render(); UE.renderTariffTable(); }, 'ozon-advisor': () => OzonAdvisor.render(), cats: () => Cats.render(), pl: () => PL.render(), supply: () => Supply.render(), mail: () => Mail.renderList(), api: () => Api.render(), goods: () => Goods.render(), export: () => Exp.render(), orders: () => TransitOps.render(), 'price-limiter': () => PriceLimiter.render(), anomaly: () => { AnomalyDetector.renderLimits(); AnomalyDetector.renderFound(); AnomalyDetector.renderLog(); }, 'oe-groups': () => OEAggregator.build(), moq: () => { MOQManager.renderRules(); MOQManager.renderBasket(); }, lifecycle: () => LifecycleManager.render(), whatif: () => { WhatIf.renderList(); }, finance: () => FinanceRecon.render(), undo: () => UndoRedo.render(), competitors: () => CompetitorIntel.render() }[v];
-    if (fn) setTimeout(fn, 30);
+    /* v12.9.86: после лёгкого импорта расчётные разделы сначала досчитывают
+       экономику, иначе таблица/дашборд показали бы пустые прибыли. */
+    if (fn) {
+      if (S._econPending && ['data','dashboard','unit','export','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(v)) {
+        Toast.info('Считаю юнит-экономику', 'Каталог был загружен в лёгком режиме — выполняю отложенный расчёт…');
+        ensureEconomics().then(() => setTimeout(fn, 30)).catch(() => setTimeout(fn, 30));
+      } else setTimeout(fn, 30);
+    }
     /* v12.9.12: карточка наценок по брендам живёт в разделе «Управление товарами» */
     if (v === 'goods' && typeof BrandMarkupUI !== 'undefined') setTimeout(() => { try { BrandMarkupUI.render(); } catch (e) {} }, 60);
     if (v === 'unit' && !S.tariffs.loaded) Toast.warn('Проверьте тарифы', 'Встроенные параметры являются допущениями; фактические тарифы Ozon сверяйте в кабинете.');
@@ -26211,6 +26242,7 @@ const Import = {
       const keepVis = $('#impKeepVisibility'); if (keepVis) keepVis.checked = true;
       const relSw = $('#impEnrichRelated'); if (relSw) relSw.checked = S.settings.enrichRelatedOnImport !== false;
       const eoSw = $('#impEnrichOnly'); if (eoSw) eoSw.checked = S.settings.importEnrichOnly !== false;
+      const lmSw = $('#impLightMode'); if (lmSw) lmSw.checked = !!S.settings.importLightMode;
       if ($('#impMode')) $('#impMode').value = 'upsert';
       Import.syncPriceIsCost();
       if (advisorTemplate) {
@@ -26402,6 +26434,13 @@ const Import = {
       const enrichOnlyOn = eoEl ? !!eoEl.checked : (S.settings.importEnrichOnly !== false);
       S.settings.importEnrichOnly = enrichOnlyOn;
       const enrichOnlyRef = enrichOnlyOn && S.rows.length > 0;
+      /* v12.9.86: лёгкий импорт — пайплайн после загрузки не считает экономику;
+         расчёт запускается лениво (ensureEconomics) при экспорте или входе в
+         расчётные разделы. Каталог до первого расчёта живёт без расчётных
+         Float64Array: на больших прайсах это сотни мегабайт heap. */
+      const lightEl = $('#impLightMode');
+      const lightModeOn = lightEl ? !!lightEl.checked : !!S.settings.importLightMode;
+      S.settings.importLightMode = lightModeOn;
       let enrichOnlySkipped = 0;
       const keyMode = S.settings.keyMode;
       /* v12.9.84 → v12.9.85: расширенный поиск SKU прайса для обогащения — только
@@ -26984,6 +27023,7 @@ const Import = {
              дублей (dedup удаляет строки из каталога). Слияния OE по связкам
              и группы артикулов загрузка выводит заново из записанных строк. */
           smallDelta, persistChangedOnly: changedTouched > 0 && !dedup,
+          skipEconomics: lightModeOn,
           changedList, onProgress: prog, stepRange: [78, 97]
         });
       }
@@ -32451,6 +32491,7 @@ const OzonExport = {
       if (!rows.length) return Toast.warn('Нет строк для калькулятора', OzonExport.emptyReason(pick.stats));
       const now = new Date(), pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_калькулятор_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.xlsx`;
+      await ensureEconomics();
       await exportGuard('Ozon — калькулятор юнит-экономики', () => withProgress('Ozon — калькулятор юнит-экономики', `${fmt(rows.length)} SKU · числовые исходные данные и формулы Excel…`, async prog => {
         const blob = await OzonExport.generateEconomicsXlsx(rows, opts, prog);
         Exp.download(blob, fn);
@@ -38574,7 +38615,7 @@ const Exp = {
   },
 
   /* ГЛАВНЫЙ ЭКСПОРТ: одна книга XLSX (или один CSV) независимо от объёма. */
-  async run(forceRows) { return exportGuard('Экспорт', () => this._runImpl(forceRows)); },
+  async run(forceRows) { await ensureEconomics(); return exportGuard('Экспорт', () => this._runImpl(forceRows)); },
   async _runImpl(forceRows) {
     const activeMps = this.activeMps();
     const picked = Exp.pick || {};
