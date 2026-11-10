@@ -13552,7 +13552,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.89-client+reimport-kit';
+const APP_VERSION = '12.9.90-client+reimport-kit-full';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -38547,19 +38547,25 @@ const Exp = {
   async downloadReimportKit() {
     const rows = this.rows();
     if (!rows.length) return Toast.warn('Нет строк', 'Каталог или фильтр пусты — выгружать нечего');
+    const catList = exportCatalog();
     const byKey = {};
-    exportCatalog().forEach(c => { byKey[c.k] = c; });
-    const PRICE_KEYS = ['article', 'brand', 'name', 'price', 'cost', 'stock', 'sales'];
-    const ENRICH_KEYS = ['article', 'brand', 'oe_numbers', 'group_articles', 'analog_list', 'name',
+    catList.forEach(c => { byKey[c.k] = c; });
+    /* v12.9.90: комплект = ВСЕ загруженные столбцы, включая нормализованные
+       (артикул/OE) и пользовательские колонки каталога. Расчётных полей нет:
+       экономика при повторной загрузке не нужна и пересчитается сама. */
+    const PRICE_KEYS = ['article', 'article_norm', 'brand', 'name', 'price', 'cost', 'stock', 'sales',
+      'multiplicity', 'currency', 'barcode'];
+    const ENRICH_KEYS = ['article', 'brand', 'oe_numbers', 'oe_norm', 'group_articles', 'analog_list', 'name',
       'category', 'tnved', 'weight', 'net_weight', 'length', 'width', 'height',
       'barcode', 'applicability', 'multiplicity', 'image_url', 'ozon_category', 'ozon_type'];
+    const customCols = catList.filter(c => c.g === 'custom');
     const esc2 = v => { const t = String(v == null ? '' : v); return /[;"\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
     const cell = (c, p) => {
-      try { const v = c.src ? c.src(p) : p[c.k]; return v == null ? '' : v; } catch (e) { return ''; }
+      try { const v = c.src ? c.src(p) : c.custom ? (p.custom || {})[c.custom] : p[c.k]; return v == null ? '' : v; } catch (e) { return ''; }
     };
     const headerOf = c => c.k === 'multiplicity' ? 'Кратность, шт' : c.n;
-    const build = async keys => {
-      const cols = keys.map(k => byKey[k]).filter(Boolean);
+    const build = async (keys, extraCols) => {
+      const cols = keys.map(k => byKey[k]).filter(Boolean).concat(extraCols || []);
       const parts = ['\uFEFF' + cols.map(c => esc2(headerOf(c))).join(';') + '\r\n'];
       for (let i = 0; i < rows.length; i++) {
         const p = rows[i];
@@ -38571,9 +38577,9 @@ const Exp = {
     const date = new Date().toISOString().slice(0, 10);
     Exp.download(await build(PRICE_KEYS), 'UC_повторная_загрузка_1_прайс_' + date + '.csv');
     await Exp._yield();
-    Exp.download(await build(ENRICH_KEYS), 'UC_повторная_загрузка_2_обогащение_' + date + '.csv');
-    Toast.ok('Комплект для повторной загрузки готов', 'Файл 1 — прайс: ' + fmt(rows.length) + ' SKU (артикул, бренд, название, цена, себестоимость, остаток, продажи). ' +
-      'Файл 2 — обогащение тех же SKU (OE, группы, категории, габариты, штрихкод…). Порядок: в пустой каталог сначала прайс, затем обогащение с включённым «Только обогащение по текущему прайсу».');
+    Exp.download(await build(ENRICH_KEYS, customCols), 'UC_повторная_загрузка_2_обогащение_' + date + '.csv');
+    Toast.ok('Комплект для повторной загрузки готов', 'Файл 1 — прайс: ' + fmt(rows.length) + ' SKU (артикул + нормализованный, бренд, название, цена, себестоимость, остаток, продажи, кратность, валюта, штрихкод). ' +
+      'Файл 2 — обогащение тех же SKU (OE + нормализованные, группы, аналоги, категории, габариты, пользовательские колонки). Порядок: в пустой каталог сначала прайс, затем обогащение с включённым «Только обогащение по текущему прайсу».');
   },
   open() {
     const activeMps = this.activeMps();
