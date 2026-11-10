@@ -13552,7 +13552,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.87-client+light-import-export-release';
+const APP_VERSION = '12.9.88-client+light-boot';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19889,20 +19889,24 @@ const MemGuard = {
   },
   /* 0 — свободно; 1 — задействован мягкий сброс; 2 — критично (жёсткий сброс) */
   check(stage) {
-    let used = 0, lim = 0;
+    let used = 0, lim = 0, estimated = false;
     try {
       if (performance.memory) {
         used = performance.memory.usedJSHeapSize / 1048576;
         lim = (performance.memory.jsHeapSizeLimit || 0) / 1048576;
       } else {
         used = this.usedEstMB();   /* v12.9.87: эвристика по каталогу */
+        estimated = true;
       }
     } catch (e) { return 0; }
     if (!used) return 0;
     /* Порог в мегабайтах, а не только в процентах: у браузера лимит heap может быть
        объявлен 2–4 ГБ, но вкладка падает раньше из-за общей памяти машины. */
-    const soft = Math.min(lim ? lim * 0.5 : 600, 600);
-    const hard = Math.min(lim ? lim * 0.72 : 800, 820);
+    let soft = Math.min(lim ? lim * 0.5 : 600, 600);
+    let hard = Math.min(lim ? lim * 0.72 : 800, 820);
+    /* v12.9.88: эвристика без performance.memory грубее измерения — пороги выше,
+       чтобы сбросы кэшей не срабатывали раньше реального давления памяти. */
+    if (estimated) { soft = 700; hard = 950; }
     if (used < soft) return 0;
     const level = used >= hard ? 2 : 1;
     this.relief(level, stage);
@@ -21311,7 +21315,7 @@ function runPipeline(full, options) {
        «экономика не посчитана»; ensureEconomics() досчитывает её по требованию. */
     const skipEcon = options.skipEconomics === true;
     const total = S.rows.length;
-    if (skipEcon && total > 0) S._econPending = true;
+    if (skipEcon && total > 0) { S._econPending = true; persistEconPending(); }
     /* Группировка OE выполняется ДО обогащения и НЕ зависит от графа HVC:
        объединяем OE строк одной СВЯЗКИ Артикул+Бренд прямо из каталога. */
     /* v12.9.54: при точечной подстановке ОВХ ключи артикул+бренд и OE-номера не
@@ -21477,7 +21481,7 @@ function runPipeline(full, options) {
     /* v12.9.78: полный проход (без набора изменённых строк) — фиксируем
        отпечаток глобальных параметров, к которому относятся цифры каталога. */
     if (!changedRows && !skipEcon) { try { lsSet('uc.fullCalcFp', globalParamsFp()); } catch (e) { } }
-    if (!skipEcon && !changedRows) S._econPending = false;   /* v12.9.86: полный расчёт выполнен */
+    if (!skipEcon && !changedRows) { S._econPending = false; persistEconPending(); }   /* v12.9.86: полный расчёт выполнен */
     const tEnd = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const elapsedMs = Math.max(1, Math.round(tEnd - tStart));
     const speedSkuSec = Math.round(total / (elapsedMs / 1000));
@@ -21512,6 +21516,10 @@ function runPipeline(full, options) {
    пайплайна без набора изменённых строк: строки упаковываются и получают
    расчётные поля, флаг ожидания снимается самим пайплайном. Повторные вызовы
    во время идущего расчёта делят один промис. */
+/* v12.9.88: флаг «экономика не посчитана» переживает перезагрузку страницы:
+   лёгкий каталог не пересчитывается при старте без нужды. */
+function persistEconPending() { try { lsSet('uc.econPending', S._econPending ? '1' : '0'); } catch (e) { } }
+
 let _econEnsureJob = null;
 async function ensureEconomics() {
   if (!S._econPending || !S.rows.length) return false;
@@ -21531,7 +21539,7 @@ async function ensureEconomicsFor(rows) {
   if (_econEnsureJob) { await _econEnsureJob; if (!S._econPending) return true; }
   await runPipeline(true, {
     changedRows: new WeakSet(rows), changedList: rows,
-    smallDelta: true, persist: false, suppressSummaryToast: true
+    smallDelta: true, persist: false, suppressSummaryToast: true, preserveView: true
   });
   return true;
 }
@@ -21569,11 +21577,15 @@ async function releaseEconomics() {
       if (p.__nv) { try { delete p.__nv; } catch (e) { p.__nv = null; } }
       if (p.mp) p.mp = null;
       if (p._t) p._t = null;
+      /* Тексты-итоги экономики не должны пережить сами цифры. */
+      if (p.recommendation) p.recommendation = '';
+      if (p.economicsDataQuality) p.economicsDataQuality = '';
       n++;
     }
     await Exp._yield();
   }
   S._econPending = true;
+  persistEconPending();
   S.viewVer = -1;
   try { bumpVersion(); } catch (e) { }
   return n;
@@ -25887,8 +25899,18 @@ const UI = {
       try { if (typeof HVC !== 'undefined' && S.rows.length) HVC.rebuildIndex(S.rows); } catch (e) { console.warn('[UC] HVC index:', e); }
       /* На старте считаем производные поля только в памяти. Полная перезапись
          десятков/сотен тысяч уже загруженных SKU не должна блокировать запуск. */
-      await runPipeline(true, { persist: false, onProgress: bootProgress, persistMessage: 'пересчёт завершён — кэш при старте не переписываем' });
-      Dash.render();
+      /* v12.9.88: каталог, импортированный в лёгком режиме, при старте не
+         пересчитываем: экономика досчитается при входе в расчётный раздел или
+         при экспорте. Если стартовый экран сам расчётный — считаем сразу. */
+      try { S._econPending = lsGet('uc.econPending') === '1'; } catch (e) { }
+      await runPipeline(true, { persist: false, skipEconomics: S._econPending === true, suppressSummaryToast: S._econPending === true, onProgress: bootProgress, persistMessage: 'пересчёт завершён — кэш при старте не переписываем' });
+      if (S._econPending) {
+        const startView = (typeof UI !== 'undefined' && UI.current) ? UI.current() : 'dashboard';
+        if (['data','dashboard','unit','export','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(startView)) {
+          await ensureEconomics();
+          Dash.render();
+        }
+      } else Dash.render();
       UI.fillFilters();
       $('#companyLbl').textContent = S.settings.cid || '—';
       StorageCtl.refresh();
