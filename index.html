@@ -7152,6 +7152,8 @@ html { -webkit-text-size-adjust: 100%; }
     <button type="button" class="btn pri" id="btnImport"><i class="fa-solid fa-file-arrow-up"></i> Импорт / дозагрузка</button>
     <button type="button" class="btn" id="btnDiskImport" title="Прайс и кросс-листы пишутся потоком сразу в хранилище приложения (IndexedDB), файл целиком в память не поднимается. CSV или XLSX (через воркер), каталог заменяется целиком."><i class="fa-solid fa-hard-drive"></i> Прайс + кроссы — сразу в приложение</button>
     <button type="button" class="btn gh" id="btnSettingsSnapshot" title="Скачать снимок ключевых настроек (без секретов) в формате проекта arena-project — для сверки и переноса между проектами"><i class="fa-solid fa-camera"></i> Снимок настроек</button>
+    <button type="button" class="btn gh" id="btnReviewExport" title="Сформировать очередь ручной проверки (конфликты габаритов по OE, висячие кроссы, похожие артикулы) и скачать CSV: заполните колонку «Решение» и загрузите обратно соседней кнопкой"><i class="fa-solid fa-list-check"></i> Очередь проверки ↓</button>
+    <button type="button" class="btn gh" id="btnReviewImport" title="Загрузить CSV очереди проверки с заполненными решениями: принятые пары запомнятся и применятся, отклонённые больше не предложатся"><i class="fa-solid fa-file-import"></i> Решения проверки ↑</button>
     <button type="button" class="btn ok" id="btnExportOzon" style="font-weight:700" title="Рабочая выгрузка Ozon; актуальный шаблон проверьте в кабинете"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON</button>
     <button type="button" class="btn ok" id="btnPriceListUpsert" title="Обновление сумм (цен, себестоимости) и остатков по связке Артикул + Бренд с добавлением новых позиций"><i class="fa-solid fa-file-invoice-dollar"></i> Прайс-лист (Артикул+Бренд)</button>
     <button type="button" class="btn gh" id="btnDemoImport" title="Локальный демонстрационный CSV откроется в обычном мастере маппинга и не отправляется в GAS"><i class="fa-solid fa-flask"></i> Демо-набор</button>
@@ -13560,7 +13562,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.96-client+cancel-everywhere';
+const APP_VERSION = '12.9.97-client+review-queue';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26129,6 +26131,8 @@ const UI = {
     $('#btnImport').onclick = () => Import.pick();
     const _bdi = $('#btnDiskImport'); if (_bdi) _bdi.onclick = () => DiskImport.pick();
     const _bss = $('#btnSettingsSnapshot'); if (_bss) _bss.onclick = () => SettingsSnapshot.download();
+    const _bre = $('#btnReviewExport'); if (_bre) _bre.onclick = () => ReviewQueue.exportCsv();
+    const _bri = $('#btnReviewImport'); if (_bri) _bri.onclick = () => ReviewQueue.pickDecisions();
     $('#btnMinStock').onclick = () => MinStock.open();
     $('#btnCols').onclick = () => ColPicker.open();
     $('#btnSrcInfo').onclick = () => Sources.open();
@@ -26452,6 +26456,219 @@ const SettingsSnapshot = {
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
     Toast.ok('Снимок настроек скачан', 'settings.snapshot.json — без секретов; можно положить в arena-project вместо прежнего снимка');
+  }
+};
+
+/* ================== 25h. ОЧЕРЕДЬ РУЧНОЙ ПРОВЕРКИ (v12.9.97) ==================
+   Круговой процесс из плана обогащения: приложение предлагает пары-кандидаты,
+   оператор решает в Excel (CSV), решения загружаются обратно и ЗАПОМИНАЮТСЯ
+   (localStorage uc.reviewDecisions) — решённые пары повторно не предлагаются.
+   Кандидаты трёх типов:
+   · oe-dims-conflict — общий OE, но разные полные габариты у разных связок;
+   · cross-dangling — артикул из «Аналогов» отсутствует в каталоге;
+   · fuzzy — похожие артикулы одного бренда (Левенштейн ≤2) без общей OE-связи.
+   ВАЖНО: fuzzy — только предложения оператору. Автоматически по аналогам
+   ничего не ищется и не обогащается (правило двух ключей не нарушается);
+   «принять» для fuzzy лишь взаимно дописывает артикулы в поле «Аналоги». */
+const ReviewQueue = {
+  LS_KEY: 'uc.reviewDecisions',
+  _decisions() {
+    try { return JSON.parse(lsGet(this.LS_KEY) || '{}') || {}; } catch (e) { return {}; }
+  },
+  _saveDecisions(d) { try { lsSet(this.LS_KEY, JSON.stringify(d)); } catch (e) { } },
+  _lev(a, b, maxD) {
+    if (a === b) return 0;
+    const la = a.length, lb = b.length;
+    if (Math.abs(la - lb) > maxD) return maxD + 1;
+    let prev = Array.from({ length: lb + 1 }, (_, i) => i);
+    for (let i = 1; i <= la; i++) {
+      const cur = [i];
+      let best = i;
+      for (let j = 1; j <= lb; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        if (cur[j] < best) best = cur[j];
+      }
+      if (best > maxD) return maxD + 1;
+      prev = cur;
+    }
+    return prev[lb];
+  },
+  _tokens(v) {
+    return new Set(String(v || '').toLowerCase().split(/[^a-zа-я0-9]+/i).filter(w => w.length > 2));
+  },
+  _jaccard(a, b) {
+    if (!a.size || !b.size) return 0;
+    let inter = 0;
+    for (const t of a) if (b.has(t)) inter++;
+    return inter / (a.size + b.size - inter);
+  },
+  generate() {
+    const rows = (typeof S !== 'undefined' && S.rows) || [];
+    const decided = this._decisions();
+    const out = [];
+    const keyOfRow = p => normArticle(p.article) + '|' + normArticle(p.brand);
+    const byKey = new Map();
+    for (const p of rows) { const k = keyOfRow(p); if (k !== '|' && !byKey.has(k)) byKey.set(k, p); }
+    const oeOf = p => codeList(mergeCodeLists(p.oe_numbers, p.oe_list)).map(x => normArticle(x)).filter(Boolean);
+    /* --- конфликт габаритов по общему OE --- */
+    const oeTuples = new Map();
+    for (const p of rows) {
+      const L = num(p.length), W = num(p.width), H = num(p.height), Wt = num(p.weight);
+      if (!(L > 0 && W > 0 && H > 0 && Wt > 0)) continue;
+      const tuple = L + 'x' + W + 'x' + H + '/' + Wt;
+      for (const oe of oeOf(p)) {
+        let m = oeTuples.get(oe);
+        if (!m) { m = new Map(); oeTuples.set(oe, m); }
+        if (!m.has(tuple)) m.set(tuple, p);
+      }
+    }
+    for (const [oe, m] of oeTuples) {
+      if (m.size < 2) continue;
+      const reps = [...m.values()];
+      const a = reps[0], b = reps[1];
+      const id = 'oe-dims-conflict|' + [keyOfRow(a), keyOfRow(b)].sort().join('|');
+      if (decided[id]) continue;
+      out.push({ id, kind: 'oe-dims-conflict', confidence: 'high', score: 1,
+        a: { article: a.article, brand: a.brand || '' }, b: { article: b.article, brand: b.brand || '' },
+        reason: 'Общий OE ' + oe + ': разные габариты ' +
+          (num(a.length) + 'x' + num(a.width) + 'x' + num(a.height) + '/' + num(a.weight)) + ' и ' +
+          (num(b.length) + 'x' + num(b.width) + 'x' + num(b.height) + '/' + num(b.weight)) });
+    }
+    /* --- висячие кроссы: аналог отсутствует в каталоге --- */
+    const artNorms = new Set([...byKey.keys()].map(k => k.split('|')[0]));
+    for (const p of rows) {
+      for (const code of codeList(p.analog_list)) {
+        const cn = normArticle(code);
+        if (!cn || artNorms.has(cn)) continue;
+        const id = 'cross-dangling|' + keyOfRow(p) + '|' + cn;
+        if (decided[id]) continue;
+        out.push({ id, kind: 'cross-dangling', confidence: 'medium', score: 0.5,
+          a: { article: p.article, brand: p.brand || '' }, b: { article: code, brand: '' },
+          reason: 'Артикул из «Аналогов» отсутствует в каталоге — кросс ни к чему не ведёт' });
+      }
+    }
+    /* --- fuzzy: похожие артикулы, блокировка бренд+префикс и префикс --- */
+    const reps = [...byKey.entries()].map(([k, p]) => ({ k, p, art: k.split('|')[0], brand: k.split('|')[1] || '', oe: new Set(oeOf(p)), nameT: this._tokens(p.name) }));
+    const blocks = new Map();
+    const addBlock = (bk, r) => { let arr = blocks.get(bk); if (!arr) { arr = []; blocks.set(bk, arr); } arr.push(r); };
+    for (const r of reps) {
+      if (r.art.length < 5) continue;
+      addBlock(r.brand + '#' + r.art.slice(0, 3), r);
+      addBlock('#' + r.art.slice(0, 4), r);
+    }
+    const seenPairs = new Set();
+    const fuzzy = [];
+    for (const arr of blocks.values()) {
+      if (arr.length > 400) continue; /* защита от блоков-хабов */
+      for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
+        const A = arr[i], B = arr[j];
+        if (A.k === B.k) continue;
+        const pk = [A.k, B.k].sort().join('|');
+        if (seenPairs.has(pk)) continue;
+        seenPairs.add(pk);
+        let sharedOe = false;
+        for (const oe of A.oe) if (B.oe.has(oe)) { sharedOe = true; break; }
+        if (sharedOe) continue;
+        if (String(A.p.analog_list || '').toUpperCase().includes(B.art) || String(B.p.analog_list || '').toUpperCase().includes(A.art)) continue;
+        const d = this._lev(A.art, B.art, 2);
+        if (d > 2) continue;
+        const jac = this._jaccard(A.nameT, B.nameT);
+        const score = Math.round((1 - d / Math.max(A.art.length, B.art.length)) * 0.8 + jac * 0.2 + 0.001) / 1;
+        const id = 'fuzzy|' + pk;
+        if (decided[id]) continue;
+        fuzzy.push({ id, kind: 'fuzzy', confidence: d === 1 ? 'medium' : 'low', score: Math.round(score * 100) / 100,
+          a: { article: A.p.article, brand: A.p.brand || '' }, b: { article: B.p.article, brand: B.p.brand || '' },
+          reason: 'Похожие артикулы (расстояние ' + d + ')' + (jac ? ', общность названий ' + Math.round(jac * 100) + '%' : '') + ' — подтвердить, что это аналоги' });
+      }
+    }
+    fuzzy.sort((x, y) => y.score - x.score);
+    out.push(...fuzzy.slice(0, 500));
+    return out;
+  },
+  exportCsv() {
+    const q = this.generate();
+    if (!q.length) { Toast.ok('Очередь проверки пуста', 'Кандидатов нет: конфликтов по OE, висячих кроссов и похожих артикулов не найдено (решённые пары скрыты).'); return; }
+    const esc = v => { const t = String(v == null ? '' : v); return /[";\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+    const lines = ['pair_id;Тип;Уверенность;Score;Артикул A;Бренд A;Артикул B;Бренд B;Причина;Решение (принять/отклонить)'];
+    for (const c of q) lines.push([c.id, c.kind, c.confidence, c.score, c.a.article, c.a.brand, c.b.article, c.b.brand, c.reason, ''].map(esc).join(';'));
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'UC_очередь_проверки_' + new Date().toISOString().slice(0, 10) + '.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+    const byKind = {};
+    for (const c of q) byKind[c.kind] = (byKind[c.kind] || 0) + 1;
+    Toast.ok('Очередь проверки сформирована', fmt(q.length) + ' пар: ' +
+      Object.entries(byKind).map(([k, n]) => k + ' — ' + fmt(n)).join(' · ') +
+      '. Заполните колонку «Решение» (принять/отклонить) и загрузите файл кнопкой «Решения проверки ↑».');
+  },
+  pickDecisions() {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.csv';
+    inp.onchange = async () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      try { await this.applyDecisions(f); }
+      catch (e) { console.error('[UC] ReviewQueue:', e); Toast.err('Решения не применены', String(e && e.message || e).slice(0, 200)); }
+    };
+    inp.click();
+  },
+  async applyDecisions(file) {
+    let header = null;
+    const decisions = this._decisions();
+    const changed = [];
+    let accepted = 0, rejected = 0, applied = 0, skipped = 0;
+    const keyOfRow = p => normArticle(p.article) + '|' + normArticle(p.brand);
+    const byKey = new Map();
+    for (const p of S.rows) { const k = keyOfRow(p); if (k !== '|' && !byKey.has(k)) byKey.set(k, p); }
+    await CsvStream.rows(file, r => {
+      if (!header) { header = r.map(h => String(h || '').toLowerCase()); return; }
+      const iId = header.findIndex(h => h.includes('pair_id'));
+      const iDec = header.findIndex(h => h.includes('решение') || h.includes('decision'));
+      if (iId < 0 || iDec < 0) { skipped++; return; }
+      const id = String(r[iId] || '').trim();
+      const decRaw = String(r[iDec] || '').trim().toLowerCase();
+      if (!id || !decRaw) { skipped++; return; }
+      const dec = /^(принять|accept|да|yes|\+)/.test(decRaw) ? 'accept'
+        : /^(отклонить|reject|нет|no|-)/.test(decRaw) ? 'reject' : '';
+      if (!dec) { skipped++; return; }
+      decisions[id] = { d: dec, at: new Date().toISOString() };
+      if (dec === 'accept') accepted++; else rejected++;
+      /* pair_id: kind|артикулA|брендA|артикулB|брендB — ключ связки сам с '|' */
+      const parts = id.split('|');
+      const kind = parts[0];
+      const keyA = parts.length >= 3 ? parts[1] + '|' + parts[2] : '';
+      const keyB = parts.length >= 5 ? parts[3] + '|' + parts[4] : '';
+      if (kind === 'fuzzy' && dec === 'accept' && keyB) {
+        const A = byKey.get(keyA), B = byKey.get(keyB);
+        if (A && B) {
+          const mA = mergeCodeLists(A.analog_list, B.article);
+          const mB = mergeCodeLists(B.analog_list, A.article);
+          if (mA !== (A.analog_list || '')) { A.analog_list = mA; if (!changed.includes(A)) changed.push(A); }
+          if (mB !== (B.analog_list || '')) { B.analog_list = mB; if (!changed.includes(B)) changed.push(B); }
+          applied++;
+        }
+      }
+      if (kind === 'cross-dangling' && dec === 'reject' && parts.length >= 4) {
+        const A = byKey.get(keyA);
+        if (A) {
+          const keep = codeList(A.analog_list).filter(c => normArticle(c) !== parts[3]);
+          const joined = keep.join(', ');
+          if (joined !== (A.analog_list || '')) { A.analog_list = joined; if (!changed.includes(A)) changed.push(A); applied++; }
+        }
+      }
+    });
+    if (!header) throw new Error('Файл пуст или не распознан');
+    this._saveDecisions(decisions);
+    if (changed.length) {
+      bumpVersion();
+      try { await persistNow(changed); } catch (e) { console.warn('[UC] ReviewQueue persist:', e); }
+      try { Table.paint(); } catch (e) { }
+    }
+    Toast.ok('Решения проверки применены',
+      'принято ' + fmt(accepted) + ' · отклонено ' + fmt(rejected) + ' · применено к каталогу ' + fmt(applied) +
+      (skipped ? ' · пропущено строк ' + fmt(skipped) : '') + '. Решённые пары больше не предложатся.');
   }
 };
 
@@ -26930,6 +27147,19 @@ const Import = {
       for (let i = 0; i < Math.min(9, table.length); i++) { const filled = table[i].filter(c => String(c).trim() !== '').length; const alpha = table[i].filter(c => /[а-яa-z]/i.test(String(c))).length; if (filled >= 2 && alpha >= filled * .4) { hi = i; break; } }
       const headers = table[hi].map((h, i) => String(h || '').trim() || ('Колонка_' + (i + 1)));
       const body = table.slice(hi + 1).filter(r => r.some(c => String(c).trim() !== ''));
+      /* v12.9.97 (QA): в XLSX артикул может приехать ЧИСЛОМ — Excel в этом случае
+         теряет ведущие нули (00123 → 123) ещё до нас. Предупреждаем до маппинга. */
+      try {
+        if (!/\.csv$/i.test(file.name)) {
+          const ai = autoMap(headers).findIndex(m => m.field === 'article');
+          if (ai >= 0) {
+            let numericCells = 0;
+            for (const r of body) if (typeof r[ai] === 'number') numericCells++;
+            if (numericCells) Toast.warn('Артикулы пришли числами (XLSX)',
+              fmt(numericCells) + ' ячеек артикула — числа: Excel мог потерять ведущие нули (00123 → 123). Если в исходном файле есть такие артикулы, отформатируйте колонку как текст и загрузите заново.');
+          }
+        }
+      } catch (e) { }
       Prog.step(70);
       const advisorTemplate = (headers.length === 17 || headers.length === 18) && headers[0] === 'Артикул' && headers[1] === 'Бренд' &&
         headers.includes('Вознаграждение Ozon, %') && headers.includes('Логистика Ozon, ₽/ед') &&
