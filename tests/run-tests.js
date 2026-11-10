@@ -70,9 +70,9 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.93-client+disk-import'), 'версия клиента обновлена');
 // v12.9.79: светлый экспорт + компактный поштучный калькулятор без месячных расчётов
-assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия 12.9.79');
+assert(app.includes('12.9.93-client+disk-import'), 'версия 12.9.79');
 assert(!app.includes('FF1B2140'), 'чёрной заливки шапки экспорта не осталось');
 assert(app.includes("['markupPct','Заработок на закупку, % — формула'"), 'калькулятор: заработок на закупку');
 assert(app.includes("['logisticsRub','Логистика и доставка, ₽/ед — ввод'"), 'калькулятор 24: объединённая логистика');
@@ -161,7 +161,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.93-client+disk-import'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -201,7 +201,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.92-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
+assert(app.includes('12.9.93-client+disk-import'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -288,13 +288,13 @@ console.log('OK: все тесты пройдены (' + rows.length + ' стр�
 // v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
 assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
 assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
-assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
+assert(app.includes('12.9.93-client+disk-import'), 'версия клиента обновлена');
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
 assert(app.includes('if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
-assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
+assert(app.includes('12.9.93-client+disk-import'), 'версия клиента обновлена');
 
 assert(app.includes("classList.contains('active')) UE.render()"), 'импорт: UE.render только для активного раздела');
 assert(app.includes("classList.contains('active')) Dash.render()"), 'импорт: Dash.render только для активного раздела');
@@ -385,7 +385,7 @@ assert(app.includes("classList.contains('active')) Dash.render()"), 'импор�
 assert(app.includes('HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined)'), 'импорт: таргетный rebuildIndex');
 assert(app.includes('dedupeCatalog(_dedupeKeys)'), 'импорт: таргетный dedupe после первого полного');
 assert(app.includes('persistChangedOnly: changedTouched > 0 && !dedup'), 'импорт: запись только дельты, если не было слияний');
-assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
+assert(app.includes('12.9.93-client+disk-import'), 'версия клиента обновлена');
 
 // v12.9.78: автосверка аномалий находит донора через реестр byOe (функционально, настоящий AnomalyOE+DimPolicy)
 ;(async () => {
@@ -438,4 +438,35 @@ assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клие
 assert(app.includes('const donorRows=[];'), 'автосверка: отбор доноров по реестру');
 assert(app.includes("lsSet('uc.fullCalcFp', globalParamsFp())"), 'полный пересчёт фиксирует отпечаток параметров');
 assert(app.includes('профиль дельты: изменено строк'), 'журнал импорта: профиль дельты');
-assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
+assert(app.includes('12.9.93-client+disk-import'), 'версия клиента обновлена');
+
+// v12.9.93: потоковый CSV-парсер — разрезы чанков в любом месте не меняют результат
+{
+  const c7 = {};
+  vm.createContext(c7);
+  vm.runInContext(grab(/const CsvStream = \{[\s\S]*?\n\};\n/) + '\nthis.CsvStream=CsvStream;', c7);
+  const csv = 'Артикул;Бренд;Цена;Описание\r\nA1;BOSCH;149,81;"Фильтр; масляный ""новый"""\nA2;MANN;4,5;"много\nстрочный"\r\nA3;;0;\n';
+  const parseAll = chunks => {
+    const out = [];
+    const p = c7.CsvStream.createParser(';', r => out.push(r));
+    for (const ch of chunks) p.feed(ch);
+    p.end();
+    return out;
+  };
+  const whole = parseAll([csv]);
+  assert.strictEqual(whole.length, 4, 'CsvStream: заголовок + 3 строки');
+  assert.strictEqual(whole[1][3], 'Фильтр; масляный "новый"', 'CsvStream: кавычки и разделитель внутри ячейки');
+  assert.strictEqual(whole[2][3], 'много\nстрочный', 'CsvStream: перевод строки внутри кавычек');
+  assert.strictEqual(whole[1][2], '149,81', 'CsvStream: десятичная запятая текстом');
+  assert.deepStrictEqual(parseAll([...csv]), whole, 'CsvStream: подача по одному символу');
+  for (let cut = 1; cut < csv.length; cut += 17)
+    assert.deepStrictEqual(parseAll([csv.slice(0, cut), csv.slice(cut)]), whole, 'CsvStream: разрез на ' + cut);
+  assert.strictEqual(c7.CsvStream.detectSep('a;b;c'), ';', 'CsvStream: разделитель ;');
+  assert.strictEqual(c7.CsvStream.detectSep('a,b,c'), ',', 'CsvStream: разделитель ,');
+}
+// v12.9.93: дисковый импорт — поток в IndexedDB, не в память
+assert(app.includes('const DiskImport = {'), 'дисковый импорт присутствует');
+assert(app.includes("db.products_stage.bulkPut(part)"), 'дисковый импорт: пакеты пишутся в IndexedDB');
+assert(app.includes('crossByPair'), 'дисковый импорт: кроссы — только OE-индекс');
+assert(html.includes('id="btnDiskImport"'), 'кнопка дискового импорта в интерфейсе');
+assert(app.includes('skipEconomics: true, onProgress: prog, stepRange: [82, 97]'), 'дисковый импорт: экономика лениво');
