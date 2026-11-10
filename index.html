@@ -9621,6 +9621,7 @@ try {
     <button type="button" class="btn sm gh" id="prHide" title="Свернуть индикатор"><i class="fa-solid fa-xmark"></i></button>
   </div>
   <div class="pbar"><i id="prBar"></i></div>
+  <button type="button" class="btn sm danger" id="prCancel" style="display:none;margin-top:8px" title="Остановить текущую загрузку или импорт на ближайшем этапе обработки. Уже обработанные данные не откатываются.">Отменить загрузку</button>
   <div style="display:flex;justify-content:space-between;margin-top:6px" class="hint mono"><span id="prStep">шаг 1</span><span id="prTime">0.0 с</span></div>
 </div></div>
 <div id="toasts" aria-live="polite" role="status"></div>
@@ -13559,7 +13560,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.95-client+all-sections';
+const APP_VERSION = '12.9.96-client+cancel-everywhere';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13716,12 +13717,45 @@ function ensureLib(name, url) {
   return _libCache[name];
 }
 
+/* v12.9.96: кооперативная отмена длинных операций. Кнопка «Отменить загрузку»
+   живёт в общем индикаторе прогресса — через него идут все разделы загрузки и
+   импорта (каталог, дисковый импорт, словари, обогащение, пересчёт). Длинные
+   циклы проверяют UCCancel.check() на границах порций и останавливаются
+   исключением с меткой _ucCancelled. */
+const UCCancel = {
+  requested: false,
+  begin() {
+    this.requested = false;
+    const b = document.getElementById('prCancel');
+    if (b) { b.disabled = false; b.textContent = 'Отменить загрузку'; b.style.display = ''; }
+  },
+  cancel() {
+    this.requested = true;
+    const b = document.getElementById('prCancel');
+    if (b) { b.disabled = true; b.textContent = 'Отмена…'; }
+  },
+  check() {
+    if (!this.requested) return;
+    const e = new Error('Операция отменена пользователем');
+    e._ucCancelled = true;
+    throw e;
+  }
+};
+if (typeof globalThis !== 'undefined') globalThis.UCCancel = UCCancel;
+
 /* Индикатор прогресса: любая async-операция только через него */
 const Prog = {
   n: 0, t0: 0, timer: null,
   show(op, msg) {
     this.n++;
-    if (this.n === 1) { this.t0 = performance.now(); $('#progress').classList.add('on'); $('#prHide').style.visibility = 'hidden'; }
+    if (this.n === 1) {
+      this.t0 = performance.now(); $('#progress').classList.add('on'); $('#prHide').style.visibility = 'hidden';
+      try {
+        UCCancel.begin();
+        const cb = $('#prCancel');
+        if (cb && !cb._ucWired) { cb._ucWired = 1; cb.onclick = () => UCCancel.cancel(); }
+      } catch (e) { }
+    }
     $('#prOp').textContent = op || 'Обработка';
     $('#prMsg').textContent = msg || '';
     $('#prStep').textContent = 'операций в стеке: ' + this.n;
@@ -13738,6 +13772,7 @@ const Prog = {
   done() {
     this.n = Math.max(0, this.n - 1);
     if (this.n === 0) {
+      const cb = document.getElementById('prCancel'); if (cb) cb.style.display = 'none';
       clearInterval(this.timer); this.timer = null;
       $('#prBar').style.width = '100%';
       setTimeout(() => { $('#progress').classList.remove('on'); $('#prBar').style.width = '0'; }, 170);
@@ -13750,6 +13785,11 @@ async function withProgress(op, msg, fn) {
   const t = performance.now();
   try { const r = await fn(p => Prog.msg(p)); return r; }
   catch (e) {
+    if (e && e._ucCancelled) {
+      try { e._ucShown = true; } catch (e2) { }
+      Toast.warn('Отменено пользователем', op + ': операция остановлена. Уже обработанные данные сохранены как есть; незавершённую загрузку можно повторить.');
+      throw e;
+    }
     console.error('[UC]', op, e);
     Toast.push('err', 'Ошибка · ' + op, String(e && e.message ? e.message : e).slice(0, 220));
     /* v12.2: помечаем ошибку как уже показанную — иначе её же продублирует
@@ -21519,6 +21559,7 @@ function runPipeline(full, options) {
         }
       }
       if (typeof MemGuard !== 'undefined') MemGuard.check('пересчёт каталога');
+      if (typeof UCCancel !== 'undefined') UCCancel.check();
       await _pipelineYield();
       /* Пик памяти ограничен чанком: упаковка уже выполнена выше, до расчёта. */
     }
@@ -24432,6 +24473,7 @@ const HVC = {
           } catch(e) { console.warn('[UC] enrichOne:', e, rows[j]?.article); }
         }
         if (prog) prog(`обогащение по SKU/OE: ${fmt(end)} из ${fmt(rows.length)}`);
+        if (typeof UCCancel !== 'undefined') UCCancel.check();
         await Exp._yield();
       }
     } finally {
@@ -26504,6 +26546,7 @@ const CsvStream = {
       feedText(dec.decode(buf, { stream: true }));
       if (opts.onProgress) opts.onProgress(Math.min(off + this.CHUNK, file.size), file.size);
       if (parser && parser.stopped) return parser.rows;
+      if (typeof UCCancel !== 'undefined') UCCancel.check();
       await new Promise(r => setTimeout(r, 0));
     }
     feedText(dec.decode());
@@ -26600,7 +26643,7 @@ const DiskImport = {
     inp.type = 'file'; inp.accept = '.csv,.xlsx,.xls'; inp.multiple = true;
     inp.onchange = async () => {
       const fs = [...(inp.files || [])];
-      if (fs.length) { try { await this.run(fs); } catch (e) { if (e && e._diskAbort) { console.info('[UC] DiskImport: отменено пользователем'); return; } console.error('[UC] DiskImport:', e); Toast.err('Дисковый импорт не выполнен', String(e && e.message || e).slice(0, 220)); } }
+      if (fs.length) { try { await this.run(fs); } catch (e) { if (e && (e._diskAbort || e._ucCancelled)) { console.info('[UC] DiskImport: отменено пользователем'); return; } console.error('[UC] DiskImport:', e); Toast.err('Дисковый импорт не выполнен', String(e && e.message || e).slice(0, 220)); } }
     };
     inp.click();
   },
@@ -27217,6 +27260,7 @@ const Import = {
       for (let start = 0; start < body.length; start += CHUNK) {
         const end = Math.min(start + CHUNK, body.length);
         if (prog) prog(`импорт строк ${fmt(start + 1)}–${fmt(end)} из ${fmt(body.length)}`);
+        if (typeof UCCancel !== 'undefined') UCCancel.check();
         Prog.step(15 + (start / Math.max(body.length, 1)) * 45);
         for (let ri = start; ri < end; ri++) {
           const r = body[ri];
