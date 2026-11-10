@@ -13562,7 +13562,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.98-client+audit-fixes';
+const APP_VERSION = '12.9.99-client+audit2-fixes';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19518,7 +19518,7 @@ function scenarioProfit(dPricePct, dSalesPct, boostPct, cofinPct) {
   for (const p of S.rows) {
     if (p.excluded) continue;
     if (p.dimensionAnomalyBlocked || p.noBuyInconsistent || p.modelReviewRequired || p.missingTariffBlocked) { skipped++; continue; }
-    const c = Object.assign({}, p);
+    const c = cloneRowForCalc(p);
     c.price = num(p.effPrice || p.price) * (1 + num(dPricePct) / 100);
     c.promo = ''; c.promoPrice = 0;
     c.sales = Math.max(0, num(p.sales) * (1 + num(dSalesPct) / 100));
@@ -21810,6 +21810,16 @@ function compactRowNumeric(p) {
   Object.defineProperty(np, '_c', { value: c, enumerable: false, writable: true, configurable: true });
   if (nonNum) Object.defineProperty(np, '__nv', { value: nonNum, enumerable: false, writable: true, configurable: true });
   return np;
+}
+/* v12.9.99 (аудит-2): копия строки для ИЗОЛИРОВАННОГО расчёта. Расчётные поля
+   компактной строки живут на ROW_PROTO (non-enumerable), поэтому голый
+   Object.assign({}, p) их теряет — в том числе volume: сценарий «что если»
+   считал объём 0 у товаров без габаритов, но с заданным объёмом, и завышал
+   прибыль (логистика и средняя миля обнулялись). Материализуем все поля. */
+function cloneRowForCalc(p) {
+  const c = Object.assign({}, p);
+  for (const k of CALC_NUM_FIELDS) { const v = p[k]; if (v !== undefined) c[k] = v; }
+  return c;
 }
 /* v12.9.56 · БЫСТРАЯ ЗАПИСЬ ЧИСЛА В СТРОКУ. На компактной строке числовые поля
    живут в Float64Array за прототипом: обычная запись p.field = v проходит через
@@ -43539,13 +43549,13 @@ const WhatIf = {
           const p=rows[i]; if (!WhatIf.rowMark(p,i,marks,false)) throw changed();
           if (p.excluded) continue;
           if (p.dimensionAnomalyBlocked) { skipped++; continue; }
-          const b=computeEconomics(Object.assign({},p));
+          const b=computeEconomics(cloneRowForCalc(p));
           if (unavailable(b)) { skipped++; continue; }
           batch.push({p,base:num(b.netProfit)});
         }
         S.settings=scenarioSettings; clearTariffLookupCache();
         for (const entry of batch) {
-          const c=computeEconomics(Object.assign({},entry.p),scenarioOv);
+          const c=computeEconomics(cloneRowForCalc(entry.p),scenarioOv);
           if (unavailable(c)) { skipped++; continue; }
           const cat=String(entry.p.category || '—');
           if (!byCat[cat]) byCat[cat]={base:0,scen:0};
