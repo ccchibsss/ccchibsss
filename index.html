@@ -7150,7 +7150,8 @@ html { -webkit-text-size-adjust: 100%; }
     <div><h2>Данные <span class="hint mono" style="font-size:11px">/ virtual scroll</span></h2><p>Виртуальная прокрутка (окно строк, фикс. высота ряда) — локально в браузере (IndexedDB) до ~300 000 SKU. <b style="color:var(--amber)">Облачная синхронизация с Google Sheets рекомендована до ~20 000 SKU</b> — Apps Script ограничен 6 минутами исполнения и кэш одной записи CacheService лимитирован 100 КБ; выше этого объёма используйте только локальный режим и XLSX/CSV-экспорт напрямую из браузера.</p></div>
     <div class="sp"></div>
     <button type="button" class="btn pri" id="btnImport"><i class="fa-solid fa-file-arrow-up"></i> Импорт / дозагрузка</button>
-    <button type="button" class="btn" id="btnDiskImport" title="Прайс и кросс-листы пишутся потоком сразу в хранилище приложения (IndexedDB), файл целиком в память не поднимается. Только CSV, каталог заменяется целиком."><i class="fa-solid fa-hard-drive"></i> Прайс + кроссы — сразу в приложение</button>
+    <button type="button" class="btn" id="btnDiskImport" title="Прайс и кросс-листы пишутся потоком сразу в хранилище приложения (IndexedDB), файл целиком в память не поднимается. CSV или XLSX (через воркер), каталог заменяется целиком."><i class="fa-solid fa-hard-drive"></i> Прайс + кроссы — сразу в приложение</button>
+    <button type="button" class="btn gh" id="btnSettingsSnapshot" title="Скачать снимок ключевых настроек (без секретов) в формате проекта arena-project — для сверки и переноса между проектами"><i class="fa-solid fa-camera"></i> Снимок настроек</button>
     <button type="button" class="btn ok" id="btnExportOzon" style="font-weight:700" title="Рабочая выгрузка Ozon; актуальный шаблон проверьте в кабинете"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON</button>
     <button type="button" class="btn ok" id="btnPriceListUpsert" title="Обновление сумм (цен, себестоимости) и остатков по связке Артикул + Бренд с добавлением новых позиций"><i class="fa-solid fa-file-invoice-dollar"></i> Прайс-лист (Артикул+Бренд)</button>
     <button type="button" class="btn gh" id="btnDemoImport" title="Локальный демонстрационный CSV откроется в обычном мастере маппинга и не отправляется в GAS"><i class="fa-solid fa-flask"></i> Демо-набор</button>
@@ -13558,7 +13559,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.94-client+optimization';
+const APP_VERSION = '12.9.95-client+all-sections';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -22864,7 +22865,22 @@ async function ensureCatalogSafeBeforeExport() {
   } catch (e) { console.warn('[UC] export pre-persist:', e); return false; }
 }
 let _exportUnsafeWarned = false;
+/* v12.9.95: заблокированные по аномалиям SKU молча отсекаются Exp.rows() и
+   комплектом повторной загрузки — раньше пользователь мог не заметить потерю
+   позиций из «круга». Предупреждаем ДО выгрузки, с количеством и примерами. */
+function warnQuarantinedBeforeExport() {
+  try {
+    const blocked = (S.rows || []).filter(x => x && x.dimensionAnomalyBlocked);
+    if (!blocked.length) return 0;
+    Toast.warn('Карантин аномальных габаритов',
+      fmt(blocked.length) + ' SKU заблокировано и НЕ попадёт в выгрузку: ' +
+      blocked.slice(0, 6).map(x => x.article).join(', ') + (blocked.length > 6 ? '…' : '') +
+      '. Исправьте или подтвердите их в разделе «Аномалии», если они нужны в файле.');
+    return blocked.length;
+  } catch (e) { return 0; }
+}
 async function exportGuard(name, fn) {
+  warnQuarantinedBeforeExport();
   const rowsRef = S.rows, n0 = rowsRef ? rowsRef.length : 0;
   const saved = await ensureCatalogSafeBeforeExport();
   try {
@@ -26070,6 +26086,7 @@ const UI = {
     };
     $('#btnImport').onclick = () => Import.pick();
     const _bdi = $('#btnDiskImport'); if (_bdi) _bdi.onclick = () => DiskImport.pick();
+    const _bss = $('#btnSettingsSnapshot'); if (_bss) _bss.onclick = () => SettingsSnapshot.download();
     $('#btnMinStock').onclick = () => MinStock.open();
     $('#btnCols').onclick = () => ColPicker.open();
     $('#btnSrcInfo').onclick = () => Sources.open();
@@ -26359,6 +26376,43 @@ DEMO-OIL-001;OIL-001;FluidPro;Масло моторное 5W-30, 4 л;OE-OIL-001
 DEMO-TRN-001;TRN-001;DriveLine;Шрус наружный;OE-TRN-001;Трансмиссия / КПП;7350;3820;2.65;24;18;18;8;2;4;да
 `;
 
+/* ================== 25g. СНИМОК НАСТРОЕК (v12.9.95) ==================
+   Экспорт ключевых настроек в формате arena-project/settings.snapshot.json:
+   живые значения из S.settings, без секретов и токенов. */
+const SettingsSnapshot = {
+  build() {
+    const st = (typeof S !== 'undefined' && S.settings) || {};
+    const pick = (obj, keys) => { const o = {}; for (const k of keys) if (obj[k] !== undefined) o[k] = obj[k]; return o; };
+    return {
+      project: 'UNIT-CONTROL settings snapshot',
+      appVersionAtSnapshot: (typeof APP_VERSION !== 'undefined' ? APP_VERSION : ''),
+      exportedAt: new Date().toISOString(),
+      note: 'Снимок живых настроек из приложения. Секреты и токены не включены.',
+      import: pick(st, ['keyMode', 'importEnrichOnly', 'enrichRelatedOnImport', 'importLightMode', 'autoOeAnomalyOnImport']),
+      economics: pick(st, ['activeMarketplace', 'calcSelectedMpOnly', 'activeFulfillment', 'taxRegime', 'taxPct', 'volDivisor', 'markupBasePct', 'markupEnabled', 'markupIgnoreBreakEven', 'beMarkupPct', 'priceBase', 'tgtMargin', 'seasonIdx']),
+      marketplaces: {
+        ozon: pick(st, ['ozonCommissionPct', 'ozonAcquiringPct', 'ozonRealFbsServiceFeeRub', 'ozonLastMileFixed']),
+        wb: pick(st, ['wbCommissionPct', 'wbAcquiringPct', 'wbBaseLogistics', 'wbExtraLiter', 'wbWarehouseCoeff', 'wbStoragePerLDay']),
+        ym: pick(st, ['ymPayoutFrequency', 'ymPayoutDelayWeeks']),
+        mm: pick(st, ['mmCommissionPct', 'mmAcquiringPct']),
+        avito: pick(st, ['avitoCommissionPct'])
+      },
+      stdDims: pick(st, ['autoStdDims', 'calcStdDims']),
+      sync: pick(st, ['backendType', 'chunk'])
+    };
+  },
+  download() {
+    const data = JSON.stringify(this.build(), null, 2);
+    const blob = new Blob([data], { type: 'application/json;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'settings.snapshot.json';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+    Toast.ok('Снимок настроек скачан', 'settings.snapshot.json — без секретов; можно положить в arena-project вместо прежнего снимка');
+  }
+};
+
 /* ================== 25e. ПОТОКОВЫЙ CSV (v12.9.93) ==================
    Дисковый импорт: файл НЕ поднимается в память целиком. Текст декодируется
    кусками по 4 МБ (file.slice), строки отдаются по мере разбора, а вызывающий
@@ -26468,6 +26522,29 @@ const CsvStream = {
   }
 };
 
+/* Воркер XLSX для дискового импорта (v12.9.95): в странице НЕ вызывается —
+   её исходник уходит в Web Worker вместе с библиотекой SheetJS, книга
+   разбирается в воркере, строки возвращаются пакетами по 2 000. */
+function DiskXlsxWorkerMain() {
+  let ROWS = null;
+  self.onmessage = e => {
+    const d = e.data || {};
+    if (d.type === 'load') {
+      try {
+        const wb = XLSX.read(new Uint8Array(d.buf), { type: 'array', cellDates: false });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        ROWS = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false });
+        self.postMessage({ type: 'headers', rows: (ROWS[0] || []).map(v => String(v == null ? '' : v).trim()) });
+      } catch (err) { self.postMessage({ type: 'error', message: String(err && err.message || err) }); }
+    } else if (d.type === 'go') {
+      try {
+        for (let i = 1; i < ROWS.length; i += 2000) self.postMessage({ type: 'batch', rows: ROWS.slice(i, i + 2000) });
+        self.postMessage({ type: 'done', total: Math.max(0, ROWS.length - 1) });
+      } catch (err) { self.postMessage({ type: 'error', message: String(err && err.message || err) }); }
+    }
+  };
+}
+
 /* ================== 25f. ДИСКОВЫЙ ИМПОРТ (v12.9.93) ==================
    «Не в память, а в приложение»: прайс читается потоком и пакетами по 2 000
    строк пишется в черновик IndexedDB (products_stage); кросс-лист не становится
@@ -26480,9 +26557,47 @@ const CsvStream = {
    обычный импорт с ручным маппингом. Экономика не считается (лёгкий режим):
    досчитается при экспорте или входе в расчётные разделы. */
 const DiskImport = {
+  _sessions: new Set(),
+  _closeSessions() { for (const w of this._sessions) { try { w.terminate(); } catch (e) { } } this._sessions.clear(); },
+  _xlsxLibSource() {
+    const t = [...document.scripts].map(x => x.textContent || '').find(x => x.includes('xlsx встроен офлайн'));
+    if (!t) throw new Error('Встроенный модуль XLSX не найден — для XLSX используйте обычный импорт.');
+    return t;
+  },
+  /* XLSX разбирается в воркере: сначала заголовки (роль файла и маппинг),
+     затем по команде 'go' — строки пакетами. Главный поток файл не держит. */
+  async _xlsxBegin(file) {
+    const src = this._xlsxLibSource() + '\n(' + DiskXlsxWorkerMain.toString() + ')();';
+    const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    this._sessions.add(worker);
+    const drop = () => { this._sessions.delete(worker); try { worker.terminate(); } catch (e) { } };
+    const buf = await file.arrayBuffer();
+    return new Promise((resolve, reject) => {
+      worker.onerror = () => { drop(); reject(new Error('Воркер XLSX завершился с ошибкой — используйте обычный импорт.')); };
+      worker.onmessage = e => {
+        const d = e.data || {};
+        if (d.type === 'headers') {
+          resolve({
+            headers: d.rows,
+            drain: onRow => new Promise((res, rej) => {
+              worker.onmessage = ev => {
+                const m = ev.data || {};
+                if (m.type === 'batch') { for (const r of m.rows) onRow(r); }
+                else if (m.type === 'done') { drop(); res(m.total); }
+                else if (m.type === 'error') { drop(); rej(new Error(m.message)); }
+              };
+              worker.onerror = () => { drop(); rej(new Error('Воркер XLSX завершился с ошибкой.')); };
+              worker.postMessage({ type: 'go' });
+            })
+          });
+        } else if (d.type === 'error') { drop(); reject(new Error(d.message)); }
+      };
+      worker.postMessage({ type: 'load', buf }, [buf]);
+    });
+  },
   pick() {
     const inp = document.createElement('input');
-    inp.type = 'file'; inp.accept = '.csv'; inp.multiple = true;
+    inp.type = 'file'; inp.accept = '.csv,.xlsx,.xls'; inp.multiple = true;
     inp.onchange = async () => {
       const fs = [...(inp.files || [])];
       if (fs.length) { try { await this.run(fs); } catch (e) { if (e && e._diskAbort) { console.info('[UC] DiskImport: отменено пользователем'); return; } console.error('[UC] DiskImport:', e); Toast.err('Дисковый импорт не выполнен', String(e && e.message || e).slice(0, 220)); } }
@@ -26518,18 +26633,24 @@ const DiskImport = {
     catch (e) {
       if (!this._swapped) { try { await db.products_stage.clear(); } catch (e2) { } }
       throw e;
-    } finally { cancelBtn.remove(); }
+    } finally { cancelBtn.remove(); this._closeSessions(); }
   },
   async _runInner(files, checkAbort) {
-    const bad = files.filter(f => !/\.csv$/i.test(f.name));
-    if (bad.length) throw new Error('Дисковый импорт работает только с CSV. Для XLSX/XLS используйте обычный «Импорт / дозагрузка».');
+    const bad = files.filter(f => !/\.(csv|xlsx|xls)$/i.test(f.name));
+    if (bad.length) throw new Error('Дисковый импорт работает с CSV и XLSX. Остальные форматы — через обычный «Импорт / дозагрузка».');
     if (files.length > 2) throw new Error('Выберите один прайс и, при необходимости, один файл кросс-листов.');
     const infos = [];
     for (const f of files) {
-      const headers = await CsvStream.headers(f);
+      let headers, session = null;
+      if (/\.xlsx?$/i.test(f.name)) {
+        session = await this._xlsxBegin(f);
+        headers = (session.headers || []).map((h, i) => String(h == null ? '' : h).trim() || ('Колонка_' + (i + 1)));
+      } else {
+        headers = await CsvStream.headers(f);
+      }
       if (headers.length < 2) throw new Error('Не распознаны заголовки: ' + f.name);
       const { mapped, fields } = this._mapping(f, headers);
-      infos.push({ file: f, headers, mapped, fields,
+      infos.push({ file: f, headers, mapped, fields, session,
         hasPrice: fields.has('price') || fields.has('cost'),
         hasOe: fields.has('oe_numbers') || fields.has('oe_list') || fields.has('oe'),
         hasArt: fields.has('article') });
@@ -26551,18 +26672,26 @@ const DiskImport = {
       'Колонки прайса: ' + esc(mapText) + (price.mapped.length > 14 ? '…' : ''),
       'Загрузить в приложение', true);
     if (!ok) return;
+    const eachRow = async (info, onRow, onProgress) => {
+      if (info.session) return info.session.drain(onRow);
+      /* v12.9.95 (фикс): CsvStream отдаёт и строку заголовков — она не данные.
+         До фикса заголовок прайса попадал в каталог лишней «SKU». */
+      let first = true;
+      return CsvStream.rows(info.file, r => { if (first) { first = false; return; } onRow(r); }, { onProgress });
+    };
     await withProgress('Загрузка сразу в приложение', 'поток → IndexedDB', async prog => {
       const stageCount = await db.products_stage.count().catch(() => 0);
       if (stageCount) throw new Error('В хранилище есть незавершённый черновик каталога (' + fmt(stageCount) + ' строк). Решите его судьбу в разделе «Хранилище и квота».');
       /* --- кроссы: только OE-индекс связка → OE --- */
       const crossByPair = new Map();
+      const oePairSets = new Map(); /* v12.9.95: OE → связки, для отчёта о неоднозначности */
       let crossRows = 0, crossOe = 0;
       if (cross) {
         prog('кросс-листы: строим OE-индекс…');
         const artC = cross.mapped.find(x => x.target === 'article');
         const brandC = cross.mapped.find(x => x.target === 'brand');
         const oeCols = cross.mapped.filter(x => ['oe_numbers', 'oe_list', 'oe'].includes(x.target));
-        await CsvStream.rows(cross.file, r => {
+        await eachRow(cross, r => {
           checkAbort();
           crossRows++;
           const a = normArticle(articleText(r[artC.col]));
@@ -26572,9 +26701,13 @@ const DiskImport = {
           if (!set) { set = new Map(); crossByPair.set(key, set); }
           for (const cm of oeCols) for (const code of codeList(r[cm.col])) {
             const k = normArticle(code);
-            if (k && !set.has(k)) { set.set(k, code); crossOe++; }
+            if (!k) continue;
+            if (!set.has(k)) { set.set(k, code); crossOe++; }
+            let ps = oePairSets.get(k);
+            if (!ps) { ps = new Set(); oePairSets.set(k, ps); }
+            ps.add(key);
           }
-        }, { onProgress: (n, t) => prog('кросс-листы: ' + Math.round(100 * n / Math.max(t, 1)) + '%') });
+        }, (n, t) => prog('кросс-листы: ' + Math.round(100 * n / Math.max(t, 1)) + '%'));
       }
       /* --- прайс: поток → пакеты → IndexedDB --- */
       prog('прайс: потоковая запись в приложение…');
@@ -26633,7 +26766,7 @@ const DiskImport = {
         if (oeSet.size) { const joined = [...oeSet.values()].join(oeSep); p.oe_numbers = joined; p.oe_list = joined; withOe++; }
         return { p, key: art + '|' + normArticle(brandRaw) };
       };
-      await CsvStream.rows(price.file, r => {
+      await eachRow(price, r => {
         checkAbort();
         total++;
         const built = buildRow(r);
@@ -26643,7 +26776,7 @@ const DiskImport = {
         built.p.id = id;
         batch.set(id, built.p);
         if (batch.size >= 2000) flush();
-      }, { onProgress: (n, t) => prog('прайс: ' + Math.round(100 * n / Math.max(t, 1)) + '% · записано SKU ' + fmt(idByKey.size)) });
+      }, (n, t) => prog('прайс: ' + Math.round(100 * n / Math.max(t, 1)) + '% · записано SKU ' + fmt(idByKey.size)));
       flush();
       await writeChain;
       const unique = idByKey.size;
@@ -26694,8 +26827,27 @@ const DiskImport = {
       try { await HVC.save(); } catch (e) { console.warn('[UC] DiskImport HVC.save:', e); }
       UI.fillFilters(); Table.paint();
       if (document.getElementById('v-dashboard') && document.getElementById('v-dashboard').classList.contains('active')) Dash.render();
+      /* v12.9.95: отчёт о покрытии кроссами — сколько SKU прайса получили OE,
+         сколько OE неоднозначны и какие бренды кроссов в прайс не попали. */
+      let coverText = '';
+      if (cross) {
+        let ambiguousOe = 0;
+        for (const ps of oePairSets.values()) if (ps.size > 1) ambiguousOe++;
+        let uncoveredPairs = 0; const uncoveredBrands = new Map();
+        for (const key of crossByPair.keys()) {
+          if (idByKey.has(key)) continue;
+          uncoveredPairs++;
+          const b = key.split('|')[1] || '(без бренда)';
+          uncoveredBrands.set(b, (uncoveredBrands.get(b) || 0) + 1);
+        }
+        const topBrands = [...uncoveredBrands.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
+          .map(([b, n]) => b + ' — ' + fmt(n)).join(', ');
+        coverText = ' · покрытие OE: ' + (unique ? Math.round(1000 * withOe / unique) / 10 : 0) + '% SKU прайса' +
+          ' · неоднозначных OE: ' + fmt(ambiguousOe) +
+          ' · пар кроссов вне прайса: ' + fmt(uncoveredPairs) + (topBrands ? ' (' + topBrands + ')' : '');
+      }
       Toast.ok('Каталог записан в приложение',
-        fmt(unique) + ' SKU из прайса' + (cross ? ' · OE из кроссов получили ' + fmt(withOe) + ' SKU (связок ' + fmt(crossRows) + ' строк, OE ' + fmt(crossOe) + ')' : '') +
+        fmt(unique) + ' SKU из прайса' + (cross ? ' · OE из кроссов получили ' + fmt(withOe) + ' SKU (связок ' + fmt(crossRows) + ' строк, OE ' + fmt(crossOe) + ')' : '') + coverText +
         (skipped ? ' · пропущено без артикула ' + fmt(skipped) : '') + (dups ? ' · дублей артикул+бренд перезаписано ' + fmt(dups) : '') +
         ' · экономика посчитается при экспорте');
     });
@@ -26717,37 +26869,15 @@ const Import = {
   async read(file) {
     await withProgress('Чтение файла', file.name, async () => {
       Prog.step(35);
-      const buf = await file.arrayBuffer();
       let table = [];
       if (/\.csv$/i.test(file.name)) {
-        let txt = new TextDecoder('utf-8', { fatal: false }).decode(buf);
-        if (/[\uFFFD]/.test(txt.slice(0, 400))) txt = new TextDecoder('windows-1251').decode(buf);
-        txt = txt.replace(/^\uFEFF/, '');
-        const line1 = txt.slice(0, txt.search(/[\r\n]/) < 0 ? txt.length : txt.search(/[\r\n]/));
-        const d = (line1.match(/;/g) || []).length * 2 > (line1.match(/,/g) || []).length ? ';' : (line1.includes('\t') ? '\t' : ',');
-        // Parse CSV directly: no million-cell SheetJS workbook; all values stay TEXT.
-        table = []; let row = [], cur = '', quoted = false, start = 0;
-        for (let i = 0; i < txt.length; i++) {
-          const ch = txt[i];
-          if (quoted) {
-            if (ch === '"' && txt[i + 1] === '"') { cur += txt.slice(start, i) + '"'; i++; start = i + 1; }
-            else if (ch === '"') { cur += txt.slice(start, i); quoted = false; start = i + 1; }
-          } else if (ch === '"' && i === start) { quoted = true; start = i + 1; }
-          else if (ch === d || ch === '\n' || ch === '\r') {
-            cur += txt.slice(start, i); row.push(cur); cur = '';
-            if (ch !== d) {
-              if (row.some(c => c.trim() !== '')) table.push(row);
-              row = [];
-              if (ch === '\r' && txt[i + 1] === '\n') i++;
-            }
-            start = i + 1;
-          }
-          if (i % 1048576 === 0) await new Promise(r => setTimeout(r, 0));
-        }
-        if (quoted) throw new Error('CSV: незакрытая кавычка');
-        if (start < txt.length || row.length || cur) { cur += txt.slice(start); row.push(cur); if (row.some(c => c.trim() !== '')) table.push(row); }
-
+        /* v12.9.95: потоковый разбор (CsvStream) — файл не поднимается целиком
+           строкой, таблица строится по мере чтения кусков по 4 МБ. Значения,
+           как и раньше, остаются ТЕКСТОМ (десятичная запятая не портится). */
+        await CsvStream.rows(file, r => { table.push(r); },
+          { onProgress: (n, t) => Prog.step(35 + Math.round(30 * n / Math.max(t, 1))) });
       } else {
+        const buf = await file.arrayBuffer();
         const wb = XLSX.read(buf, { type: 'array', dense: false, cellDates: true });
         const ws = wb.Sheets[wb.SheetNames[0]];
         table = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false });
@@ -38984,6 +39114,7 @@ const Exp = {
      артикул+бренд и OE при включённом «Только обогащение по текущему прайсу».
      Заголовки — подписи каталога экспорта, автосопоставление импорта их узнаёт. */
   async downloadReimportKit() {
+    warnQuarantinedBeforeExport();
     const rows = this.rows();
     if (!rows.length) return Toast.warn('Нет строк', 'Каталог или фильтр пусты — выгружать нечего');
     const catList = exportCatalog();
