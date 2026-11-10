@@ -13552,7 +13552,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.88-client+light-boot';
+const APP_VERSION = '12.9.89-client+reimport-kit';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -18623,7 +18623,7 @@ function autoMap(headers) {
     'вес': 'weight', 'длина': 'length', 'ширина': 'width', 'высота': 'height', 'объём': 'volume', 'объем': 'volume',
     'весогабариты': 'dimensions_str', 'д*ш*в': 'dimensions_str', 'дшв': 'dimensions_str', 'д/ш/в': 'dimensions_str' });
   return headers.map(h => {
-    const exact = { 'каталожный номер':'article', 'штрихкод':'barcode', 'ссылка на сертификат':'__custom',
+    const exact = { 'каталожный номер':'article', 'штрихкод':'barcode', 'аналоги':'analog_list', 'ссылка на сертификат':'__custom',
       'description_category_id':'ozon_description_category_id', 'ozon_description_category_id':'ozon_description_category_id',
       'type_id':'ozon_type_id', 'ozon_type_id':'ozon_type_id' };
     const eh = String(h || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -38486,6 +38486,10 @@ const Exp = {
           <button type="button" class="btn sm" id="expEnrichTemplate"><i class="fa-solid fa-file-csv"></i> Скачать шаблон для обогащения</button>
           <span class="hint" style="font-size:10.5px">CSV с артикулами и пустыми нужными столбцами — заполните и импортируйте, остальные данные сохранятся. Заголовки уже совпадают с распознаванием импорта.</span>
         </div>` : ''}
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button type="button" class="btn sm" id="expReimportKit"><i class="fa-solid fa-file-zipper"></i> Выгрузка для повторной загрузки (2 файла)</button>
+          <span class="hint" style="font-size:10.5px">Два CSV со значениями (без формул): сначала загрузите файл-прайс, затем файл-обогащение с включённым «Только обогащение по текущему прайсу». Расчётные колонки не включены — экономика пересчитается при загрузке.</span>
+        </div>
       <div class="hint" style="margin-top:6px;font-size:10.5px;line-height:1.6">${(() => {
         const parts = [];
         if (r.missingColumns.length) parts.push('Добавьте столбцы: ' + r.missingColumns.join(', ') + ' — без них соответствующие расходы не учитываются.');
@@ -38498,6 +38502,8 @@ const Exp = {
     </div>`;
     const btn = $('#expEnrichTemplate');
     if (btn) btn.onclick = () => this.downloadEnrichTemplate();
+    const kitBtn = $('#expReimportKit');
+    if (kitBtn) kitBtn.onclick = () => this.downloadReimportKit();
   },
   /* v12.9.8: CSV-шаблон обогащения: артикул+бренд + только недостающие столбцы.
      Импорт сопоставит строки по «Артикул + Бренд» и дополнит существующие SKU. */
@@ -38532,6 +38538,42 @@ const Exp = {
     Exp.download(blob, 'UC_обогащение_' + new Date().toISOString().slice(0, 10) + '.csv');
     Toast.info('Шаблон обогащения готов', 'Столбцы: ' + head.join(', ') + ' · строк: ' + fmt(rows.length) +
       '. Заполните только недостающее и импортируйте файл — сопоставление по «Артикул + Бренд», остальные поля не изменятся.');
+  },
+  /* v12.9.89: комплект для повторной загрузки — два CSV только со входными
+     колонками и значениями (без формул и расчётных полей). Файл 1 (прайс)
+     создаёт SKU в пустом каталоге; файл 2 (обогащение) дозаполняет их по
+     артикул+бренд и OE при включённом «Только обогащение по текущему прайсу».
+     Заголовки — подписи каталога экспорта, автосопоставление импорта их узнаёт. */
+  async downloadReimportKit() {
+    const rows = this.rows();
+    if (!rows.length) return Toast.warn('Нет строк', 'Каталог или фильтр пусты — выгружать нечего');
+    const byKey = {};
+    exportCatalog().forEach(c => { byKey[c.k] = c; });
+    const PRICE_KEYS = ['article', 'brand', 'name', 'price', 'cost', 'stock', 'sales'];
+    const ENRICH_KEYS = ['article', 'brand', 'oe_numbers', 'group_articles', 'analog_list', 'name',
+      'category', 'tnved', 'weight', 'net_weight', 'length', 'width', 'height',
+      'barcode', 'applicability', 'multiplicity', 'image_url', 'ozon_category', 'ozon_type'];
+    const esc2 = v => { const t = String(v == null ? '' : v); return /[;"\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+    const cell = (c, p) => {
+      try { const v = c.src ? c.src(p) : p[c.k]; return v == null ? '' : v; } catch (e) { return ''; }
+    };
+    const headerOf = c => c.k === 'multiplicity' ? 'Кратность, шт' : c.n;
+    const build = async keys => {
+      const cols = keys.map(k => byKey[k]).filter(Boolean);
+      const parts = ['\uFEFF' + cols.map(c => esc2(headerOf(c))).join(';') + '\r\n'];
+      for (let i = 0; i < rows.length; i++) {
+        const p = rows[i];
+        parts.push(cols.map(c => esc2(cell(c, p))).join(';') + '\r\n');
+        if (i % 4000 === 3999) await Exp._yield();
+      }
+      return new Blob(parts, { type: 'text/csv;charset=utf-8' });
+    };
+    const date = new Date().toISOString().slice(0, 10);
+    Exp.download(await build(PRICE_KEYS), 'UC_повторная_загрузка_1_прайс_' + date + '.csv');
+    await Exp._yield();
+    Exp.download(await build(ENRICH_KEYS), 'UC_повторная_загрузка_2_обогащение_' + date + '.csv');
+    Toast.ok('Комплект для повторной загрузки готов', 'Файл 1 — прайс: ' + fmt(rows.length) + ' SKU (артикул, бренд, название, цена, себестоимость, остаток, продажи). ' +
+      'Файл 2 — обогащение тех же SKU (OE, группы, категории, габариты, штрихкод…). Порядок: в пустой каталог сначала прайс, затем обогащение с включённым «Только обогащение по текущему прайсу».');
   },
   open() {
     const activeMps = this.activeMps();
