@@ -13558,7 +13558,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.93-client+disk-import';
+const APP_VERSION = '12.9.94-client+optimization';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19933,6 +19933,20 @@ const MemGuard = {
     }
     const freed = [];
     try { clearTariffLookupCache(); freed.push('тарифы'); } catch (e) { }
+    /* v12.9.94: посчитанная экономика — самая тяжёлая часть строки (~1,6 КБ/SKU
+       против 0,45 КБ у лёгкого каталога). При давлении памяти сбрасываем
+       расчётные поля: данные не теряются, ensureEconomics досчитает их при
+       экспорте или входе в расчётные разделы. Не во время пайплайна/экспорта. */
+    try {
+      const canReleaseEcon = level >= 1 && !S._pipeActive && !S._econPending &&
+        (typeof Prog === 'undefined' || !Prog.n) && typeof releaseEconomics === 'function' &&
+        !(this._econReliefAt && Date.now() - this._econReliefAt < 120000);
+      if (canReleaseEcon && S.rows && S.rows.length) {
+        this._econReliefAt = Date.now();
+        freed.push('расчётные поля экономики (досчёт при экспорте)');
+        Promise.resolve(releaseEconomics()).catch(e => console.warn('[UC] MemGuard releaseEconomics:', e));
+      }
+    } catch (e) { }
     if (level >= 2) {
       try { if (!S._pipeActive) { FWorker.release(); freed.push('воркер'); } } catch (e) { }
       try { S.view = []; S.viewVer = -1; freed.push('срез таблицы'); } catch (e) { }
@@ -21352,6 +21366,16 @@ function runPipeline(full, options) {
        массивы не выделяются. S._econPending помечает каталог как
        «экономика не посчитана»; ensureEconomics() досчитывает её по требованию. */
     const skipEcon = options.skipEconomics === true;
+    /* v12.9.94: если с прошлого полного расчёта не менялись ни каталог
+       (catalogVersion), ни глобальные параметры экономики (fullRecalcStale),
+       ни площадка/режим стандартных ОВХ — цифры по всем SKU уже актуальны,
+       и computeEconomics по всему каталогу пропускается. Категоризация,
+       политики и карантин при этом выполняются как обычно; вновь
+       заблокированным строкам экономика обнуляется точечно ниже. */
+    const _econFreshKey = (S.catalogVersion || 0) + '|' + (S.settings.activeMarketplace || '') + '|' + (S.settings.calcStdDims ? 1 : 0);
+    const econSkipFresh = !skipEcon && !changedRows && !!full && S._econFreshKey === _econFreshKey &&
+      (typeof fullRecalcStale !== 'function' || !fullRecalcStale());
+    if (econSkipFresh) console.info('[UC] экономика актуальна (каталог и параметры не менялись) — пересчёт SKU пропущен');
     const total = S.rows.length;
     if (skipEcon && total > 0) { S._econPending = true; persistEconPending(); }
     /* Группировка OE выполняется ДО обогащения и НЕ зависит от графа HVC:
@@ -21478,8 +21502,12 @@ function runPipeline(full, options) {
              для каждого SKU при каждом полном и частичном запуске пайплайна. */
           if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p);
           if (!skipEcon) {
-            computeEconomics(p);
-            p.economicsDataQuality = econQualityText(p);   /* v12.9.8: почему нули в прибыли */
+            if (!econSkipFresh) {
+              computeEconomics(p);
+              p.economicsDataQuality = econQualityText(p);   /* v12.9.8: почему нули в прибыли */
+            } else if (p.dimensionAnomalyBlocked) {
+              try { clearAnomalyEconomics(p); } catch (e) { }
+            }
           }
           /* v12.9.6-mem: строка уже изменена на месте; клонирование через spread
              удваивало живые объекты каталога на каждом проходе (источник OOM). */
@@ -21518,7 +21546,7 @@ function runPipeline(full, options) {
     }
     /* v12.9.78: полный проход (без набора изменённых строк) — фиксируем
        отпечаток глобальных параметров, к которому относятся цифры каталога. */
-    if (!changedRows && !skipEcon) { try { lsSet('uc.fullCalcFp', globalParamsFp()); } catch (e) { } }
+    if (!changedRows && !skipEcon) { try { lsSet('uc.fullCalcFp', globalParamsFp()); S._econFreshKey = _econFreshKey; } catch (e) { } }
     if (!skipEcon && !changedRows) { S._econPending = false; persistEconPending(); }   /* v12.9.86: полный расчёт выполнен */
     const tEnd = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const elapsedMs = Math.max(1, Math.round(tEnd - tStart));
@@ -22729,8 +22757,14 @@ const Backup = {
 const INCOMPLETE_MAX_AGE_DAYS = 7;   /* старый маркер также требует проверки */
 /* FNV-1a по ключам «артикул|бренд» + число строк. Порядок строк не важен
    (сортировка), поэтому отпечаток не меняется от перестановки/дедупликации. */
+let _catFpMemo = { rows: null, n: -1, ver: -1, fp: '' };
 function catFp(rows, withKeys) {
   const n = Array.isArray(rows) ? rows.length : 0;
+  /* v12.9.94: отпечаток неизменного каталога не пересчитываем (сортировка
+     124k+ ключей на каждое сохранение — заметная доля времени записи). */
+  const _ver = (typeof S !== 'undefined' && S) ? (S.catalogVersion || 0) : 0;
+  if (!withKeys && rows === _catFpMemo.rows && n === _catFpMemo.n && _ver === _catFpMemo.ver)
+    return { count: n, fp: _catFpMemo.fp };
   const keys = new Array(n);
   for (let i = 0; i < n; i++) {
     const p = rows[i] || {};
@@ -22744,7 +22778,9 @@ function catFp(rows, withKeys) {
   mix('#' + n + '#');
   for (let i = 0; i < n; i++) mix(keys[i] + '\u0001');
   /* keys отдаём только по запросу (на 500k строк это лишние ~20 Мб строк) */
-  return withKeys ? { count: n, fp: (h >>> 0).toString(36), keys } : { count: n, fp: (h >>> 0).toString(36) };
+  const _fp = (h >>> 0).toString(36);
+  if (!withKeys) _catFpMemo = { rows, n, ver: _ver, fp: _fp };
+  return withKeys ? { count: n, fp: _fp, keys } : { count: n, fp: _fp };
 }
 const isoMs = v => { const t = Date.parse(String(v == null ? '' : v)); return isNaN(t) ? 0 : t; };
 const IncompleteRecovery = {
@@ -22994,12 +23030,14 @@ async function loadAll() {
     stageOwner = await db.meta.get('stageOwner');
   } catch (e) { console.warn('[UC] incomplete-check:', e); }
   let stored = [];
+  let _savedCatFp = '';
   try {
     const snapshot = await db.transaction('r', db.products, db.meta, async () => {
       const rows = await db.products.toArray(), catalog = await db.meta.get('catalog');
       return { rows, catalog };
     });
     stored = snapshot.rows; S._catalogToken = StorageCtl.catalogToken(snapshot.catalog);
+    _savedCatFp = (snapshot.catalog && snapshot.catalog.value && snapshot.catalog.value.fp) || '';
   }
   catch (e) {
     /* Ошибка чтения не доказывает повреждение. Не предлагать пересоздание базы и
@@ -23036,9 +23074,16 @@ async function loadAll() {
     if (ms) { const keep = S.settings.secretMemoryOnly ? { secret: S.settings.secret, manualToken: S.settings.manualToken } : {}; S.settings = { ...S.settings, ...ms.value, ...keep }; }
     if (mt) S.tariffs = { ...S.tariffs, ...mt.value };
     normalizeFormatSettings();
-    /* Дедупликация — только после загрузки разделителя: mergeCodeLists использует его. */
-    const dd = dedupeCatalog();
-    if (dd) { S._dedupOnLoad = dd; console.info('[UC] дедупликация при загрузке: объединено ' + dd + ' дублей'); }
+    /* Дедупликация — только после загрузки разделителя: mergeCodeLists использует его.
+       v12.9.94: если отпечаток загруженного каталога совпал с сохранённым при
+       записи — дублей с тех пор появиться не могло, полный проход пропускаем. */
+    let dd = 0, _dedupeSkipped = false;
+    try { if (_savedCatFp) _dedupeSkipped = catFp(stored).fp === _savedCatFp; } catch (e) { }
+    if (_dedupeSkipped) console.info('[UC] дедупликация при загрузке пропущена: отпечаток каталога не изменился');
+    else {
+      dd = dedupeCatalog();
+      if (dd) { S._dedupOnLoad = dd; console.info('[UC] дедупликация при загрузке: объединено ' + dd + ' дублей'); }
+    }
     const [cats_, rules_, excs_, sups_, orders_, hist_, imports_, snaps_, pnl_, mprof_, eprof_] = await Promise.all([
       safe(() => db.cats.toArray(), []), safe(() => db.rules.toArray(), []), safe(() => db.excs.toArray(), []),
       safe(() => db.sups.toArray(), []), safe(() => db.orders.toArray(), []), safe(() => db.hist.toArray(), []),
@@ -26440,7 +26485,7 @@ const DiskImport = {
     inp.type = 'file'; inp.accept = '.csv'; inp.multiple = true;
     inp.onchange = async () => {
       const fs = [...(inp.files || [])];
-      if (fs.length) { try { await this.run(fs); } catch (e) { console.error('[UC] DiskImport:', e); Toast.err('Дисковый импорт не выполнен', String(e && e.message || e).slice(0, 220)); } }
+      if (fs.length) { try { await this.run(fs); } catch (e) { if (e && e._diskAbort) { console.info('[UC] DiskImport: отменено пользователем'); return; } console.error('[UC] DiskImport:', e); Toast.err('Дисковый импорт не выполнен', String(e && e.message || e).slice(0, 220)); } }
     };
     inp.click();
   },
@@ -26457,6 +26502,25 @@ const DiskImport = {
     return { map, mapped, fields: new Set(enabled.map(m => m.field).filter(Boolean)) };
   },
   async run(files) {
+    this._abort = false; this._swapped = false;
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button'; cancelBtn.className = 'btn danger';
+    cancelBtn.textContent = 'Отменить загрузку';
+    cancelBtn.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:9999;box-shadow:0 6px 24px rgba(0,0,0,.35)';
+    cancelBtn.onclick = () => { this._abort = true; cancelBtn.disabled = true; cancelBtn.textContent = 'Отмена…'; };
+    document.body.appendChild(cancelBtn);
+    const checkAbort = () => {
+      if (!this._abort) return;
+      const e = new Error('Загрузка отменена пользователем — каталог не изменён, черновик будет очищен');
+      e._diskAbort = true; throw e;
+    };
+    try { await this._runInner(files, checkAbort); }
+    catch (e) {
+      if (!this._swapped) { try { await db.products_stage.clear(); } catch (e2) { } }
+      throw e;
+    } finally { cancelBtn.remove(); }
+  },
+  async _runInner(files, checkAbort) {
     const bad = files.filter(f => !/\.csv$/i.test(f.name));
     if (bad.length) throw new Error('Дисковый импорт работает только с CSV. Для XLSX/XLS используйте обычный «Импорт / дозагрузка».');
     if (files.length > 2) throw new Error('Выберите один прайс и, при необходимости, один файл кросс-листов.');
@@ -26499,6 +26563,7 @@ const DiskImport = {
         const brandC = cross.mapped.find(x => x.target === 'brand');
         const oeCols = cross.mapped.filter(x => ['oe_numbers', 'oe_list', 'oe'].includes(x.target));
         await CsvStream.rows(cross.file, r => {
+          checkAbort();
           crossRows++;
           const a = normArticle(articleText(r[artC.col]));
           if (!a) return;
@@ -26522,7 +26587,13 @@ const DiskImport = {
       const flush = () => {
         if (!batch.size) return;
         const part = [...batch.values()]; batch = new Map();
-        writeChain = writeChain.then(() => db.products_stage.bulkPut(part));
+        /* v12.9.94: пакет сразу уходит и в реестры Каталога V (OE/кроссы/цены),
+           как touched-строки в обычном импорте — иначе следующее обогащение
+           не знало бы данных этого прайса. */
+        writeChain = writeChain.then(async () => {
+          try { HVC.ingest(part); } catch (e) { console.warn('[UC] DiskImport HVC.ingest:', e); }
+          await db.products_stage.bulkPut(part);
+        });
       };
       const buildRow = r => {
         const rawArt = articleText(artM ? r[artM.col] : '');
@@ -26563,6 +26634,7 @@ const DiskImport = {
         return { p, key: art + '|' + normArticle(brandRaw) };
       };
       await CsvStream.rows(price.file, r => {
+        checkAbort();
         total++;
         const built = buildRow(r);
         if (!built) { skipped++; return; }
@@ -26602,6 +26674,7 @@ const DiskImport = {
         await db.meta.put({ key: 'tariffs', value: S.tariffs });
       });
       StorageCtl.acceptCatalog(committed);
+      this._swapped = true;
       crossByPair.clear();
       S.imports.push({ id: uid('i'), name: price.file.name + ' (сразу в приложение)', date: nowISO(), rows: total, added: unique, updated: 0, cols: price.mapped.map(x => x.target || x.customKey).join('|'), keyMode: 'article+brand', mode: 'disk' });
       await db.imports.add(S.imports[S.imports.length - 1]).catch(e => console.warn('[UC] imports log:', e));
@@ -26610,7 +26683,15 @@ const DiskImport = {
       S.rows = await db.products.toArray();
       S.rows.forEach(codeFieldsToStr);
       S.catalogVersion = (S.catalogVersion || 0) + 1;
-      await runPipeline(true, { skipEconomics: true, onProgress: prog, stepRange: [82, 97] });
+      /* v12.9.94: persist пайплайна здесь — вторая полная запись каталога
+         (черновик + подмена) поверх только что выполненной. Вместо неё:
+         пайплайн без записи, затем одна прямая порционная запись строк
+         (bulkPut по 2 500), без черновика и транзакции подмены. */
+      await runPipeline(true, { skipEconomics: true, persist: false, onProgress: prog, stepRange: [82, 97], persistMessage: 'пересчёт завершён — запись одной порцией' });
+      prog('запись каталога одной порцией…');
+      const slimBack = p => { const o = { ...p }; delete o._t; delete o._bw; delete o.mp; delete o._stdDimsCalc; return o; };
+      for (let i = 0; i < S.rows.length; i += 2500) await db.products.bulkPut(S.rows.slice(i, i + 2500).map(slimBack));
+      try { await HVC.save(); } catch (e) { console.warn('[UC] DiskImport HVC.save:', e); }
       UI.fillFilters(); Table.paint();
       if (document.getElementById('v-dashboard') && document.getElementById('v-dashboard').classList.contains('active')) Dash.render();
       Toast.ok('Каталог записан в приложение',
