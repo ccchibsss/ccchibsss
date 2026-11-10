@@ -1,0 +1,47 @@
+{
+  "project": "UNIT-CONTROL settings snapshot",
+  "appVersionAtSnapshot": "12.9.94-client+optimization",
+  "note": "Ключевые настройки приложения (значения по умолчанию из S.settings в index.html). Секреты и токены сюда не выносятся.",
+  "import": {
+    "keyMode": "article+brand",
+    "importEnrichOnly": true,
+    "enrichRelatedOnImport": true,
+    "importLightMode": "по выбору пользователя (чекбокс при импорте); экономика считается при экспорте",
+    "diskImport": "v12.9.93: прайс + кроссы потоком сразу в IndexedDB, только CSV, полная замена каталога",
+    "enrichmentKeys": ["артикул+бренд", "уникальный OE-номер"],
+    "analogSearch": "ЗАПРЕЩЁН (прямое указание владельца)"
+  },
+  "economics": {
+    "activeMarketplace": "OZON",
+    "calcSelectedMpOnly": true,
+    "activeFulfillment": "FBS",
+    "taxRegime": "usn_income_6",
+    "taxPct": 6,
+    "volDivisor": 5000,
+    "markupBasePct": 30,
+    "markupEnabled": true,
+    "markupIgnoreBreakEven": false,
+    "beMarkupPct": 25,
+    "priceBase": "current",
+    "tgtMargin": 20,
+    "seasonIdx": 1
+  },
+  "marketplaces": {
+    "ozon": { "commissionPct": 14, "acquiringPct": 1.5, "realFbsServiceFeeRub": 20, "lastMileFixed": 25 },
+    "wb": { "commissionPct": 15, "acquiringPct": 1.5, "baseLogistics": 46, "extraLiter": 14, "warehouseCoeff": 1.7, "storagePerLDay": 0.08 },
+    "ym": { "payoutFrequency": "WEEKLY", "payoutDelayWeeks": 1 },
+    "mm": { "commissionPct": 12, "acquiringPct": 1.5 },
+    "avito": { "commissionPct": 6 }
+  },
+  "stdDims": {
+    "autoStdDims": false,
+    "calcStdDims": "включается чекбоксом/кнопкой «Пересчёт по стандартным ОВХ»",
+    "rule": "Стандартные ОВХ в каталог НЕ записываются; для расчёта подставляются временно (только exact, только пустые поля), при выгрузке такие SKU подсвечиваются #FFA07A"
+  },
+  "sync": {
+    "backendType": "custom_server",
+    "chunk": 2000,
+    "googleSheetsRecommendedUpToSku": 20000,
+    "localCatalogRecommendedUpToSku": 300000
+  }
+}
