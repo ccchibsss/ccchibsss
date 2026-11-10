@@ -13552,7 +13552,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.86-client+light-import-lazy-economics';
+const APP_VERSION = '12.9.87-client+light-import-export-release';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19877,13 +19877,26 @@ const MemGuard = {
       return performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit;
     } catch (e) { return 0; }
   },
+  /* v12.9.87: оценка занятого heap без performance.memory (Firefox/Safari).
+     Размер строки известен по состоянию каталога: лёгкий (экономика не
+     посчитана) ~0,45 КБ/SKU с индексами, посчитанный ~1,6 КБ/SKU. */
+  usedEstMB() {
+    try {
+      const n = (typeof S !== 'undefined' && S.rows) ? S.rows.length : 0;
+      if (!n) return 0;
+      return Math.round(n * (S._econPending ? 0.45 : 1.6) / 1024);
+    } catch (e) { return 0; }
+  },
   /* 0 — свободно; 1 — задействован мягкий сброс; 2 — критично (жёсткий сброс) */
   check(stage) {
     let used = 0, lim = 0;
     try {
-      if (!performance.memory) return 0;
-      used = performance.memory.usedJSHeapSize / 1048576;
-      lim = (performance.memory.jsHeapSizeLimit || 0) / 1048576;
+      if (performance.memory) {
+        used = performance.memory.usedJSHeapSize / 1048576;
+        lim = (performance.memory.jsHeapSizeLimit || 0) / 1048576;
+      } else {
+        used = this.usedEstMB();   /* v12.9.87: эвристика по каталогу */
+      }
     } catch (e) { return 0; }
     if (!used) return 0;
     /* Порог в мегабайтах, а не только в процентах: у браузера лимит heap может быть
@@ -21472,6 +21485,7 @@ function runPipeline(full, options) {
     if (!savedOk) Toast.warn('Результат только в памяти', 'Сохранение в IndexedDB не завершилось. Экспортируйте данные, не закрывая вкладку.');
     else if (econErr) Toast.warn('Пайплайн завершён с ошибками', `экономика не рассчиталась у ${fmt(econErr)} SKU (${firstErr.slice(0, 100)}) — остальные пересчитаны за ${elapsedMs} мс`);
     else if (anomalyBlocked.length) Toast.err('Обязательная проверка габаритов', `${fmt(anomalyBlocked.length)} SKU заблокировано для расчётов и выгрузок: ` + anomalyBlocked.slice(0, 6).map(p => p.article).join(', ') + (anomalyBlocked.length > 6 ? '…' : '') + '. Исправьте значения или подтвердите их в разделе «Аномалии».');
+    else if (options.suppressSummaryToast) { /* частичный досчёт для экспорта — без сводного тоста */ }
     else if (skipEcon) Toast.ok('Лёгкий импорт завершён', `${fmt(total)} SKU загружено и обогащено за ${elapsedMs} мс. Юнит-экономика не считалась — она посчитается при первом экспорте или входе в расчётные разделы.`);
     else Toast.ok('Пересчёт завершён', `⚡ ${fmt(total)} SKU за ${elapsedMs} мс (${fmt(speedSkuSec)} SKU/сек) · Все 5 маркетплейсов`);
     try {
@@ -21504,6 +21518,65 @@ async function ensureEconomics() {
   if (_econEnsureJob) return _econEnsureJob;
   _econEnsureJob = (async () => { await runPipeline(true); return true; })();
   try { return await _econEnsureJob; } finally { _econEnsureJob = null; }
+}
+
+/* v12.9.87: досчёт экономики только для заданных строк (экспорт подмножества
+   каталога). Идёт дельта-проходом пайплайна по набору строк; каталог при этом
+   остаётся помеченным «экономика не посчитана» — полный досчёт по-прежнему
+   выполнит ensureEconomics(). */
+async function ensureEconomicsFor(rows) {
+  if (!S._econPending || !S.rows.length) return false;
+  if (!Array.isArray(rows) || !rows.length) return false;
+  if (rows.length >= S.rows.length) return ensureEconomics();
+  if (_econEnsureJob) { await _econEnsureJob; if (!S._econPending) return true; }
+  await runPipeline(true, {
+    changedRows: new WeakSet(rows), changedList: rows,
+    smallDelta: true, persist: false, suppressSummaryToast: true
+  });
+  return true;
+}
+
+/* v12.9.87: пайплайн при упаковке заменяет объекты строк компактными — ссылки,
+   собранные до расчёта (список экспорта), нужно перечитать из каталога. */
+function refreshRowRefs(rows) {
+  if (!Array.isArray(rows) || !rows.length) return rows;
+  const byId = new Map(), byKey = new Map();
+  for (const p of S.rows) {
+    if (!p) continue;
+    if (p.id != null && !byId.has(p.id)) byId.set(p.id, p);
+    try { const k = typeof HVC !== 'undefined' ? HVC.keyOf(p) : ''; if (k && k !== '|' && !byKey.has(k)) byKey.set(k, p); } catch (e) { }
+  }
+  return rows.map(p => {
+    if (!p) return p;
+    if (p.id != null && byId.has(p.id)) return byId.get(p.id);
+    try { const k = typeof HVC !== 'undefined' ? HVC.keyOf(p) : ''; if (k && byKey.has(k)) return byKey.get(k); } catch (e) { }
+    return p;
+  });
+}
+
+/* v12.9.87: возврат каталога в лёгкое состояние после экспорта — расчётные
+   массивы и упакованные экономики площадок сбрасываются пачками, входные
+   поля строк не трогаются. Следующий экспорт/раздел досчитает экономику. */
+async function releaseEconomics() {
+  const rows = S.rows || [];
+  if (!rows.length) return 0;
+  let n = 0;
+  for (let start = 0; start < rows.length; start += 2000) {
+    const end = Math.min(start + 2000, rows.length);
+    for (let i = start; i < end; i++) {
+      const p = rows[i]; if (!p) continue;
+      if (p._c) { try { delete p._c; } catch (e) { p._c = null; } }
+      if (p.__nv) { try { delete p.__nv; } catch (e) { p.__nv = null; } }
+      if (p.mp) p.mp = null;
+      if (p._t) p._t = null;
+      n++;
+    }
+    await Exp._yield();
+  }
+  S._econPending = true;
+  S.viewVer = -1;
+  try { bumpVersion(); } catch (e) { }
+  return n;
 }
 
 /* v12.9.6-mem: нехватка памяти не должна оставлять пустую вкладку без объяснения.
@@ -32486,15 +32559,16 @@ const OzonExport = {
 
     bindBtn('#btnExportOzonCalcDirect', async () => {
       const opts = OzonExport.getViewOptions('xlsx');
-      const pick = OzonExport.resolveRows(opts.scope), rows = pick.rows;
+      const pick = OzonExport.resolveRows(opts.scope); let rows = pick.rows;
       if (pick.fallback) Toast.warn('Фильтр не дал строк — калькулятор для всего каталога', OzonExport.emptyReason(pick.stats));
       if (!rows.length) return Toast.warn('Нет строк для калькулятора', OzonExport.emptyReason(pick.stats));
       const now = new Date(), pad = n => String(n).padStart(2, '0');
       const fn = `Ozon_калькулятор_${pad(now.getDate())}.${pad(now.getMonth()+1)}.${now.getFullYear()}.xlsx`;
-      await ensureEconomics();
+      if (S._econPending) { await ensureEconomicsFor(rows); rows = refreshRowRefs(rows); }
       await exportGuard('Ozon — калькулятор юнит-экономики', () => withProgress('Ozon — калькулятор юнит-экономики', `${fmt(rows.length)} SKU · числовые исходные данные и формулы Excel…`, async prog => {
         const blob = await OzonExport.generateEconomicsXlsx(rows, opts, prog);
         Exp.download(blob, fn);
+        await Exp._releaseAfterExport();
         const scenarios = rows.filter(p => !p.mp || !p.mp.OZON || p.mp.OZON.comparisonEligible === false).length;
         const text = `Файл «${fn}» · ${fmt(rows.length)} SKU. Меняйте цену, расходы и целевую маржу: прибыль, безубыток и рекомендуемая цена пересчитаются в Excel.`;
         if (scenarios) Toast.warn('Калькулятор готов; есть сценарные строки', `${text} СЦЕНАРИЙ: ${fmt(scenarios)} — причины указаны в колонке «Примечание».`);
@@ -38615,7 +38689,16 @@ const Exp = {
   },
 
   /* ГЛАВНЫЙ ЭКСПОРТ: одна книга XLSX (или один CSV) независимо от объёма. */
-  async run(forceRows) { await ensureEconomics(); return exportGuard('Экспорт', () => this._runImpl(forceRows)); },
+  async run(forceRows) { return exportGuard('Экспорт', () => this._runImpl(forceRows)); },
+  /* v12.9.87: лёгкий режим — после успешной выгрузки расчётные данные
+     сбрасываются (releaseEconomics), каталог снова занимает минимум памяти. */
+  async _releaseAfterExport() {
+    try {
+      if (!S.settings || !S.settings.importLightMode) return;
+      await releaseEconomics();
+      Toast.info('Память освобождена', 'Лёгкий режим: расчётные данные сброшены после экспорта и посчитаются заново при следующей выгрузке.');
+    } catch (e) { console.warn('[UC] releaseEconomics:', e); }
+  },
   async _runImpl(forceRows) {
     const activeMps = this.activeMps();
     const picked = Exp.pick || {};
@@ -38642,6 +38725,9 @@ const Exp = {
     if (fallbackReason) Toast.warn('Фильтр не дал строк — выгружен весь каталог', fallbackReason + ` Строк в файле: ${fmt(rows.length)}.`);
     if (beforeQuarantine !== rows.length) Toast.warn('Карантин аномальных габаритов', `${fmt(beforeQuarantine - rows.length)} SKU не попали в выгрузку. Исправьте или подтвердите их в разделе «Аномалии».`);
     if (!rows.length) return Toast.warn('Нет данных', OzonExport.emptyReason(catalogSelectionStats('all')));
+    /* v12.9.87: лёгкий режим — экономика считается только для строк этой
+       выгрузки, а не для всего каталога; ссылки обновляем после упаковки. */
+    if (S._econPending) { await ensureEconomicsFor(rows); rows = refreshRowRefs(rows); }
         const fmtChoice = $('#expFmt').value;
     if (fmtChoice === 'ozon_csv' || fmtChoice === 'ozon_xlsx') {
       if (!activeMps.has('OZON')) return Toast.warn('Ozon исключён из выгрузки', 'Включите галочку «Ozon» в блоке «Маркетплейсы в выгрузке» или выберите общий формат XLSX/CSV.');
@@ -38666,6 +38752,7 @@ const Exp = {
           blob = await OzonExport.generateCsv(ozRows, ozOpts, prog);
         }
         Exp.download(blob, fileName);
+        await Exp._releaseAfterExport();
         const sourceNote = OzonExport._sourceNote();
         if (sourceNote) Toast.warn('Экспорт OZON готов — есть пустые атрибуты', `Файл «${fileName}» · ${fmt(ozRows.length)} SKU. ${sourceNote}`);
         else Toast.ok('Экспорт OZON готов', `Файл «${fileName}» сформирован (${fmt(ozRows.length)} SKU)`);
@@ -38687,6 +38774,7 @@ const Exp = {
       }
       await Exp.snap('Экспорт ' + (isCsv ? 'CSV' : 'XLSX'), rows.length, cat.length);
       Toast.ok('Файл готов (одна книга)', `${fmt(rows.length)} строк · ${cat.length} колонок`);
+      await Exp._releaseAfterExport();
       /* v12.9.8: не оставляем нули без объяснения. */
       try {
         const r = econReadiness(rows);
