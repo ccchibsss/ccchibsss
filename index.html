@@ -13557,7 +13557,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.91-client+std-dims-calc';
+const APP_VERSION = '12.9.92-client+std-dims-highlight';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -38824,6 +38824,10 @@ const Exp = {
     const cat = exportCatalog().filter(c => picked[c.k] && !exportColumnExcluded(c, activeMps));
     if (cat.some(c => ['weight','length','width','height'].includes(c.k)) && !cat.some(c => c.k === 'stdDimsExport'))
       cat.push({ g: 'in', k: 'stdDimsExport', n: 'ОВХ из стандартных при выгрузке', w: 34, txt: 1, src: p => (typeof exportDimsNote === 'function' ? exportDimsNote(p) : '') });
+    /* v12.9.92: SKU, посчитанные по стандартным ОВХ (v12.9.91), выгружаются с
+       колонкой-маркером и подсветкой #FFA07A в XLSX. */
+    if (!cat.some(c => c.k === 'stdDimsCalc'))
+      cat.push({ g: 'in', k: 'stdDimsCalc', n: 'ОВХ из стандартных при расчёте', w: 36, txt: 1, src: p => (p && p._stdDimsCalc ? 'СТАНДАРТ-РАСЧЁТ: ' + (p._stdDimsCalc.source || 'справочник') + (Array.isArray(p._stdDimsCalc.fields) && p._stdDimsCalc.fields.length ? ' (' + p._stdDimsCalc.fields.join(', ') + ')' : '') : '') });
     if (cat.some(c => ['category','category_type','tnved'].includes(c.k)) && !cat.some(c => c.k === 'autoFillNote'))
       cat.push({ g: 'in', k: 'autoFillNote', n: 'Автозаполнение (проверить)', w: 30, txt: 1, src: p => (typeof autoFillNote === 'function' ? autoFillNote(p) : '') });
     if (!cat.length) return Toast.warn('Колонки не выбраны', 'Отметьте хотя бы одну колонку');
@@ -39073,6 +39077,12 @@ const Exp = {
     if (ref.stdDimsExport) {
       ct('stdDimsExport', 'СТАНДАРТ', dYellow);
       for (const dk of ['weight','length','width','height']) if (mainRef[dk]) ce(dk, `${mainRef.stdDimsExport}2<>""`, dYellow);
+    }
+    /* v12.9.92: расчёт по стандартным ОВХ — подсветка #FFA07A (маркер и артикул). */
+    const dStdCalc = dxf('FFFFA07A', false, 'FF000000');
+    if (ref.stdDimsCalc) {
+      ct('stdDimsCalc', 'СТАНДАРТ-РАСЧЁТ', dStdCalc);
+      if (mainRef.article) ce('article', `${mainRef.stdDimsCalc}2<>""`, dStdCalc);
     }
     if (ref.autoFillNote) {
       ct('autoFillNote', 'АВТО', dYellow);

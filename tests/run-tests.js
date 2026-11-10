@@ -70,9 +70,9 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.91-client+std-dims-calc'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
 // v12.9.79: светлый экспорт + компактный поштучный калькулятор без месячных расчётов
-assert(app.includes('12.9.91-client+std-dims-calc'), 'версия 12.9.79');
+assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия 12.9.79');
 assert(!app.includes('FF1B2140'), 'чёрной заливки шапки экспорта не осталось');
 assert(app.includes("['markupPct','Заработок на закупку, % — формула'"), 'калькулятор: заработок на закупку');
 assert(app.includes("['logisticsRub','Логистика и доставка, ₽/ед — ввод'"), 'калькулятор 24: объединённая логистика');
@@ -98,6 +98,10 @@ assert(app.includes('function computeEconomicsInner(p, ov)'), 'стандарт�
 assert(app.includes('габариты для расчёта — СТАНДАРТНЫЕ (не измерены): '), 'стандартные ОВХ: пометка в качестве данных');
 assert(html.includes('id="recalcStdDimsBtn"'), 'стандартные ОВХ: кнопка пересчёта');
 assert(html.includes('id="enCalcStdDims"'), 'стандартные ОВХ: переключатель в настройках');
+assert(app.includes("k: 'stdDimsCalc', n: 'ОВХ из стандартных при расчёте'"), 'стандартные ОВХ: колонка-маркер в выгрузке');
+assert(app.includes('СТАНДАРТ-РАСЧЁТ: '), 'стандартные ОВХ: текст маркера');
+assert(app.includes("dxf('FFFFA07A', false, 'FF000000')"), 'стандартные ОВХ: подсветка #FFA07A в XLSX');
+assert(app.includes("ct('stdDimsCalc', 'СТАНДАРТ-РАСЧЁТ', dStdCalc);"), 'стандартные ОВХ: правило подсветки маркера');
 assert(app.includes("c.k === 'multiplicity' ? 'Кратность, шт' : c.n"), 'повторная загрузка: кратность под стандартным именем');
 assert(app.includes('skipEconomics: lightModeOn'), 'лёгкий импорт: пайплайн получает skipEconomics');
 assert(app.includes('const skipEcon = options.skipEconomics === true;'), 'лёгкий импорт: флаг пропуска экономики в пайплайне');
@@ -157,7 +161,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.91-client+std-dims-calc'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -197,7 +201,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.91-cl
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.91-client+std-dims-calc'), 'версия клиента обновлена');
+assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -284,13 +288,13 @@ console.log('OK: все тесты пройдены (' + rows.length + ' стр�
 // v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
 assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
 assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
-assert(app.includes('12.9.91-client+std-dims-calc'), 'версия клиента обновлена');
+assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
 assert(app.includes('if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
-assert(app.includes('12.9.91-client+std-dims-calc'), 'версия клиента обновлена');
+assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
 
 assert(app.includes("classList.contains('active')) UE.render()"), 'импорт: UE.render только для активного раздела');
 assert(app.includes("classList.contains('active')) Dash.render()"), 'импорт: Dash.render только для активного раздела');
@@ -381,7 +385,7 @@ assert(app.includes("classList.contains('active')) Dash.render()"), 'импор�
 assert(app.includes('HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined)'), 'импорт: таргетный rebuildIndex');
 assert(app.includes('dedupeCatalog(_dedupeKeys)'), 'импорт: таргетный dedupe после первого полного');
 assert(app.includes('persistChangedOnly: changedTouched > 0 && !dedup'), 'импорт: запись только дельты, если не было слияний');
-assert(app.includes('12.9.91-client+std-dims-calc'), 'версия клиента обновлена');
+assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
 
 // v12.9.78: автосверка аномалий находит донора через реестр byOe (функционально, настоящий AnomalyOE+DimPolicy)
 ;(async () => {
@@ -434,4 +438,4 @@ assert(app.includes('12.9.91-client+std-dims-calc'), 'версия клиент�
 assert(app.includes('const donorRows=[];'), 'автосверка: отбор доноров по реестру');
 assert(app.includes("lsSet('uc.fullCalcFp', globalParamsFp())"), 'полный пересчёт фиксирует отпечаток параметров');
 assert(app.includes('профиль дельты: изменено строк'), 'журнал импорта: профиль дельты');
-assert(app.includes('12.9.91-client+std-dims-calc'), 'версия клиента обновлена');
+assert(app.includes('12.9.92-client+std-dims-highlight'), 'версия клиента обновлена');
