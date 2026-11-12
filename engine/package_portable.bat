@@ -18,6 +18,8 @@ powershell -NoProfile -Command "Expand-Archive -Force '%TEMP%\pyembed.zip' '%OUT
 rem Разрешить импорт модулей из папки движка в embeddable-сборке
 powershell -NoProfile -Command "(Get-Content '%OUT%\python\python312._pth') -replace '#import site','import site' | Set-Content '%OUT%\python\python312._pth'"
 copy /y "%~dp0uc_engine.py" "%OUT%\engine\" >nul
+copy /y "%~dp0ozon_template.json" "%OUT%\engine\" >nul
+copy /y "%~dp0std_dims.json" "%OUT%\engine\" >nul
 copy /y "%~dp0..\index.html" "%OUT%\" >nul
 (
 echo @echo off

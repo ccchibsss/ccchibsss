@@ -13576,7 +13576,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.116-client+pyengine-ozon2';
+const APP_VERSION = '12.9.117-client+pyengine-ozon3';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26788,6 +26788,12 @@ const PyEngine = {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Выгрузка OZON на движке недоступна — используйте обычный экспорт OZON приложения.'); return; }
     await withProgress('Python: экспорт OZON', 'CSV шаблона собирает движок', async () => {
       await this._syncCatalog('app-ozon-export');
+      try { // пары «категория → тип» из загруженного дерева Ozon — для подстановки и проверки на движке
+        if (typeof OzonReference !== 'undefined' && OzonReference.hasData()) {
+          const pairs = OzonReference.entries().map(e => ({ category: e.cat, type: e.type }));
+          if (pairs.length) await this._fetch('/ozon/pairs/import', { method: 'POST', timeout: 120000, body: JSON.stringify({ pairs }) });
+        }
+      } catch (e) { /* справочник не ушёл — выгрузка идёт без проверки пар */ }
       const discount = (typeof ozonDiscountPct === 'function') ? ozonDiscountPct() : 0;
       const selArticles = (S.sel && S.sel.size && typeof selKey === 'function')
         ? S.rows.filter(p => S.sel.has(selKey(p))).map(p => ({ article: p.article, brand: p.brand || '' })) : null;
