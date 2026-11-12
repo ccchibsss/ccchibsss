@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.126-client+lib-diag';
+const APP_VERSION = '12.9.127-client+lib-diag2';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -46827,9 +46827,33 @@ function recoverEmbeddedLibs() {
     try {
       const el = [...document.scripts].find(x => (x.textContent || '').includes(mark) && (x.textContent || '').length > 50000);
       if (!el) { window.__libRecovery[name] = 'блок не найден среди ' + document.scripts.length + ' скриптов'; continue; }
-      (0, eval)(el.textContent);
-      if (window[name]) { try { el.style.display = 'none'; } catch (e) { } window.__libRecovery[name] = 'восстановлена вручную'; console.info('[UC] библиотека ' + name + ' восстановлена вручную'); }
-      else window.__libRecovery[name] = 'выполнена, но глобалка не появилась';
+      // Способ 1: вставка как настоящего скрипта (точная семантика браузера) + перехват места ошибки
+      let errInfo = '';
+      const onErr = e => { if (!errInfo) errInfo = 'строка ' + (e.lineno || '?') + ', колонка ' + (e.colno || '?'); };
+      try {
+        window.addEventListener('error', onErr, true);
+        const sc = document.createElement('script');
+        sc.textContent = el.textContent;
+        document.head.appendChild(sc);
+        try { sc.remove(); } catch (e) { }
+      } catch (e) { errInfo = errInfo || (e && e.message); }
+      finally { try { window.removeEventListener('error', onErr, true); } catch (e) { } }
+      if (window[name]) { try { el.style.display = 'none'; } catch (e) { } window.__libRecovery[name] = 'восстановлена вставкой скрипта'; console.info('[UC] библиотека ' + name + ' восстановлена вставкой'); continue; }
+      // Способ 2: eval, а при ошибке — показать битый фрагмент вокруг места
+      try {
+        (0, eval)(el.textContent);
+        if (window[name]) { try { el.style.display = 'none'; } catch (e) { } window.__libRecovery[name] = 'восстановлена вручную'; continue; }
+        window.__libRecovery[name] = 'выполнена, но глобалка не появилась' + (errInfo ? '; вставка: ' + errInfo : '');
+      } catch (e2) {
+        let frag = '';
+        try {
+          const lines = el.textContent.split('\n');
+          const mLine = /:(\d+):(\d+)/.exec(e2 && e2.stack || '');
+          const ln = errInfo && /строка (\d+)/.exec(errInfo) ? +/строка (\d+)/.exec(errInfo)[1] : (mLine ? +mLine[1] : 0);
+          if (ln > 0 && lines[ln - 1]) frag = ' | фрагмент: ' + lines[ln - 1].slice(Math.max(0, (mLine ? +mLine[2] : 60) - 60), (mLine ? +mLine[2] : 60) + 60);
+        } catch (e3) { }
+        window.__libRecovery[name] = 'ошибка выполнения: ' + (e2 && e2.message) + (errInfo ? ' (' + errInfo + ')' : '') + frag;
+      }
     } catch (e) { window.__libRecovery[name] = 'ошибка выполнения: ' + (e && e.message); console.warn('[UC] recover ' + name + ':', e && e.message); }
   }
 }
