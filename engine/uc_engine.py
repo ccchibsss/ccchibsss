@@ -433,6 +433,18 @@ def summary_report(conn):
             'outbox': {r['status']: r['c'] for r in outbox}, 'mail_imports_ok': mail['c']}
 
 # ---------------- HTTP ----------------
+def render_app_html():
+    """Приложение с авто-токеном: страница отдана самим движком с его же адреса,
+       поэтому токен можно вшить в HTML — пользователю не нужно ничего вставлять.
+       Чужой сайт прочитать эту страницу не может (нет CORS-заголовка на /)."""
+    app_file = BASE.parent / 'index.html'
+    if not app_file.exists(): return None
+    html = app_file.read_text(encoding='utf-8')
+    inject = '<script>window.__UC_PY_TOKEN__=' + json.dumps(get_token()) + ';</script>'
+    if '</head>' in html: html = html.replace('</head>', inject + '</head>', 1)
+    else: html = inject + html
+    return html.encode('utf-8')
+
 def get_token():
     if not TOKEN_PATH.exists():
         TOKEN_PATH.write_text(os.urandom(18).hex(), encoding='utf-8')
@@ -459,9 +471,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/', '/index.html', '/app'):
             # одно окно: приложение отдаёт сам движок с того же адреса
-            app_file = BASE.parent / 'index.html'
-            if app_file.exists():
-                body = app_file.read_bytes()
+            body = render_app_html()
+            if body is not None:
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Content-Length', str(len(body)))

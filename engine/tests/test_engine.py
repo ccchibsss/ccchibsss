@@ -67,3 +67,11 @@ class TestData(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=1)
+
+class TestAppServing(unittest.TestCase):
+    def test_token_injected_into_app(self):
+        html = E.render_app_html()
+        if html is None:
+            self.skipTest('index.html не найден')
+        self.assertIn(b'__UC_PY_TOKEN__', html)
+        self.assertIn(b'</head>', html)
