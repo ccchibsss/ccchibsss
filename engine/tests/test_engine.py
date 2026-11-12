@@ -399,6 +399,54 @@ class TestOzonStage3(unittest.TestCase):
         self.assertIn('Название товара', sheet)         # шапка шаблона
         self.assertIn('xl/styles.xml', z.namelist())    # стили для заливки
 
+class TestPerfBasics(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_wal_mode_on(self):
+        mode = self.conn.execute('PRAGMA journal_mode').fetchone()[0]
+        self.assertEqual(str(mode).lower(), 'wal')
+    def test_gzip_helper(self):
+        import gzip as _gz
+        class FakeH: headers = {'Accept-Encoding': 'gzip, deflate'}
+        body = b'{"ok": true, "data": "' + b'x' * 5000 + b'"}'
+        out, extra = E.Handler._maybe_gzip(FakeH(), body)
+        self.assertEqual(extra.get('Content-Encoding'), 'gzip')
+        self.assertLess(len(out), len(body))
+        self.assertEqual(_gz.decompress(out), body)
+        small, extra2 = E.Handler._maybe_gzip(FakeH(), b'{}')
+        self.assertEqual((small, extra2), (b'{}', {}))  # мелкие ответы не сжимаем
+
+class TestIncrementalRecalc(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        self.st = {'tax_mode': 'usn6', 'target_margin': 20, 'min_profit': 150}
+        E.import_rows(self.conn, [
+            {'article': f'A{i}', 'brand': 'B', 'name': 'Деталь', 'price': 1000 + i * 100,
+             'cost': 500, 'sales': 10, 'weight': 0.3} for i in range(3)], 'test')
+    def test_incremental_flow(self):
+        r1 = E.recalc_catalog(self.conn, self.st)
+        self.assertEqual(r1['recalculated'], 3)
+        r2 = E.recalc_catalog(self.conn, self.st)
+        self.assertEqual((r2['recalculated'], r2['skipped']), (0, 3))   # ничего не изменилось
+        self.assertEqual(r2['profitable'], r1['profitable'])             # итоги по всей таблице
+        E.import_rows(self.conn, [{'article': 'A1', 'brand': 'B', 'price': 5000, 'cost': 500}], 'test')
+        r3 = E.recalc_catalog(self.conn, self.st)
+        self.assertEqual((r3['recalculated'], r3['skipped']), (1, 2))   # только изменённая строка
+        p = self.conn.execute("SELECT profit FROM eco_results WHERE article='A1'").fetchone()[0]
+        self.assertGreater(p, 3000)                                      # результат правда обновился
+        r4 = E.recalc_catalog(self.conn, {**self.st, 'target_margin': 30})
+        self.assertEqual(r4['recalculated'], 3)                          # смена настроек — все строки
+        r5 = E.recalc_catalog(self.conn, self.st, force=True)
+        self.assertEqual(r5['recalculated'], 3)                          # force — полный пересчёт
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib
