@@ -126,6 +126,22 @@ class TestImportEnrich(unittest.TestCase):
                 self.assertEqual(_json.loads(r.read())['imported'], 1)
         finally:
             srv.shutdown()
+    def test_import_csv_cp1251(self):
+        # аудит v12.9.106: браузерный импорт умеет windows-1251 — движок обязан тоже
+        res = E.import_file_bytes(self.conn, 'price.csv',
+            'Артикул;Бренд;Цена\nF100;BOSCH;700\n'.encode('cp1251'))
+        self.assertEqual(res['imported'], 1)
+    def test_enrich_partial_dims_not_overwritten(self):
+        # аудит v12.9.106: заполняются только пустые компоненты габаритов
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 400,
+             'weight': 0.3, 'length': 10, 'width': 6, 'height': 6, 'oe_numbers': 'OE1'},
+            {'article': 'F200', 'brand': 'MANN', 'price': 800, 'cost': 450,
+             'weight': 9.9, 'oe_numbers': 'OE1'}], 'test')  # вес свой, габаритов нет
+        E.enrich_oe(self.conn)
+        row = self.conn.execute("SELECT weight, length FROM products WHERE article='F200'").fetchone()
+        self.assertEqual(row[0], 9.9)   # свой вес не перетёрт донором
+        self.assertEqual(row[1], 10)    # пустая длина заполнена
     def test_enrich_transitive(self):
         E.import_rows(self.conn, [
             {'article': 'F100', 'brand': 'BOSCH', 'name': 'Фильтр', 'price': 700, 'cost': 400,

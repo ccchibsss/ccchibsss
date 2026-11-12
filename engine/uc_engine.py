@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.101-pyengine-1'
+VERSION = '12.9.106-pyengine-3'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -225,6 +225,10 @@ def map_header(header):
 
 def rows_from_csv_bytes(data):
     text = data.decode('utf-8-sig', errors='replace')
+    if '\ufffd' in text[:400]:
+        # как браузерный импорт: российские прайсы часто в windows-1251
+        try: text = data.decode('cp1251')
+        except Exception: pass
     delim = ';' if text.split('\n', 1)[0].count(';') >= text.split('\n', 1)[0].count(',') else ','
     rows = list(csv.reader(io.StringIO(text), delimiter=delim))
     if not rows: return []
@@ -430,8 +434,11 @@ def enrich_oe(conn):
                 same_art = [d for d in complete if d['article'] == r['article']]
                 donor = same_art[0] if same_art else complete[0]
                 d = dims_of(donor)
-                updates.update({'length': d[0], 'width': d[1], 'height': d[2], 'weight': d[3]})
-                filled['dims'] += 1
+                cur = dims_of(r)
+                # только пустые компоненты: уже заполненные значения не перетираем
+                for i, f in enumerate(('length', 'width', 'height', 'weight')):
+                    if not cur[i] > 0 and d[i] > 0: updates[f] = d[i]
+                if updates: filled['dims'] += 1
             others = sorted({m[0] for m in members if m[0] != r['article']})
             if others:
                 cur = {x.strip() for x in str(r['analog_list'] or '').split(',') if x.strip()}
