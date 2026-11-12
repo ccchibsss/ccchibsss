@@ -323,6 +323,34 @@ class TestOzonExport(unittest.TestCase):
         r3 = E.ozon_row({'article': 'F1', 'brand': 'B', 'name': 'X', 'price': 100}, 1, discount_pct=30)
         self.assertEqual(r3[4], 130)          # надбавка только по выбору продавца
 
+class TestOzonStage2(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'price': 1000, 'cost': 500},
+            {'article': 'F200', 'brand': 'MANN', 'price': 2000, 'cost': 900}], 'test')
+    def test_donor_warranty_country(self):
+        E.import_donors(self.conn, [{'article': 'F100', 'brand': 'BOSCH',
+                                     'warranty': '12 месяцев', 'country': 'Германия'}], 'dict')
+        E.enrich_full(self.conn)
+        row = self.conn.execute("SELECT warranty,country FROM products WHERE article='F100'").fetchone()
+        self.assertEqual(tuple(row), ('12 месяцев', 'Германия'))
+    def test_ozon_scope_keys(self):
+        data = E.export_ozon_csv_bytes(self.conn, keys={('F200', 'MANN')}).decode('utf-8-sig')
+        self.assertIn('F200', data)
+        self.assertNotIn('F100', data.split('\n')[1] if len(data.split('\n')) > 1 else '')
+    def test_ozon_xlsx(self):
+        import io as _io, zipfile
+        data = E._xlsx_from_rows(E.OZON_HEADERS, E._ozon_rows_data(self.conn), 'Ozon')
+        z = zipfile.ZipFile(_io.BytesIO(data))
+        sheet = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
+        self.assertIn('Артикул*', sheet)
+        self.assertIn('F100', sheet)
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib

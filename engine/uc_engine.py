@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.115-pyengine-11'
+VERSION = '12.9.116-pyengine-12'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS parse_rows(session TEXT, idx INTEGER, data TEXT,
   PRIMARY KEY(session, idx));
 CREATE TABLE IF NOT EXISTS donors(article TEXT NOT NULL, brand TEXT DEFAULT '', source TEXT DEFAULT '',
   name TEXT DEFAULT '', category TEXT DEFAULT '', tnved TEXT DEFAULT '', applicability TEXT DEFAULT '',
+  warranty TEXT DEFAULT '', country TEXT DEFAULT '',
   weight REAL DEFAULT 0, length REAL DEFAULT 0, width REAL DEFAULT 0, height REAL DEFAULT 0,
   oe_numbers TEXT DEFAULT '', PRIMARY KEY(article, brand, source));
 CREATE TABLE IF NOT EXISTS oe_links(oe TEXT NOT NULL, article TEXT NOT NULL, brand TEXT DEFAULT '',
@@ -201,6 +202,10 @@ def db():
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     # миграция баз до v12.9.110: обогащаемые текстовые поля каталога
+    dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
+    for col in ('warranty', 'country'):
+        if col not in dcols:
+            conn.execute(f"ALTER TABLE donors ADD COLUMN {col} TEXT DEFAULT ''")
     cols = {r[1] for r in conn.execute('PRAGMA table_info(products)')}
     for col in ('category', 'tnved', 'applicability',
                 'barcode', 'image_url', 'extra_photos', 'ozon_sku', 'ozon_type', 'ozon_category',
@@ -556,17 +561,20 @@ def import_donors(conn, rows, source):
     for r in rows:
         art = str(r.get('article', '')).strip()
         if not art: continue
-        conn.execute('''INSERT INTO donors(article,brand,source,name,category,tnved,applicability,
-            weight,length,width,height,oe_numbers) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+        conn.execute('''INSERT INTO donors(article,brand,source,name,category,tnved,applicability,warranty,country,
+            weight,length,width,height,oe_numbers) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(article,brand,source) DO UPDATE SET
               name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE donors.name END,
               category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE donors.category END,
               tnved=CASE WHEN excluded.tnved<>'' THEN excluded.tnved ELSE donors.tnved END,
               applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE donors.applicability END,
+              warranty=CASE WHEN excluded.warranty<>'' THEN excluded.warranty ELSE donors.warranty END,
+              country=CASE WHEN excluded.country<>'' THEN excluded.country ELSE donors.country END,
               weight=excluded.weight, length=excluded.length, width=excluded.width, height=excluded.height,
               oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END''',
             (art, str(r.get('brand', '')).strip(), source, str(r.get('name', '')), str(r.get('category', '')),
-             str(r.get('tnved', '')), str(r.get('applicability', '')), num(r.get('weight')), num(r.get('length')),
+             str(r.get('tnved', '')), str(r.get('applicability', '')), str(r.get('warranty', '')), str(r.get('country', '')),
+             num(r.get('weight')), num(r.get('length')),
              num(r.get('width')), num(r.get('height')), str(r.get('oe_numbers', ''))))
         n += 1
     conn.commit()
@@ -585,9 +593,9 @@ def enrich_full(conn, cat_mode='artbrand'):
          совместимость с уже заполненными обязательна, заполняются только пустые;
        - аналоги: артикулы OE-группы (как enrich_oe). Заполненные поля не трогаем."""
     prods = [dict(r) for r in conn.execute(
-        'SELECT article,brand,name,category,tnved,applicability,weight,length,width,height,oe_numbers,analog_list FROM products')]
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list FROM products')]
     donors = [dict(r) for r in conn.execute(
-        'SELECT article,brand,name,category,tnved,applicability,weight,length,width,height,oe_numbers FROM donors')]
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers FROM donors')]
     donors_by_key = {}
     for d in donors: donors_by_key.setdefault((d['article'], d['brand']), []).append(d)
     # OE-граф: продукты и доноры в одних группах (узел = ('p'|'d', article, brand, idx))
@@ -607,7 +615,7 @@ def enrich_full(conn, cat_mode='artbrand'):
         for other in lst[1:]: union(lst[0], other)
     groups = {}
     for n in nodes: groups.setdefault(find(n), []).append(n)
-    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'dims': 0, 'analog_list': 0}
+    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0}
     conflicts = {'category': 0, 'tnved': 0}
     def unanimous(values):
         vals = [str(v).strip() for v in values if str(v or '').strip()]
@@ -639,6 +647,11 @@ def enrich_full(conn, cat_mode='artbrand'):
                     v, conf2 = unanimous([d[field] for d in group_donors] + [g[field] for g in group_prods if g is not p])
                     if conf2: conflicts[field] += 1
                 if v: updates[field] = v; filled[field] += 1
+            # гарантия/страна: только точная пара справочника, единогласно (как ozonSourceAttributes)
+            for field in ('warranty', 'country'):
+                if str(p[field] or '').strip(): continue
+                v, conf = unanimous([d[field] for d in pair])
+                if v: updates[field] = v; filled[field] = filled.get(field, 0) + 1
             cur = _dims_of(p)
             if not all(v > 0 for v in cur):
                 cands = []
@@ -955,9 +968,8 @@ def _xml_esc(v):
     return (str(v).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             .replace('"', '&quot;'))
 
-def export_catalog_xlsx_bytes(conn):
-    """XLSX без openpyxl: zip из XML (stdlib). Inline-строки, числа как есть —
-       Excel/LibreOffice/Sheets открывают; portable-сборке зависимости не нужны."""
+def _xlsx_from_rows(headers, data_rows, sheet_name='Лист'):
+    """Общий XLSX-писатель без openpyxl: zip из XML (stdlib)."""
     import zipfile
     def col_letter(i):
         out = ''
@@ -966,14 +978,13 @@ def export_catalog_xlsx_bytes(conn):
         return out
     rows_xml = []
     header = ''.join(f'<c r="{col_letter(i)}1" t="inlineStr"><is><t>{_xml_esc(h)}</t></is></c>'
-                     for i, (_, h) in enumerate(EXPORT_COLS))
+                     for i, h in enumerate(headers))
     rows_xml.append(f'<row r="1">{header}</row>')
     rn = 1
-    for r in conn.execute(_EXPORT_SQL):
+    for row in data_rows:
         rn += 1
         cells = []
-        for i, (k, _) in enumerate(EXPORT_COLS):
-            v = r[k]
+        for i, v in enumerate(row):
             if v is None or v == '': continue
             ref = f'{col_letter(i)}{rn}'
             if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -984,6 +995,7 @@ def export_catalog_xlsx_bytes(conn):
     sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
              '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
              f'<sheetData>{"".join(rows_xml)}</sheetData></worksheet>')
+    sheet_title = _xml_esc(str(sheet_name)[:31] or 'Лист')
     parts = {
         '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -997,7 +1009,7 @@ def export_catalog_xlsx_bytes(conn):
         'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
             'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            '<sheets><sheet name="Каталог" sheetId="1" r:id="rId1"/></sheets></workbook>',
+            f'<sheets><sheet name="{sheet_title}" sheetId="1" r:id="rId1"/></sheets></workbook>',
         'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
@@ -1006,6 +1018,11 @@ def export_catalog_xlsx_bytes(conn):
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
         for name, content in parts.items(): z.writestr(name, content)
     return out.getvalue()
+
+def export_catalog_xlsx_bytes(conn):
+    rows = conn.execute(_EXPORT_SQL).fetchall()
+    return _xlsx_from_rows([h for _, h in EXPORT_COLS],
+                           [[r[k] for k, _ in EXPORT_COLS] for r in rows], 'Каталог')
 
 # ---------------- выгрузка Ozon, 46 колонок (этап 1, v12.9.115) ----------------
 OZON_HEADERS = ['№','Артикул*','Название товара','Предельная цена без акций, руб.*','Зачёркнутая цена, руб.',
@@ -1074,13 +1091,21 @@ def ozon_row(p, idx, vat='Не облагается', discount_pct=0, vehicle_ty
             str(p.get('package_contents', '')).strip() or f'{name} - 1 шт., упаковка', '1',
             '; '.join(errors), '; '.join(notes)]
 
-def export_ozon_csv_bytes(conn, discount_pct=0, vat='Не облагается', enc='utf-8'):
+def _ozon_rows_data(conn, keys=None, discount_pct=0, vat='Не облагается'):
+    rows = conn.execute('SELECT * FROM products ORDER BY article,brand').fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if keys is not None and (d['article'], d['brand']) not in keys: continue
+        out.append(ozon_row(d, len(out) + 1, vat=vat, discount_pct=discount_pct))
+    return out
+
+def export_ozon_csv_bytes(conn, discount_pct=0, vat='Не облагается', enc='utf-8', keys=None):
     import csv as _csv
     buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
     w.writerow(OZON_HEADERS)
-    rows = conn.execute('SELECT * FROM products ORDER BY article,brand').fetchall()
-    for i, r in enumerate(rows, 1):
-        w.writerow(ozon_row(dict(r), i, vat=vat, discount_pct=discount_pct))
+    for row in _ozon_rows_data(conn, keys, discount_pct, vat):
+        w.writerow(row)
     text = buf.getvalue()
     if enc == 'cp1251': return text.encode('cp1251', errors='replace')
     return ('\ufeff' + text).encode('utf-8')
@@ -1170,6 +1195,13 @@ class Handler(BaseHTTPRequestHandler):
             total = conn.execute('SELECT total FROM parse_sessions WHERE id=?', (sid,)).fetchone()
             if total is None: return self._send(404, {'ok': False, 'error': 'parse_id не найден'})
             return self._send(200, {'ok': True, 'total': total[0], 'rows': [json.loads(r[0]) for r in rows]})
+        if self.path.startswith('/export/ozon.xlsx'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            data = _xlsx_from_rows(OZON_HEADERS, _ozon_rows_data(conn, None,
+                num((qs.get('discount_pct') or ['0'])[0]), (qs.get('vat') or ['Не облагается'])[0]), 'Ozon')
+            return self._send_bytes(200, data,
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
         if self.path.startswith('/export/ozon.csv'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -1262,6 +1294,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
             if self.path == '/snapshots':
                 return self._send(200, {'ok': True, **make_snapshot(conn, body.get('note', ''))})
+            if self.path == '/export/ozon.csv':
+                keys = None
+                if body.get('articles') is not None:
+                    keys = {(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']}
+                return self._send_bytes(200, export_ozon_csv_bytes(conn,
+                    discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys),
+                    'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
             if self.path == '/outbox':
                 n = enqueue(conn, body.get('kind', ''), body.get('marketplace', ''), body.get('items') or [])
                 return self._send(200, {'ok': True, 'queued': n})
