@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.112-pyengine-9'
+VERSION = '12.9.113-pyengine-10'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -297,8 +297,8 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         if not art: continue
         brand = str(r.get('brand', '')).strip()
         old = conn.execute('SELECT price,cost FROM products WHERE article=? AND brand=?', (art, brand)).fetchone()
-        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,category,tnved,applicability,source,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
+        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,analog_list,category,tnved,applicability,source,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
               name=COALESCE(NULLIF(excluded.name,''),products.name),
               price=CASE WHEN excluded.price>0 THEN excluded.price ELSE products.price END,
@@ -306,6 +306,7 @@ def import_rows(conn, rows, source, rebuild_fts=True):
               stock=excluded.stock, sales=excluded.sales, weight=excluded.weight, length=excluded.length,
               width=excluded.width, height=excluded.height,
               oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE products.oe_numbers END,
+              analog_list=CASE WHEN excluded.analog_list<>'' THEN excluded.analog_list ELSE products.analog_list END,
               category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE products.category END,
               tnved=CASE WHEN excluded.tnved<>'' THEN excluded.tnved ELSE products.tnved END,
               applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE products.applicability END,
@@ -313,7 +314,7 @@ def import_rows(conn, rows, source, rebuild_fts=True):
             (art, str(r.get('brand', '')).strip(), str(r.get('name', '')),
              num(r.get('price')), num(r.get('cost')), num(r.get('stock')), num(r.get('sales')), num(r.get('weight')),
              num(r.get('length')), num(r.get('width')), num(r.get('height')),
-             str(r.get('oe_numbers', '')), str(r.get('category', '')), str(r.get('tnved', '')),
+             str(r.get('oe_numbers', '')), str(r.get('analog_list', '')), str(r.get('category', '')), str(r.get('tnved', '')),
              str(r.get('applicability', '')), source))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old[0] if old else 0)
@@ -727,6 +728,60 @@ def snapshot_diff(conn, id1, id2):
     return {'from': id1, 'to': id2, 'added': [dict(r) for r in added], 'removed': [dict(r) for r in removed],
             'price_changed': [dict(r) for r in changed]}
 
+# ---------------- fuzzy-подсказки аналогов (п.7 аудита, v12.9.113) ----------------
+def _norm_article(v):
+    return re.sub(r'[^A-Z0-9А-ЯЁ]', '', str(v or '').upper())
+
+def analog_suggestions(conn, limit=100):
+    """ТОЛЬКО подсказки оператору (запрет авто-поиска аналогов v12.9.85 не тронут):
+       ничего не записываем. Кандидаты для SKU без аналогов: тот же нормализованный
+       артикул у другого бренда и похожие артикулы (опечатки, ratio>=0.86),
+       блокирование по префиксу, пары с общим OE исключены (они уже связаны)."""
+    import difflib
+    prods = [dict(r) for r in conn.execute('SELECT article,brand,analog_list,oe_numbers FROM products')]
+    oe_of = {}
+    oe_pairs = set()
+    by_oe = {}
+    for p in prods:
+        key = (p['article'], p['brand'])
+        codes = set(_oe_codes(p['oe_numbers']))
+        oe_of[key] = codes
+        for oe in codes: by_oe.setdefault(oe, []).append(key)
+    for keys in by_oe.values():
+        for a in keys:
+            for b in keys:
+                if a != b: oe_pairs.add((a, b))
+    blocks = {}
+    for p in prods:
+        n = _norm_article(p['article'])
+        if len(n) >= 3: blocks.setdefault(n[:3], []).append(p)
+    out = []
+    seen = set()
+    for lst in blocks.values():
+        for i in range(len(lst)):
+            for j in range(i + 1, len(lst)):
+                a, b = lst[i], lst[j]
+                ka, kb = (a['article'], a['brand']), (b['article'], b['brand'])
+                na, nb = _norm_article(a['article']), _norm_article(b['article'])
+                if abs(len(na) - len(nb)) > 2: continue
+                if na == nb:
+                    score, reason = 1.0, 'тот же артикул, другой бренд'
+                else:
+                    score = difflib.SequenceMatcher(None, na, nb).ratio()
+                    if score < 0.86: continue
+                    reason = 'похожий артикул (возможна опечатка)'
+                for src, dst in ((a, b), (b, a)):
+                    ks, kd = (src['article'], src['brand']), (dst['article'], dst['brand'])
+                    if str(src['analog_list'] or '').strip(): continue       # аналоги уже есть
+                    if (ks, kd) in oe_pairs or (ks, kd) in seen: continue    # уже связаны по OE
+                    seen.add((ks, kd))
+                    out.append({'article': src['article'], 'brand': src['brand'],
+                                'candidate_article': dst['article'], 'candidate_brand': dst['brand'],
+                                'score': rnd(score, 3), 'reason': reason})
+    out.sort(key=lambda r: -r['score'])
+    return {'suggestions': out[:int(limit)], 'total_found': len(out),
+            'note': 'только подсказки оператору: аналоги автоматически не проставляются'}
+
 # ---------------- очередь отправки на площадки ----------------
 def enqueue(conn, kind, marketplace, items):
     n = 0
@@ -976,6 +1031,10 @@ class Handler(BaseHTTPRequestHandler):
         conn = db()
         if self.path == '/report/summary': return self._send(200, {'ok': True, **summary_report(conn)})
         if self.path == '/report/dashboard': return self._send(200, {'ok': True, **dashboard_report(conn)})
+        if self.path.startswith('/analogs/suggestions'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            return self._send(200, {'ok': True, **analog_suggestions(conn, (qs.get('limit') or ['100'])[0])})
         if self.path.startswith('/report/price-changes'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)

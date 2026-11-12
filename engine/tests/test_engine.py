@@ -264,6 +264,33 @@ class TestHistorySnapshots(unittest.TestCase):
         self.assertEqual(d['removed'], [])
         self.assertEqual(d['price_changed'][0]['new_price'], 800)
 
+class TestAnalogSuggestions(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [
+            {'article': 'ABC12345', 'brand': 'BOSCH', 'price': 100, 'cost': 50},
+            {'article': 'ABC12346', 'brand': 'MANN', 'price': 100, 'cost': 50},    # опечатка в последней цифре
+            {'article': 'ABC12345', 'brand': 'MAHLE', 'price': 100, 'cost': 50},   # тот же артикул, другой бренд
+            {'article': 'ZZZ9999', 'brand': 'FEBI', 'price': 100, 'cost': 50},     # непохожий
+            {'article': 'ABC12345', 'brand': 'FAG', 'price': 100, 'cost': 50, 'analog_list': 'X1'},  # аналоги уже есть
+            {'article': 'DEF777', 'brand': 'BOSCH', 'price': 100, 'cost': 50, 'oe_numbers': 'OE1'},
+            {'article': 'DEF778', 'brand': 'MANN', 'price': 100, 'cost': 50, 'oe_numbers': 'OE1'}], 'test')  # уже OE-связь
+    def test_suggestions_only(self):
+        res = E.analog_suggestions(self.conn)
+        pairs = {(r['article'], r['brand'], r['candidate_article'], r['candidate_brand']) for r in res['suggestions']}
+        self.assertIn(('ABC12345', 'BOSCH', 'ABC12346', 'MANN'), pairs)    # опечатка найдена
+        self.assertIn(('ABC12345', 'BOSCH', 'ABC12345', 'MAHLE'), pairs)   # тот же артикул, бренд другой
+        self.assertFalse(any(r['article'] == 'ZZZ9999' for r in res['suggestions']))   # непохожие молчат
+        self.assertFalse(any(r['brand'] == 'FAG' for r in res['suggestions']))        # с аналогами не трогаем
+        self.assertFalse(any(r['article'].startswith('DEF') for r in res['suggestions']))  # OE-связь исключена
+        # главное: подсказки НИЧЕГО не записали
+        row = self.conn.execute("SELECT analog_list FROM products WHERE article='ABC12345' AND brand='BOSCH'").fetchone()
+        self.assertEqual(row[0], '')
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib

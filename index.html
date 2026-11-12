@@ -7162,6 +7162,7 @@ html { -webkit-text-size-adjust: 100%; }
     <button type="button" class="btn gh" id="btnPyEnrichFull" title="Полное обогащение на Python-движке (Каталог V в SQLite): доноры Артикул+Бренд и OE-группы; категория и ТН ВЭД — по умолчанию только от той же пары, по OE — лишь при единогласии доноров; заполняются только пустые поля"><i class="fa-brands fa-python"></i> Python: полное обогащение</button>
     <button type="button" class="btn gh" id="btnPyHistory" title="История цен на Python-движке: движок пишет изменения цен и себестоимости при каждом импорте; сводка подорожаний и удешевлений за 30 дней — одним SQL-запросом"><i class="fa-brands fa-python"></i> Python: история цен</button>
     <button type="button" class="btn gh" id="btnPySnapshot" title="Снапшот каталога на Python-движке: снимок цен, себестоимости и остатков в SQLite для последующих сравнений (дифф — GET /snapshots/diff)"><i class="fa-brands fa-python"></i> Python: снапшот цен</button>
+    <button type="button" class="btn gh" id="btnPyAnalogs" title="Подсказки аналогов на Python-движке: похожие артикулы (опечатки, тот же артикул у другого бренда) для SKU без аналогов. ТОЛЬКО подсказки — автоматически аналоги не проставляются, решение за оператором"><i class="fa-brands fa-python"></i> Python: подсказки аналогов</button>
     <button type="button" class="btn gh" id="btnPyToken" title="Задать токен доступа к локальному Python-движку (файл engine/engine_data/token.txt)"><i class="fa-solid fa-key"></i> Токен Python</button>
     <span class="hint" id="pyEngineStatus" title="Статус локального Python-движка">Python: не проверен</span>
     <button type="button" class="btn gh" id="btnReviewImport" title="Загрузить CSV очереди проверки с заполненными решениями: принятые пары запомнятся и применятся, отклонённые больше не предложатся"><i class="fa-solid fa-file-import"></i> Решения проверки ↑</button>
@@ -13573,7 +13574,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.112-client+pyengine-history';
+const APP_VERSION = '12.9.113-client+pyengine-analogs';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26174,6 +26175,7 @@ const UI = {
     const _bpf = $('#btnPyEnrichFull'); if (_bpf) _bpf.onclick = () => PyEngine.enrichFull();
     const _bph = $('#btnPyHistory'); if (_bph) _bph.onclick = () => PyEngine.priceHistory();
     const _bps = $('#btnPySnapshot'); if (_bps) _bps.onclick = () => PyEngine.snapshot();
+    const _bpa = $('#btnPyAnalogs'); if (_bpa) _bpa.onclick = () => PyEngine.analogHints();
     const _bpt = $('#btnPyToken'); if (_bpt) _bpt.onclick = () => PyEngine.askToken();
     PyEngine.refreshStatus();
     const _bri = $('#btnReviewImport'); if (_bri) _bri.onclick = () => ReviewQueue.pickDecisions();
@@ -26744,6 +26746,15 @@ const PyEngine = {
     const d = await this._fetch('/snapshots', { method: 'POST', timeout: 120000, body: JSON.stringify({ note: 'из приложения' }) });
     Toast.ok('Снапшот каталога сохранён на движке',
       'Снимок #' + fmt(d.snapshot_id || 0) + ': ' + fmt(d.total || 0) + ' SKU (цены, себестоимость, остатки). Сравнение снимков: GET /snapshots/diff?from=ID&to=ID у движка.');
+  },
+  async analogHints() {
+    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Подсказки аналогов считает движок.'); return; }
+    await this._syncCatalog('app-analogs');
+    const d = await this._fetch('/analogs/suggestions?limit=100', { timeout: 300000 });
+    const top = (d.suggestions || []).slice(0, 8).map(r => esc(r.article) + ' (' + esc(r.brand || '') + ') → ' + esc(r.candidate_article) + ' (' + esc(r.candidate_brand || '') + '), ' + fmt(r.score * 100, 0) + '%').join(' · ');
+    Toast.ok('Подсказки аналогов от движка — только для ручной проверки',
+      'Найдено пар-кандидатов: ' + fmt(d.total_found || 0) + (top ? '. Например: ' + top : '') +
+      '. Автоматически аналоги НЕ проставлены (запрет авто-поиска): проверьте пары и внесите вручную или через очередь проверки.');
   },
   async parseFile(f) {
     /* обобщённый разбор файла на движке (v12.9.111): возвращает строки-объекты
