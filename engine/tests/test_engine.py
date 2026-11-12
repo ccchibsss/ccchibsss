@@ -486,6 +486,15 @@ class TestDiag(unittest.TestCase):
         finally:
             E.BUNDLE, E.BASE = old_b, old_base
 
+class TestExternalXlsx(unittest.TestCase):
+    def test_extract_and_serve_markup(self):
+        html = '<head></head><script>/*! xlsx встроен офлайн (v11) */\nvar XLSX={};/* xlsx.js */</script><script>app</script>'
+        out = E._extract_xlsx(html)
+        self.assertIn('<script src="/lib/xlsx.js"></script>', out)
+        self.assertNotIn('var XLSX', out)
+        self.assertIn(b'xlsx.js', E._XLSX_JS)
+        self.assertEqual(E._extract_xlsx('<html>без либы</html>'), '<html>без либы</html>')
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib
