@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.116-pyengine-12'
+VERSION = '12.9.117-pyengine-13'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -968,8 +968,10 @@ def _xml_esc(v):
     return (str(v).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             .replace('"', '&quot;'))
 
-def _xlsx_from_rows(headers, data_rows, sheet_name='Лист'):
-    """Общий XLSX-писатель без openpyxl: zip из XML (stdlib)."""
+def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None, yellow=None):
+    """Общий XLSX-писатель без openpyxl: zip из XML (stdlib).
+       header_rows — служебные строки перед шапкой (официальный шаблон Ozon);
+       yellow — множество (строка_данных_0based, колонка_0based) для жёлтой заливки."""
     import zipfile
     def col_letter(i):
         out = ''
@@ -977,20 +979,28 @@ def _xlsx_from_rows(headers, data_rows, sheet_name='Лист'):
         while i: i, rem = divmod(i - 1, 26); out = chr(65 + rem) + out
         return out
     rows_xml = []
-    header = ''.join(f'<c r="{col_letter(i)}1" t="inlineStr"><is><t>{_xml_esc(h)}</t></is></c>'
+    rn = 0
+    for hrow in (header_rows or []):
+        rn += 1
+        cells = ''.join(f'<c r="{col_letter(i)}{rn}" t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>'
+                        for i, v in enumerate(hrow) if v not in (None, ''))
+        rows_xml.append(f'<row r="{rn}">{cells}</row>')
+    rn += 1
+    header = ''.join(f'<c r="{col_letter(i)}{rn}" t="inlineStr"><is><t>{_xml_esc(h)}</t></is></c>'
                      for i, h in enumerate(headers))
-    rows_xml.append(f'<row r="1">{header}</row>')
-    rn = 1
-    for row in data_rows:
+    rows_xml.append(f'<row r="{rn}">{header}</row>')
+    yellow = yellow or set()
+    for di, row in enumerate(data_rows):
         rn += 1
         cells = []
         for i, v in enumerate(row):
             if v is None or v == '': continue
             ref = f'{col_letter(i)}{rn}'
+            st = ' s="1"' if (di, i) in yellow else ''
             if isinstance(v, (int, float)) and not isinstance(v, bool):
-                cells.append(f'<c r="{ref}"><v>{v}</v></c>')
+                cells.append(f'<c r="{ref}"{st}><v>{v}</v></c>')
             else:
-                cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>')
+                cells.append(f'<c r="{ref}"{st} t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>')
         rows_xml.append(f'<row r="{rn}">{"".join(cells)}</row>')
     sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
              '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
@@ -1002,7 +1012,17 @@ def _xlsx_from_rows(headers, data_rows, sheet_name='Лист'):
             '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
             '<Default Extension="xml" ContentType="application/xml"/>'
             '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
+        'xl/styles.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<fills count="3"><fill><patternFill patternType="none"/></fill>'
+            '<fill><patternFill patternType="gray125"/></fill>'
+            '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF99"/></patternFill></fill></fills>'
+            '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+            '<borders count="1"><border/></borders>'
+            '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>'
+            '<xf numFmtId="0" fontId="0" fillId="2" borderId="0" applyFill="1"/></cellXfs></styleSheet>',
         '_rels/.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
@@ -1012,7 +1032,8 @@ def _xlsx_from_rows(headers, data_rows, sheet_name='Лист'):
             f'<sheets><sheet name="{sheet_title}" sheetId="1" r:id="rId1"/></sheets></workbook>',
         'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
         'xl/worksheets/sheet1.xml': sheet}
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -1038,7 +1059,72 @@ OZON_HEADERS = ['№','Артикул*','Название товара','Пре�
 def _split_codes(raw):
     return [x for x in (p.strip() for p in re.split(r'[,;/|]+', str(raw or ''))) if x]
 
+_ASSET_CACHE = {}
+def _asset(name):
+    if name not in _ASSET_CACHE:
+        import json as _json
+        data = None
+        for base in (Path(__file__).resolve().parent, DATA):
+            try:
+                fp = base / name
+                if fp.exists(): data = _json.loads(fp.read_text(encoding='utf-8')); break
+            except Exception: pass
+        _ASSET_CACHE[name] = data
+    return _ASSET_CACHE[name]
+
+def ozon_template_rows():
+    t = _asset('ozon_template.json')
+    return t if isinstance(t, list) and len(t) == 4 else None
+
+def _std_norm(v):
+    return re.sub(r'\s+', ' ', re.sub(r'[()\[\]\-_,.\xab\xbb/\\]', ' ', str(v or '').lower())).strip()
+
+_STD_INDEX = None
+def _std_match(p):
+    """Стандартные ОВХ: только ТОЧНОЕ совпадение нормализованного названия
+       (категория, затем название) со словарём приложения, одна подпись
+       значений. Fuzzy/contains из StdDims.match(review) не портируем."""
+    global _STD_INDEX
+    dims = _asset('std_dims.json')
+    if not dims: return None
+    if _STD_INDEX is None:
+        _STD_INDEX = {}
+        for d in dims:
+            _STD_INDEX.setdefault(_std_norm(d.get('c')), []).append(d)
+    for cand in (p.get('category'), p.get('name')):
+        hits = _STD_INDEX.get(_std_norm(cand)) if _std_norm(cand) else None
+        if not hits: continue
+        sigs = {(num(h.get('l')), num(h.get('w')), num(h.get('h')), num(h.get('wt'))) for h in hits}
+        if len(sigs) == 1:
+            l, w, h, wt = next(iter(sigs))
+            return {'length': l, 'width': w, 'height': h, 'weight': wt, 'source': hits[0].get('c', '')}
+    return None
+
+def import_ozon_pairs(conn, pairs):
+    conn.execute('''CREATE TABLE IF NOT EXISTS ozon_pairs(category TEXT NOT NULL, type TEXT NOT NULL,
+      PRIMARY KEY(category, type))''')
+    n = 0
+    for pr in pairs or []:
+        cat = str(pr.get('category') or pr.get('cat') or '').strip()
+        typ = str(pr.get('type') or pr.get('name') or '').strip()
+        if cat and typ:
+            conn.execute('INSERT OR IGNORE INTO ozon_pairs VALUES(?,?)', (cat, typ)); n += 1
+    conn.commit()
+    return {'ok': True, 'imported': n,
+            'total': conn.execute('SELECT COUNT(*) FROM ozon_pairs').fetchone()[0]}
+
+def _pairs_map(conn):
+    try: rows = conn.execute('SELECT category,type FROM ozon_pairs').fetchall()
+    except Exception: return {}
+    out = {}
+    for cat, typ in rows: out.setdefault(cat, []).append(typ)
+    return out
+
 def ozon_row(p, idx, vat='Не облагается', discount_pct=0, vehicle_type='Легковые автомобили'):
+    return ozon_row_meta(p, idx, vat, discount_pct, vehicle_type)[0]
+
+def ozon_row_meta(p, idx, vat='Не облагается', discount_pct=0, vehicle_type='Легковые автомобили',
+                  pairs=None, chz_codes=None):
     """Строка шаблона Ozon из полей карточки. Правила приложения, которые
        портированы 1-в-1: цена не выдумывается (нет цены — пустая ячейка);
        зачёркнутая — только явная старая цена выше цены или выбранная
@@ -1054,6 +1140,29 @@ def ozon_row(p, idx, vat='Не облагается', discount_pct=0, vehicle_ty
     if old > price and price > 0: old_out = int(round(old))
     elif discount_pct > 0 and price > 0: old_out = int(round(price * (1 + discount_pct / 100)))
     else: old_out = ''
+    std_fields = []
+    p = dict(p)
+    if not all(num(p.get(k)) > 0 for k in ('length', 'width', 'height', 'weight')):
+        std = _std_match(p)
+        if std:
+            key = {'length': 'length', 'width': 'width', 'height': 'height', 'weight': 'weight'}
+            for k in ('length', 'width', 'height', 'weight'):
+                if not num(p.get(k)) > 0 and std[key[k]] > 0:
+                    p[k] = std[key[k]]; std_fields.append(k)
+    ozon_type = str(p.get('ozon_type', '')).strip()
+    ozon_cat = str(p.get('ozon_category', '')).strip()
+    pair_bad = False
+    if pairs:
+        if not ozon_type and ozon_cat and len(pairs.get(ozon_cat, [])) == 1:
+            ozon_type = pairs[ozon_cat][0]
+        if ozon_type and not ozon_cat:
+            cats = [c for c, ts in pairs.items() if ozon_type in ts]
+            if len(cats) == 1: ozon_cat = cats[0]
+        pair_bad = bool(ozon_type and ozon_cat and ozon_type not in pairs.get(ozon_cat, []))
+    mark = str(p.get('mark_required', ''))
+    tnved_digits = re.sub(r'\D', '', str(p.get('tnved', '')))
+    chz_hit = bool(chz_codes) and any(tnved_digits.startswith(re.sub(r'\D', '', str(c))) for c in chz_codes if str(c).strip())
+    if chz_hit and not mark: mark = 'Да'
     def grams(v): return int(round(num(v) * 1000)) if num(v) > 0 and round(num(v) * 1000) > 0 else ''
     def millis(v): return int(round(num(v) * 10)) if num(v) > 0 and round(num(v) * 10) > 0 else ''
     dims = [millis(p.get('length')), millis(p.get('width')), millis(p.get('height'))]
@@ -1071,17 +1180,20 @@ def ozon_row(p, idx, vat='Не облагается', discount_pct=0, vehicle_ty
     model = str(p.get('group_articles') or p.get('model') or art)
     errors, notes = [], []
     if not brand: errors.append('не заполнен бренд')
-    if not str(p.get('ozon_type', '')).strip(): errors.append('не определён тип Ozon')
+    if not ozon_type: errors.append('не определён тип Ozon')
+    if pair_bad: errors.append('пара «категория/тип» не найдена в справочнике Ozon')
+    if std_fields: notes.append('СТАНДАРТ (не измерено): ОВХ из справочника — ' + ', '.join(std_fields))
+    if chz_hit: notes.append('ЧЗ по списку ТН ВЭД')
     if not str(p.get('tnved', '')).strip(): errors.append('не заполнен ТН ВЭД')
     if not grams(p.get('weight')) or not all(isinstance(d, int) for d in (width_mm, height_mm, length_mm)):
         errors.append('не заполнены ОВХ (вес/габариты)')
     if not str(p.get('image_url', '')).strip(): errors.append('нет ссылки на главное фото')
     if not str(p.get('barcode', '')).strip(): notes.append('нет штрихкода — Ozon не сможет принять поставку без него')
     if not price_out: errors.append('не заполнена цена')
-    return [idx, art, name, price_out, old_out, vat, '', '', '', str(p.get('ozon_sku', '')),
+    row = [idx, art, name, price_out, old_out, vat, '', '', '', str(p.get('ozon_sku', '')),
             str(p.get('barcode', '')), str(p.get('tnved', '')), grams(p.get('weight')), width_mm, height_mm, length_mm,
             str(p.get('image_url', '')), str(p.get('extra_photos', '')), '', brand, art,
-            str(p.get('ozon_type', '')), model, str(p.get('mark_required', '')),
+            ozon_type, model, mark,
             max(1, int(round(num(p.get('multiplicity')) or 1))),
             (round(num(p.get('net_weight')) * 1000, 6) if num(p.get('net_weight')) > 0 else ''),
             str(p.get('hazard_class', '')), '', '', hashtags, annotation,
@@ -1090,25 +1202,38 @@ def ozon_row(p, idx, vat='Не облагается', discount_pct=0, vehicle_ty
             str(p.get('warranty', '')), str(p.get('country', '')),
             str(p.get('package_contents', '')).strip() or f'{name} - 1 шт., упаковка', '1',
             '; '.join(errors), '; '.join(notes)]
+    cols = {'weight': 12, 'width': 13, 'height': 14, 'length': 15}
+    return row, {cols[k] for k in std_fields}
 
-def _ozon_rows_data(conn, keys=None, discount_pct=0, vat='Не облагается'):
+def _ozon_rows_data(conn, keys=None, discount_pct=0, vat='Не облагается', chz_codes=None):
+    pairs = _pairs_map(conn) or None
     rows = conn.execute('SELECT * FROM products ORDER BY article,brand').fetchall()
-    out = []
+    out, yellow = [], set()
     for r in rows:
         d = dict(r)
         if keys is not None and (d['article'], d['brand']) not in keys: continue
-        out.append(ozon_row(d, len(out) + 1, vat=vat, discount_pct=discount_pct))
-    return out
+        row, std_cols = ozon_row_meta(d, len(out) + 1, vat=vat, discount_pct=discount_pct,
+                                      pairs=pairs, chz_codes=chz_codes)
+        for c in std_cols: yellow.add((len(out), c))
+        out.append(row)
+    return out, yellow
 
-def export_ozon_csv_bytes(conn, discount_pct=0, vat='Не облагается', enc='utf-8', keys=None):
+def export_ozon_csv_bytes(conn, discount_pct=0, vat='Не облагается', enc='utf-8', keys=None, chz_codes=None):
     import csv as _csv
     buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
     w.writerow(OZON_HEADERS)
-    for row in _ozon_rows_data(conn, keys, discount_pct, vat):
+    for row in _ozon_rows_data(conn, keys, discount_pct, vat, chz_codes)[0]:
         w.writerow(row)
     text = buf.getvalue()
     if enc == 'cp1251': return text.encode('cp1251', errors='replace')
     return ('\ufeff' + text).encode('utf-8')
+
+def export_ozon_xlsx_bytes(conn, discount_pct=0, vat='Не облагается', keys=None, chz_codes=None):
+    rows, yellow = _ozon_rows_data(conn, keys, discount_pct, vat, chz_codes)
+    tpl = ozon_template_rows()
+    if tpl:
+        return _xlsx_from_rows(tpl[1], rows, 'Ozon', header_rows=[tpl[0], tpl[2], tpl[3]], yellow=yellow)
+    return _xlsx_from_rows(OZON_HEADERS, rows, 'Ozon', yellow=yellow)
 
 # ---------------- HTTP ----------------
 def render_app_html():
@@ -1198,17 +1323,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith('/export/ozon.xlsx'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
-            data = _xlsx_from_rows(OZON_HEADERS, _ozon_rows_data(conn, None,
-                num((qs.get('discount_pct') or ['0'])[0]), (qs.get('vat') or ['Не облагается'])[0]), 'Ozon')
+            chz = [x for x in (qs.get('chz') or [''])[0].split(',') if x.strip()] or None
+            data = export_ozon_xlsx_bytes(conn,
+                discount_pct=num((qs.get('discount_pct') or ['0'])[0]),
+                vat=(qs.get('vat') or ['Не облагается'])[0], chz_codes=chz)
             return self._send_bytes(200, data,
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
         if self.path.startswith('/export/ozon.csv'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
+            chz = [x for x in (qs.get('chz') or [''])[0].split(',') if x.strip()] or None
             return self._send_bytes(200, export_ozon_csv_bytes(conn,
                 discount_pct=num((qs.get('discount_pct') or ['0'])[0]),
                 vat=(qs.get('vat') or ['Не облагается'])[0],
-                enc=(qs.get('enc') or ['utf-8'])[0]),
+                enc=(qs.get('enc') or ['utf-8'])[0], chz_codes=chz),
                 'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
         if self.path.startswith('/export/catalog'):
             from urllib.parse import urlparse, parse_qs
@@ -1294,12 +1422,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
             if self.path == '/snapshots':
                 return self._send(200, {'ok': True, **make_snapshot(conn, body.get('note', ''))})
+            if self.path == '/ozon/pairs/import':
+                return self._send(200, import_ozon_pairs(conn, body.get('pairs') or []))
             if self.path == '/export/ozon.csv':
                 keys = None
                 if body.get('articles') is not None:
                     keys = {(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']}
                 return self._send_bytes(200, export_ozon_csv_bytes(conn,
-                    discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys),
+                    discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys,
+                    chz_codes=body.get('chz_codes')),
                     'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
             if self.path == '/outbox':
                 n = enqueue(conn, body.get('kind', ''), body.get('marketplace', ''), body.get('items') or [])

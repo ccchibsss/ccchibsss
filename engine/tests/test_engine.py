@@ -345,11 +345,59 @@ class TestOzonStage2(unittest.TestCase):
         self.assertNotIn('F100', data.split('\n')[1] if len(data.split('\n')) > 1 else '')
     def test_ozon_xlsx(self):
         import io as _io, zipfile
-        data = E._xlsx_from_rows(E.OZON_HEADERS, E._ozon_rows_data(self.conn), 'Ozon')
+        data = E._xlsx_from_rows(E.OZON_HEADERS, E._ozon_rows_data(self.conn)[0], 'Ozon')
         z = zipfile.ZipFile(_io.BytesIO(data))
         sheet = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
         self.assertIn('Артикул*', sheet)
         self.assertIn('F100', sheet)
+
+class TestOzonStage3(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [{'article': 'PAD1', 'brand': 'ATE', 'name': 'Колодки тормозные',
+            'category': 'Тормозные колодки', 'price': 2500, 'cost': 1200, 'tnved': '8708309109',
+            'ozon_category': 'Автотовары'}], 'test')
+    def test_std_dims_exact_fill(self):
+        # «Распредвал» — точная запись встроенного словаря приложения (50x10x10 см, 4 кг)
+        row, yellow = E.ozon_row_meta({'article': 'X', 'brand': 'B', 'name': 'Распредвал',
+            'category': 'Распредвал', 'price': 100}, 1)
+        self.assertEqual(yellow, {12, 13, 14, 15})
+        self.assertEqual(row[12], 4000)                 # вес 4 кг -> 4000 г
+        self.assertEqual((row[13], row[14], row[15]), (100, 100, 500))  # Ш/В/Д мм
+        self.assertIn('СТАНДАРТ', row[45])              # честная пометка «не измерено»
+        # реальные данные не перетираются стандартом
+        row2, yellow2 = E.ozon_row_meta({'article': 'X', 'brand': 'B', 'name': 'Распредвал',
+            'category': 'Распредвал', 'price': 100, 'weight': 5, 'length': 60, 'width': 12, 'height': 12}, 1)
+        self.assertEqual(yellow2, set())
+        self.assertEqual(row2[12], 5000)
+    def test_pairs_fill_and_validate(self):
+        E.import_ozon_pairs(self.conn, [{'category': 'Автотовары', 'type': 'Колодки тормозные'}])
+        pairs = E._pairs_map(self.conn)
+        row, _ = E.ozon_row_meta({'article': 'X', 'brand': 'B', 'name': 'N', 'price': 100,
+            'ozon_category': 'Автотовары'}, 1, pairs=pairs)
+        self.assertEqual(row[21], 'Колодки тормозные')  # единственный тип категории подставлен
+        row2, _ = E.ozon_row_meta({'article': 'X', 'brand': 'B', 'name': 'N', 'price': 100,
+            'ozon_category': 'Автотовары', 'ozon_type': 'Чужой тип'}, 1, pairs=pairs)
+        self.assertIn('справочнике Ozon', row2[44])     # невалидная пара — ошибка
+    def test_chz_by_tnved(self):
+        row, _ = E.ozon_row_meta({'article': 'X', 'brand': 'B', 'name': 'N', 'price': 100,
+            'tnved': '8708309109'}, 1, chz_codes=['8708'])
+        self.assertEqual(row[23], 'Да')
+        self.assertIn('ЧЗ по списку', row[45])
+    def test_template_and_xlsx(self):
+        tpl = E.ozon_template_rows()
+        self.assertEqual(len(tpl), 4)
+        self.assertEqual(len(tpl[1]), 46)
+        import io as _io, zipfile
+        data = E.export_ozon_xlsx_bytes(self.conn)
+        z = zipfile.ZipFile(_io.BytesIO(data))
+        sheet = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
+        self.assertIn('Название товара', sheet)         # шапка шаблона
+        self.assertIn('xl/styles.xml', z.namelist())    # стили для заливки
 
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
