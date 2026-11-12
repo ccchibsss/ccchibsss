@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.106-pyengine-3'
+VERSION = '12.9.107-pyengine-4'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -548,6 +548,24 @@ def summary_report(conn):
     return {'products': agg['n'], 'stock_value': agg['stock_value'],
             'outbox': {r['status']: r['c'] for r in outbox}, 'mail_imports_ok': mail['c']}
 
+def dashboard_report(conn):
+    """Сводка каталога одним SQL-проходом (аудит v12.9.107, п.3):
+       агрегаты по eco_results и аномалии — вместо проходов по строкам вкладки."""
+    base = conn.execute('SELECT COUNT(*) n, ROUND(SUM(price*stock),2) stock_value FROM products').fetchone()
+    eco = conn.execute('SELECT COUNT(*) n, SUM(profit>0) profitable, ROUND(AVG(margin),2) avg_margin, '
+                       'ROUND(SUM(profit),2) profit_units FROM eco_results').fetchone()
+    an = conn.execute("SELECT SUM(price>0 AND cost>price) below_cost, SUM(length=0 OR width=0 OR height=0) no_dims, "
+                      "SUM(oe_numbers='') no_oe, SUM(name='') no_name FROM products").fetchone()
+    top = conn.execute('SELECT p.brand brand, ROUND(SUM(e.profit*p.sales),2) profit_month FROM eco_results e '
+                       'JOIN products p ON p.article=e.article AND p.brand=e.brand '
+                       'GROUP BY p.brand ORDER BY profit_month DESC LIMIT 5').fetchall()
+    return {'products': base['n'], 'stock_value': base['stock_value'],
+            'recalculated': eco['n'], 'profitable': eco['profitable'] or 0,
+            'avg_margin': eco['avg_margin'], 'profit_units_sum': eco['profit_units'],
+            'anomalies': {'below_cost': an['below_cost'] or 0, 'no_dims': an['no_dims'] or 0,
+                          'no_oe': an['no_oe'] or 0, 'no_name': an['no_name'] or 0},
+            'top_brands': [dict(r) for r in top]}
+
 # ---------------- HTTP ----------------
 def render_app_html():
     """Приложение с авто-токеном: страница отдана самим движком с его же адреса,
@@ -600,6 +618,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._auth(): return self._send(401, {'ok': False, 'error': 'X-UC-Token'})
         conn = db()
         if self.path == '/report/summary': return self._send(200, {'ok': True, **summary_report(conn)})
+        if self.path == '/report/dashboard': return self._send(200, {'ok': True, **dashboard_report(conn)})
         if self.path.startswith('/search'):
             from urllib.parse import urlparse, parse_qs
             q = (parse_qs(urlparse(self.path).query).get('q', [''])[0] or '').strip()

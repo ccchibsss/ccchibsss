@@ -97,6 +97,23 @@ class TestRecalc(unittest.TestCase):
         self.assertAlmostEqual(row[0], 3394.33, delta=0.011)
         self.assertEqual(row[1], 14377)
 
+class TestDashboard(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_dashboard_report(self):
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 900, 'stock': 2, 'oe_numbers': 'OE1'},
+            {'article': 'F200', 'brand': 'MANN', 'price': 800, 'cost': 400, 'stock': 3}], 'test')
+        d = E.dashboard_report(self.conn)
+        self.assertEqual(d['products'], 2)
+        self.assertEqual(d['stock_value'], 3800)
+        self.assertEqual(d['anomalies']['below_cost'], 1)   # F100: себестоимость выше цены
+        self.assertEqual(d['anomalies']['no_oe'], 1)        # F200 без OE
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib
