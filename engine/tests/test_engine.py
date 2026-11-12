@@ -75,3 +75,24 @@ class TestAppServing(unittest.TestCase):
             self.skipTest('index.html не найден')
         self.assertIn(b'__UC_PY_TOKEN__', html)
         self.assertIn(b'</head>', html)
+
+
+class TestRecalc(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_recalc_catalog(self):
+        st = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10,
+              'pack': 18, 'transit': 30, 'returns_per_unit': 2.17,
+              'tax_regime': 'usn_income_6', 'tax_pct': 6}
+        E.import_rows(self.conn, [
+            {'article': 'DEMO-CLT-001', 'brand': 'X', 'price': 18700, 'cost': 11200, 'sales': 10},
+            {'article': 'DEMO-FLT-001', 'brand': 'X', 'price': 890, 'cost': 410, 'sales': 10}], 'test')
+        res = E.recalc_catalog(self.conn, st)
+        self.assertEqual(res['recalculated'], 2)
+        row = self.conn.execute("SELECT profit, break_even FROM eco_results WHERE article='DEMO-CLT-001'").fetchone()
+        self.assertAlmostEqual(row[0], 3394.33, delta=0.011)
+        self.assertEqual(row[1], 14377)

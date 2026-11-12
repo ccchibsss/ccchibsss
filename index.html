@@ -7154,6 +7154,7 @@ html { -webkit-text-size-adjust: 100%; }
     <button type="button" class="btn gh" id="btnSettingsSnapshot" title="Скачать снимок ключевых настроек (без секретов) в формате проекта arena-project — для сверки и переноса между проектами"><i class="fa-solid fa-camera"></i> Снимок настроек</button>
     <button type="button" class="btn gh" id="btnReviewExport" title="Сформировать очередь ручной проверки (конфликты габаритов по OE, висячие кроссы, похожие артикулы) и скачать CSV: заполните колонку «Решение» и загрузите обратно соседней кнопкой"><i class="fa-solid fa-list-check"></i> Очередь проверки ↓</button>
     <button type="button" class="btn gh" id="btnPyCheck" title="Независимая проверка юнит-экономики локальным Python-движком (SQLite): движок пересчитывает текущий фильтр своим кодом, приложение сверяет прибыль с браузерным расчётом. Нужен запущенный UC-движок (engine/run_engine.bat)"><i class="fa-brands fa-python"></i> Python: проверить расчёт</button>
+    <button type="button" class="btn gh" id="btnPyRecalc" title="Полный пересчёт каталога на локальном Python-движке: строки уходят в SQLite, экономика считается там, приложение применяет готовый результат. Вкладка при этом не нагружается"><i class="fa-brands fa-python"></i> Python: пересчитать каталог</button>
     <button type="button" class="btn gh" id="btnPyToken" title="Задать токен доступа к локальному Python-движку (файл engine/engine_data/token.txt)"><i class="fa-solid fa-key"></i> Токен Python</button>
     <span class="hint" id="pyEngineStatus" title="Статус локального Python-движка">Python: не проверен</span>
     <button type="button" class="btn gh" id="btnReviewImport" title="Загрузить CSV очереди проверки с заполненными решениями: принятые пары запомнятся и применятся, отклонённые больше не предложатся"><i class="fa-solid fa-file-import"></i> Решения проверки ↑</button>
@@ -13565,7 +13566,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.103-client+pyengine-ux';
+const APP_VERSION = '12.9.104-client+pyengine-recalc';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26152,6 +26153,7 @@ const UI = {
     const _bss = $('#btnSettingsSnapshot'); if (_bss) _bss.onclick = () => SettingsSnapshot.download();
     const _bre = $('#btnReviewExport'); if (_bre) _bre.onclick = () => ReviewQueue.exportCsv();
     const _bpc = $('#btnPyCheck'); if (_bpc) _bpc.onclick = () => PyEngine.checkEconomics();
+    const _bpr = $('#btnPyRecalc'); if (_bpr) _bpr.onclick = () => PyEngine.recalcCatalog();
     const _bpt = $('#btnPyToken'); if (_bpt) _bpt.onclick = () => PyEngine.askToken();
     PyEngine.refreshStatus();
     const _bri = $('#btnReviewImport'); if (_bri) _bri.onclick = () => ReviewQueue.pickDecisions();
@@ -26559,6 +26561,46 @@ const PyEngine = {
         (worst && maxDiff > 0.011 ? ' (' + esc(worst) + ')' : '') +
         (report ? ' · в SQLite каталога движка: ' + fmt(report.products || 0) + ' SKU' : '') +
         (maxDiff > 0.011 ? '. Расхождение ожидаемо, если настройки движка отличаются от приложения (возвраты/хранение задаются отдельно).' : ' — расчёты совпадают.'));
+    });
+  },
+  async recalcCatalog() {
+    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Полный пересчёт на движке недоступен — приложение считает встроенным расчётом. Запустите движок ярлыком «UNIT CONTROL».'); this.refreshStatus(); return; }
+    if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала загрузите прайс.'); return; }
+    await withProgress('Python: пересчёт каталога', 'строки → SQLite → экономика на движке', async (prog) => {
+      const CH = 5000;
+      const payloadOf = p => ({ article: p.article, brand: p.brand || '', name: p.name || '', price: num(p.price), cost: num(p.cost),
+        stock: num(p.stock), sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width),
+        height: num(p.height), volume: num(p.volume), oe_numbers: p.oe_numbers || '' });
+      for (let i = 0; i < S.rows.length; i += CH) {
+        const chunk = S.rows.slice(i, i + CH);
+        await this._fetch('/import/rows', { method: 'POST', timeout: 120000,
+          body: JSON.stringify({ rows: chunk.map(payloadOf), source: 'app-catalog', final: i + CH >= S.rows.length }) });
+        if (prog) prog('отправка в SQLite: ' + fmt(Math.min(i + CH, S.rows.length)) + ' из ' + fmt(S.rows.length));
+      }
+      const st = this._settingsSnapshot();
+      const rec = await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: st }) });
+      if (prog) prog('применение результата: ' + fmt(rec.recalculated || 0) + ' SKU посчитано на движке');
+      let applied = 0;
+      const byKey = new Map();
+      for (let off = 0; ; off += CH) {
+        const page = await this._fetch('/catalog/results?offset=' + off + '&limit=' + CH, { timeout: 120000 });
+        for (const r of page.rows || []) byKey.set(normArticle(r.article) + '|' + normArticle(r.brand), r);
+        if (!page.rows || !page.rows.length || off + CH >= (page.total || 0)) break;
+      }
+      for (const p of S.rows) {
+        const r = byKey.get(normArticle(p.article) + '|' + normArticle(p.brand || ''));
+        if (!r) continue;
+        p.netProfit = num(r.profit); p.margin = num(r.margin); p.roi = num(r.roi);
+        p.breakEvenPrice = num(r.break_even); p.tgtPrice = num(r.target);
+        p.pyEngineCalc = '12.9.104';
+        applied++;
+      }
+      bumpVersion();
+      try { Table.paint(); } catch (e) { }
+      Toast.ok('Каталог пересчитан на Python-движке',
+        'применено к ' + fmt(applied) + ' SKU из ' + fmt(S.rows.length) +
+        ' · прибыльных по движку: ' + fmt(rec.profitable || 0) +
+        ' · средняя прибыль ' + fmt(rec.avg_profit || 0, 2) + ' ₽. Расчёт выполнен в SQLite, вкладка не нагружалась.');
     });
   },
   async enqueuePrices(items) {

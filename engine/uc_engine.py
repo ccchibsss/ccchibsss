@@ -169,6 +169,10 @@ CREATE TABLE IF NOT EXISTS outbox(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, marketplace TEXT, article TEXT,
   payload TEXT, idempotency_key TEXT UNIQUE, status TEXT DEFAULT 'pending',
   attempts INTEGER DEFAULT 0, last_error TEXT DEFAULT '', created_at TEXT, sent_at TEXT);
+CREATE TABLE IF NOT EXISTS eco_results(
+  article TEXT NOT NULL, brand TEXT DEFAULT '', total REAL, profit REAL, margin REAL,
+  roi REAL, break_even REAL, target REAL, computed_at TEXT DEFAULT '',
+  PRIMARY KEY(article, brand));
 CREATE TABLE IF NOT EXISTS api_log(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, action TEXT,
   endpoint TEXT, status TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS mail_log(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, subject TEXT,
@@ -257,27 +261,28 @@ def files_from_zip(data):
                 out.append((os.path.basename(name), z.read(name)))
     return out
 
-def import_rows(conn, rows, source):
+def import_rows(conn, rows, source, rebuild_fts=True):
     n = 0
     for r in rows:
         art = str(r.get('article', '')).strip()
         if not art: continue
-        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,weight,length,width,height,oe_numbers,source,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
+        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,source,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
               name=COALESCE(NULLIF(excluded.name,''),products.name),
               price=CASE WHEN excluded.price>0 THEN excluded.price ELSE products.price END,
               cost=CASE WHEN excluded.cost>0 THEN excluded.cost ELSE products.cost END,
-              stock=excluded.stock, weight=excluded.weight, length=excluded.length,
+              stock=excluded.stock, sales=excluded.sales, weight=excluded.weight, length=excluded.length,
               width=excluded.width, height=excluded.height,
               oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE products.oe_numbers END,
               source=excluded.source, updated_at=datetime("now")''',
             (art, str(r.get('brand', '')).strip(), str(r.get('name', '')),
-             num(r.get('price')), num(r.get('cost')), num(r.get('stock')), num(r.get('weight')),
+             num(r.get('price')), num(r.get('cost')), num(r.get('stock')), num(r.get('sales')), num(r.get('weight')),
              num(r.get('length')), num(r.get('width')), num(r.get('height')),
              str(r.get('oe_numbers', '')), source))
         n += 1
-    conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
+    if rebuild_fts:
+        conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
     conn.commit()
     return n
 
@@ -337,6 +342,26 @@ def mail_check_once(cfg=None, sec=None):
         except Exception: pass
     log_api(conn, 'mailCheck', host, 'ok', f'вложений {seen}, строк {imported}')
     return {'attachments': seen, 'imported_rows': imported}
+
+# ---------------- полный пересчёт каталога (v12.9.104) ----------------
+def recalc_catalog(conn, st):
+    """Экономика по ВСЕМ SKU каталога SQLite. Результат — в eco_results,
+       наружу отдаётся постранично: браузеру не нужно держать расчёт у себя."""
+    rows = conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume FROM products').fetchall()
+    conn.execute('DELETE FROM eco_results')
+    n = profitable = 0
+    total_profit = 0.0
+    for r in rows:
+        res = calc_row(dict(r), st)
+        conn.execute('INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at) VALUES(?,?,?,?,?,?,?,?,datetime("now"))',
+                     (res['article'], r['brand'], res['total'], res['profit'], res['margin'], res['roi'], res['break_even'], res['target']))
+        n += 1
+        if res['profit'] > 0: profitable += 1
+        total_profit += res['profit']
+    conn.commit()
+    log_api(conn, 'recalcCatalog', 'sqlite', 'ok', f'{n} SKU')
+    return {'recalculated': n, 'profitable': profitable,
+            'avg_profit': rnd(total_profit / n, 2) if n else 0}
 
 # ---------------- очередь отправки на площадки ----------------
 def enqueue(conn, kind, marketplace, items):
@@ -491,6 +516,13 @@ class Handler(BaseHTTPRequestHandler):
                 WHERE p.rowid IN (SELECT rowid FROM products_fts WHERE products_fts MATCH ?) LIMIT 100''',
                 ('"' + q.replace('"', '') + '"',)).fetchall() if q else []
             return self._send(200, {'ok': True, 'rows': [dict(r) for r in rows]})
+        if self.path.startswith('/catalog/results'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
+            rows = conn.execute('SELECT article,brand,total,profit,margin,roi,break_even,target FROM eco_results ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+            total = conn.execute('SELECT COUNT(*) c FROM eco_results').fetchone()['c']
+            return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
         if self.path == '/outbox':
             rows = conn.execute('SELECT id,kind,marketplace,article,status,attempts,last_error,created_at,sent_at FROM outbox ORDER BY id DESC LIMIT 200').fetchall()
             return self._send(200, {'ok': True, 'rows': [dict(r) for r in rows]})
@@ -505,8 +537,18 @@ class Handler(BaseHTTPRequestHandler):
                 results = [calc_row(r, st) for r in (body.get('rows') or [])[:5000]]
                 return self._send(200, {'ok': True, 'results': results})
             if self.path == '/import/rows':
-                n = import_rows(conn, body.get('rows') or [], body.get('source', 'app'))
+                n = import_rows(conn, body.get('rows') or [], body.get('source', 'app'),
+                                rebuild_fts=body.get('final') is not False)
                 return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/catalog/recalc':
+                return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {})})
+            if self.path.startswith('/catalog/results'):
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
+                rows = conn.execute('SELECT article,brand,total,profit,margin,roi,break_even,target FROM eco_results ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+                total = conn.execute('SELECT COUNT(*) c FROM eco_results').fetchone()['c']
+                return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
             if self.path == '/outbox':
                 n = enqueue(conn, body.get('kind', ''), body.get('marketplace', ''), body.get('items') or [])
                 return self._send(200, {'ok': True, 'queued': n})
