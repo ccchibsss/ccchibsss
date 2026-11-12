@@ -97,6 +97,260 @@ class TestRecalc(unittest.TestCase):
         self.assertAlmostEqual(row[0], 3394.33, delta=0.011)
         self.assertEqual(row[1], 14377)
 
+class TestParallelRecalc(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        self.st = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10,
+                   'pack': 18, 'transit': 30, 'returns_per_unit': 2.17,
+                   'tax_regime': 'usn_income_6', 'tax_pct': 6}
+    def test_parallel_matches_sequential(self):
+        rows = [{'article': f'A{i}', 'brand': 'B', 'price': 500 + (i % 5000),
+                 'cost': 300 + (i % 3000), 'sales': i % 20} for i in range(2100)]
+        E.import_rows(self.conn, rows, 'test')
+        res = E.recalc_catalog(self.conn, self.st)
+        self.assertEqual(res['recalculated'], 2100)
+        # каждый результат параллельного пересчёта равен последовательному calc_row
+        got = {(r[0], r[1]): r[2] for r in self.conn.execute('SELECT article,brand,profit FROM eco_results')}
+        for row in rows[:50] + rows[-50:]:
+            self.assertAlmostEqual(got[(row['article'], 'B')], E.calc_row(row, self.st)['profit'], delta=0.001)
+    def test_no_parallel_env_fallback(self):
+        import os
+        os.environ['UC_ENGINE_NO_PARALLEL'] = '1'
+        try:
+            out, par = E._calc_all([{'article': 'X', 'price': 1000, 'cost': 500, 'sales': 1}] * 3, self.st)
+            self.assertFalse(par)
+            self.assertEqual(len(out), 3)
+        finally:
+            del os.environ['UC_ENGINE_NO_PARALLEL']
+
+class TestDashboard(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_dashboard_report(self):
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 900, 'stock': 2, 'oe_numbers': 'OE1'},
+            {'article': 'F200', 'brand': 'MANN', 'price': 800, 'cost': 400, 'stock': 3}], 'test')
+        d = E.dashboard_report(self.conn)
+        self.assertEqual(d['products'], 2)
+        self.assertEqual(d['stock_value'], 3800)
+        self.assertEqual(d['anomalies']['below_cost'], 1)   # F100: себестоимость выше цены
+        self.assertEqual(d['anomalies']['no_oe'], 1)        # F200 без OE
+
+class TestExport(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'name': 'Фильтр & Co', 'price': 700, 'cost': 400, 'stock': 2}], 'test')
+    def test_export_csv(self):
+        data = E.export_catalog_csv_bytes(self.conn)
+        self.assertTrue(data.startswith(b'\xef\xbb\xbf'))  # BOM для Excel
+        text = data.decode('utf-8-sig')
+        self.assertIn('Артикул;Бренд', text)
+        self.assertIn('F100;BOSCH;Фильтр & Co;700', text)
+        self.assertIn('F100;BOSCH', E.export_catalog_csv_bytes(self.conn, 'cp1251').decode('cp1251'))
+    def test_export_xlsx_stdlib(self):
+        import io as _io, zipfile
+        data = E.export_catalog_xlsx_bytes(self.conn)
+        z = zipfile.ZipFile(_io.BytesIO(data))  # валидный zip-контейнер XLSX
+        self.assertIn('xl/worksheets/sheet1.xml', z.namelist())
+        sheet = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
+        self.assertIn('F100', sheet)
+        self.assertIn('Фильтр &amp; Co', sheet)  # XML-экранирование
+        self.assertIn('<v>700.0</v>', sheet)       # числа — числами, не строками
+
+class TestEnrichFull(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def _prod(self, art):
+        return self.conn.execute('SELECT name,category,tnved,applicability,length,weight FROM products WHERE article=?', (art,)).fetchone()
+    def test_artbrand_donor_fills_and_conflict_skips(self):
+        E.import_rows(self.conn, [{'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 400, 'oe_numbers': 'OE1'}], 'test')
+        E.import_donors(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'name': 'Фильтр масляный', 'category': 'Фильтры',
+             'tnved': '8421230000', 'weight': 0.3, 'length': 10, 'width': 6, 'height': 6}], 'catalogV')
+        E.import_donors(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'category': 'Двигатель'}], 'other')  # конфликт категории
+        res = E.enrich_full(self.conn)
+        row = self._prod('F100')
+        self.assertEqual(row[0], 'Фильтр масляный')   # название от пары
+        self.assertEqual(row[1], '')                   # категория: конфликт доноров — не берём
+        self.assertEqual(row[2], '8421230000')         # ТН ВЭД от пары (конфликта нет)
+        self.assertEqual(row[4], 10)                   # габариты цельным комплектом пары
+        self.assertEqual(row[5], 0.3)
+        self.assertEqual(res['conflicts']['category'], 1)
+    def test_oe_category_only_in_oe_mode_and_unanimous(self):
+        E.import_rows(self.conn, [
+            {'article': 'F200', 'brand': 'MANN', 'price': 800, 'cost': 400, 'oe_numbers': 'OE9'},
+            {'article': 'F300', 'brand': 'MAHLE', 'price': 900, 'cost': 500, 'oe_numbers': 'OE9', 'category': 'Фильтры'}], 'test')
+        E.enrich_full(self.conn)  # artbrand по умолчанию: OE-категорию НЕ берём
+        self.assertEqual(self._prod('F200')[1], '')
+        E.enrich_full(self.conn, 'oe')  # oe-режим: доноры единогласны — берём
+        self.assertEqual(self._prod('F200')[1], 'Фильтры')
+    def test_dims_smallest_and_compatible(self):
+        E.import_rows(self.conn, [
+            {'article': 'F1', 'brand': 'B', 'price': 100, 'cost': 50, 'oe_numbers': 'OE5', 'length': 10},
+            {'article': 'F2', 'brand': 'C', 'price': 100, 'cost': 50, 'oe_numbers': 'OE5',
+             'weight': 1, 'length': 10, 'width': 5, 'height': 5},
+            {'article': 'F3', 'brand': 'D', 'price': 100, 'cost': 50, 'oe_numbers': 'OE5',
+             'weight': 2, 'length': 20, 'width': 10, 'height': 10}], 'test')
+        E.enrich_full(self.conn, 'oe')
+        row = self._prod('F1')
+        self.assertEqual(row[4], 10)   # длина своя не тронута (совместима с меньшим комплектом)
+        self.assertEqual(row[5], 1)    # вес — из меньшего комплекта группы (F2, не F3)
+
+class TestParseFile(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_parse_csv_and_paging(self):
+        res = E.parse_file_bytes(self.conn, 'comp.csv',
+            'Артикул;Цена конкурента\nA1;100\nA2;200\nA3;300\n'.encode('utf-8'))
+        self.assertEqual(res['total'], 3)
+        self.assertEqual(res['headers'], ['Артикул', 'Цена конкурента'])
+        rows = self.conn.execute('SELECT data FROM parse_rows WHERE session=? ORDER BY idx LIMIT 2 OFFSET 2',
+                                 (res['parse_id'],)).fetchall()
+        import json as _j
+        self.assertEqual(_j.loads(rows[0][0])['Артикул'], 'A3')  # постраничность кэша
+        # каталог парсингом не тронут
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM products').fetchone()[0], 0)
+    def test_parse_cp1251_and_tab(self):
+        res = E.parse_file_bytes(self.conn, 'comp.csv', 'Артикул\tЦена\nA1\t100\n'.encode('cp1251'))
+        self.assertEqual(res['total'], 1)
+
+class TestHistorySnapshots(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [{'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 400, 'stock': 2}], 's1')
+    def test_history_only_real_changes(self):
+        E.import_rows(self.conn, [{'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 400, 'stock': 5}], 's2')  # та же цена
+        n = self.conn.execute('SELECT COUNT(*) FROM price_history').fetchone()[0]
+        self.assertEqual(n, 1)  # только первичная запись, повтор без изменений не пишется
+        E.import_rows(self.conn, [{'article': 'F100', 'brand': 'BOSCH', 'price': 770, 'cost': 400, 'stock': 5}], 's3')
+        rep = E.price_changes(self.conn, 30)
+        self.assertEqual(rep['changed_sku'], 1)
+        self.assertEqual(rep['rises'], 1)
+        self.assertEqual(rep['rows'][0]['delta_pct'], 10.0)
+    def test_snapshot_diff(self):
+        s1 = E.make_snapshot(self.conn, 'первый')['snapshot_id']
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'price': 800, 'cost': 400},
+            {'article': 'F200', 'brand': 'MANN', 'price': 100, 'cost': 50}], 's2')
+        s2 = E.make_snapshot(self.conn, 'второй')['snapshot_id']
+        d = E.snapshot_diff(self.conn, s1, s2)
+        self.assertEqual([r['article'] for r in d['added']], ['F200'])
+        self.assertEqual(d['removed'], [])
+        self.assertEqual(d['price_changed'][0]['new_price'], 800)
+
+class TestAnalogSuggestions(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [
+            {'article': 'ABC12345', 'brand': 'BOSCH', 'price': 100, 'cost': 50},
+            {'article': 'ABC12346', 'brand': 'MANN', 'price': 100, 'cost': 50},    # опечатка в последней цифре
+            {'article': 'ABC12345', 'brand': 'MAHLE', 'price': 100, 'cost': 50},   # тот же артикул, другой бренд
+            {'article': 'ZZZ9999', 'brand': 'FEBI', 'price': 100, 'cost': 50},     # непохожий
+            {'article': 'ABC12345', 'brand': 'FAG', 'price': 100, 'cost': 50, 'analog_list': 'X1'},  # аналоги уже есть
+            {'article': 'DEF777', 'brand': 'BOSCH', 'price': 100, 'cost': 50, 'oe_numbers': 'OE1'},
+            {'article': 'DEF778', 'brand': 'MANN', 'price': 100, 'cost': 50, 'oe_numbers': 'OE1'}], 'test')  # уже OE-связь
+    def test_suggestions_only(self):
+        res = E.analog_suggestions(self.conn)
+        pairs = {(r['article'], r['brand'], r['candidate_article'], r['candidate_brand']) for r in res['suggestions']}
+        self.assertIn(('ABC12345', 'BOSCH', 'ABC12346', 'MANN'), pairs)    # опечатка найдена
+        self.assertIn(('ABC12345', 'BOSCH', 'ABC12345', 'MAHLE'), pairs)   # тот же артикул, бренд другой
+        self.assertFalse(any(r['article'] == 'ZZZ9999' for r in res['suggestions']))   # непохожие молчат
+        self.assertFalse(any(r['brand'] == 'FAG' for r in res['suggestions']))        # с аналогами не трогаем
+        self.assertFalse(any(r['article'].startswith('DEF') for r in res['suggestions']))  # OE-связь исключена
+        # главное: подсказки НИЧЕГО не записали
+        row = self.conn.execute("SELECT analog_list FROM products WHERE article='ABC12345' AND brand='BOSCH'").fetchone()
+        self.assertEqual(row[0], '')
+
+class TestOzonExport(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_ozon_row_rules(self):
+        p = {'article': 'F100', 'brand': 'BOSCH', 'name': 'Фильтр', 'price': 1000.4, 'cost': 500,
+             'weight': 0.3, 'length': 6, 'width': 10, 'height': 8, 'tnved': '8421230000',
+             'barcode': '4600000000001', 'image_url': 'http://x/1.jpg', 'ozon_type': 'Фильтр масляный',
+             'oe_numbers': 'OE1, OE2', 'multiplicity': 2}
+        r = E.ozon_row(p, 1)
+        self.assertEqual(len(r), 46)
+        self.assertEqual(r[3], 1000)          # цена округлена
+        self.assertEqual(r[4], '')            # зачёркнутая не выдумывается
+        self.assertEqual(r[12], 300)          # вес кг -> г
+        self.assertEqual((r[13], r[14], r[15]), (80, 60, 100))  # Ш/В/Д мм, длина наибольшая
+        self.assertEqual(r[21], 'Фильтр масляный')
+        self.assertEqual(r[24], 2)            # кратность
+        self.assertEqual(r[33], 'OE1; OE2')   # OEM через '; '
+        self.assertEqual(r[30], 'Фильтр. Артикул детали: F100. Производитель: BOSCH.')
+        self.assertEqual(r[44], '')           # ошибок нет
+    def test_ozon_row_no_invented_price(self):
+        r = E.ozon_row({'article': 'F1', 'brand': 'B', 'name': 'X', 'price': 0}, 1, discount_pct=30)
+        self.assertEqual(r[3], '')            # нет цены — пустая ячейка даже со скидкой
+        self.assertIn('не заполнена цена', r[44])
+        r2 = E.ozon_row({'article': 'F1', 'brand': 'B', 'name': 'X', 'price': 100, 'old_price': 150}, 1)
+        self.assertEqual(r2[4], 150)          # явная старая цена выше цены
+        r3 = E.ozon_row({'article': 'F1', 'brand': 'B', 'name': 'X', 'price': 100}, 1, discount_pct=30)
+        self.assertEqual(r3[4], 130)          # надбавка только по выбору продавца
+
+class TestOzonStage2(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'price': 1000, 'cost': 500},
+            {'article': 'F200', 'brand': 'MANN', 'price': 2000, 'cost': 900}], 'test')
+    def test_donor_warranty_country(self):
+        E.import_donors(self.conn, [{'article': 'F100', 'brand': 'BOSCH',
+                                     'warranty': '12 месяцев', 'country': 'Германия'}], 'dict')
+        E.enrich_full(self.conn)
+        row = self.conn.execute("SELECT warranty,country FROM products WHERE article='F100'").fetchone()
+        self.assertEqual(tuple(row), ('12 месяцев', 'Германия'))
+    def test_ozon_scope_keys(self):
+        data = E.export_ozon_csv_bytes(self.conn, keys={('F200', 'MANN')}).decode('utf-8-sig')
+        self.assertIn('F200', data)
+        self.assertNotIn('F100', data.split('\n')[1] if len(data.split('\n')) > 1 else '')
+    def test_ozon_xlsx(self):
+        import io as _io, zipfile
+        data = E._xlsx_from_rows(E.OZON_HEADERS, E._ozon_rows_data(self.conn), 'Ozon')
+        z = zipfile.ZipFile(_io.BytesIO(data))
+        sheet = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
+        self.assertIn('Артикул*', sheet)
+        self.assertIn('F100', sheet)
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib

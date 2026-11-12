@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.106-pyengine-3'
+VERSION = '12.9.116-pyengine-12'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -169,6 +169,21 @@ CREATE TABLE IF NOT EXISTS outbox(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, marketplace TEXT, article TEXT,
   payload TEXT, idempotency_key TEXT UNIQUE, status TEXT DEFAULT 'pending',
   attempts INTEGER DEFAULT 0, last_error TEXT DEFAULT '', created_at TEXT, sent_at TEXT);
+CREATE TABLE IF NOT EXISTS price_history(article TEXT, brand TEXT DEFAULT '', price REAL, cost REAL,
+  stock REAL, source TEXT, ts TEXT);
+CREATE INDEX IF NOT EXISTS ix_price_history_key ON price_history(article, brand, ts);
+CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, note TEXT, total INTEGER);
+CREATE TABLE IF NOT EXISTS snapshot_rows(snapshot_id INTEGER, article TEXT, brand TEXT DEFAULT '',
+  price REAL, cost REAL, stock REAL, PRIMARY KEY(snapshot_id, article, brand));
+CREATE TABLE IF NOT EXISTS parse_sessions(id TEXT PRIMARY KEY, filename TEXT, headers TEXT,
+  total INTEGER, created TEXT);
+CREATE TABLE IF NOT EXISTS parse_rows(session TEXT, idx INTEGER, data TEXT,
+  PRIMARY KEY(session, idx));
+CREATE TABLE IF NOT EXISTS donors(article TEXT NOT NULL, brand TEXT DEFAULT '', source TEXT DEFAULT '',
+  name TEXT DEFAULT '', category TEXT DEFAULT '', tnved TEXT DEFAULT '', applicability TEXT DEFAULT '',
+  warranty TEXT DEFAULT '', country TEXT DEFAULT '',
+  weight REAL DEFAULT 0, length REAL DEFAULT 0, width REAL DEFAULT 0, height REAL DEFAULT 0,
+  oe_numbers TEXT DEFAULT '', PRIMARY KEY(article, brand, source));
 CREATE TABLE IF NOT EXISTS oe_links(oe TEXT NOT NULL, article TEXT NOT NULL, brand TEXT DEFAULT '',
   PRIMARY KEY(oe, article, brand));
 CREATE INDEX IF NOT EXISTS ix_oe_links_article ON oe_links(article, brand);
@@ -186,6 +201,23 @@ def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # миграция баз до v12.9.110: обогащаемые текстовые поля каталога
+    dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
+    for col in ('warranty', 'country'):
+        if col not in dcols:
+            conn.execute(f"ALTER TABLE donors ADD COLUMN {col} TEXT DEFAULT ''")
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(products)')}
+    for col in ('category', 'tnved', 'applicability',
+                'barcode', 'image_url', 'extra_photos', 'ozon_sku', 'ozon_type', 'ozon_category',
+                'model', 'hazard_class', 'color', 'material', 'country', 'warranty', 'diameter',
+                'package_contents', 'rich_content', 'description', 'mark_required',
+                'group_articles', 'cross_numbers'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT DEFAULT ''")
+    for col in ('multiplicity', 'net_weight', 'old_price'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
+    conn.commit()
     return conn
 
 def log_api(conn, action, endpoint, status, detail=''):
@@ -214,6 +246,8 @@ ALIASES = {
     'name': ('название', 'name', 'наименование'), 'price': ('цена', 'price'),
     'cost': ('себестоимость', 'cost', 'закупка'), 'stock': ('остаток', 'stock', 'количество'),
     'oe_numbers': ('oe', 'oem', 'ое', 'номер oe'), 'weight': ('вес', 'weight'),
+    'sales': ('продажи', 'sales'), 'category': ('категор', 'category'),
+    'tnved': ('тн вэд', 'тнвэд', 'tnved', 'hs code'), 'applicability': ('применяем', 'applicab', 'совмест'),
     'length': ('длина', 'length'), 'width': ('ширина', 'width'), 'height': ('высота', 'height')}
 def map_header(header):
     out = {}
@@ -273,8 +307,10 @@ def import_rows(conn, rows, source, rebuild_fts=True):
     for r in rows:
         art = str(r.get('article', '')).strip()
         if not art: continue
-        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,source,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
+        brand = str(r.get('brand', '')).strip()
+        old = conn.execute('SELECT price,cost FROM products WHERE article=? AND brand=?', (art, brand)).fetchone()
+        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,analog_list,category,tnved,applicability,barcode,image_url,extra_photos,ozon_sku,ozon_type,ozon_category,model,hazard_class,color,material,country,warranty,diameter,package_contents,rich_content,description,mark_required,group_articles,cross_numbers,multiplicity,net_weight,old_price,source,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
               name=COALESCE(NULLIF(excluded.name,''),products.name),
               price=CASE WHEN excluded.price>0 THEN excluded.price ELSE products.price END,
@@ -282,11 +318,52 @@ def import_rows(conn, rows, source, rebuild_fts=True):
               stock=excluded.stock, sales=excluded.sales, weight=excluded.weight, length=excluded.length,
               width=excluded.width, height=excluded.height,
               oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE products.oe_numbers END,
+              analog_list=CASE WHEN excluded.analog_list<>'' THEN excluded.analog_list ELSE products.analog_list END,
+              category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE products.category END,
+              tnved=CASE WHEN excluded.tnved<>'' THEN excluded.tnved ELSE products.tnved END,
+              applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE products.applicability END,
+              barcode=CASE WHEN excluded.barcode<>'' THEN excluded.barcode ELSE products.barcode END,
+              image_url=CASE WHEN excluded.image_url<>'' THEN excluded.image_url ELSE products.image_url END,
+              extra_photos=CASE WHEN excluded.extra_photos<>'' THEN excluded.extra_photos ELSE products.extra_photos END,
+              ozon_sku=CASE WHEN excluded.ozon_sku<>'' THEN excluded.ozon_sku ELSE products.ozon_sku END,
+              ozon_type=CASE WHEN excluded.ozon_type<>'' THEN excluded.ozon_type ELSE products.ozon_type END,
+              ozon_category=CASE WHEN excluded.ozon_category<>'' THEN excluded.ozon_category ELSE products.ozon_category END,
+              model=CASE WHEN excluded.model<>'' THEN excluded.model ELSE products.model END,
+              hazard_class=CASE WHEN excluded.hazard_class<>'' THEN excluded.hazard_class ELSE products.hazard_class END,
+              color=CASE WHEN excluded.color<>'' THEN excluded.color ELSE products.color END,
+              material=CASE WHEN excluded.material<>'' THEN excluded.material ELSE products.material END,
+              country=CASE WHEN excluded.country<>'' THEN excluded.country ELSE products.country END,
+              warranty=CASE WHEN excluded.warranty<>'' THEN excluded.warranty ELSE products.warranty END,
+              diameter=CASE WHEN excluded.diameter<>'' THEN excluded.diameter ELSE products.diameter END,
+              package_contents=CASE WHEN excluded.package_contents<>'' THEN excluded.package_contents ELSE products.package_contents END,
+              rich_content=CASE WHEN excluded.rich_content<>'' THEN excluded.rich_content ELSE products.rich_content END,
+              description=CASE WHEN excluded.description<>'' THEN excluded.description ELSE products.description END,
+              mark_required=CASE WHEN excluded.mark_required<>'' THEN excluded.mark_required ELSE products.mark_required END,
+              group_articles=CASE WHEN excluded.group_articles<>'' THEN excluded.group_articles ELSE products.group_articles END,
+              cross_numbers=CASE WHEN excluded.cross_numbers<>'' THEN excluded.cross_numbers ELSE products.cross_numbers END,
+              multiplicity=CASE WHEN excluded.multiplicity>0 THEN excluded.multiplicity ELSE products.multiplicity END,
+              net_weight=CASE WHEN excluded.net_weight>0 THEN excluded.net_weight ELSE products.net_weight END,
+              old_price=CASE WHEN excluded.old_price>0 THEN excluded.old_price ELSE products.old_price END,
               source=excluded.source, updated_at=datetime("now")''',
             (art, str(r.get('brand', '')).strip(), str(r.get('name', '')),
              num(r.get('price')), num(r.get('cost')), num(r.get('stock')), num(r.get('sales')), num(r.get('weight')),
              num(r.get('length')), num(r.get('width')), num(r.get('height')),
-             str(r.get('oe_numbers', '')), source))
+             str(r.get('oe_numbers', '')), str(r.get('analog_list', '')), str(r.get('category', '')), str(r.get('tnved', '')),
+             str(r.get('applicability', '')),
+             str(r.get('barcode', '')), str(r.get('image_url', '')), str(r.get('extra_photos', '')),
+             str(r.get('ozon_sku', '')), str(r.get('ozon_type', '')), str(r.get('ozon_category', '')),
+             str(r.get('model', '')), str(r.get('hazard_class', '')), str(r.get('color', '')),
+             str(r.get('material', '')), str(r.get('country', '')), str(r.get('warranty', '')),
+             str(r.get('diameter', '')), str(r.get('package_contents', '')), str(r.get('rich_content', '')),
+             str(r.get('description', '')), str(r.get('mark_required', '')), str(r.get('group_articles', '')),
+             str(r.get('cross_numbers', '')), num(r.get('multiplicity')), num(r.get('net_weight')),
+             num(r.get('old_price')), source))
+        # история цен (п.6): только реальные изменения цены/себестоимости
+        eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old[0] if old else 0)
+        eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old[1] if old else 0)
+        if eff_price > 0 and (not old or abs(old[0] - eff_price) > 1e-9 or abs(old[1] - eff_cost) > 1e-9):
+            conn.execute('INSERT INTO price_history(article,brand,price,cost,stock,source,ts) VALUES(?,?,?,?,?,?,datetime("now"))',
+                         (art, brand, eff_price, eff_cost, num(r.get('stock')), source))
         n += 1
     if rebuild_fts:
         conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
@@ -351,24 +428,46 @@ def mail_check_once(cfg=None, sec=None):
     return {'attachments': seen, 'imported_rows': imported}
 
 # ---------------- полный пересчёт каталога (v12.9.104) ----------------
+def _calc_rows_chunk(task):
+    rows, st = task
+    return [calc_row(r, st) for r in rows]
+
+def _calc_all(rows, st):
+    """Пересчёт всех строк: многопроцессно, где можно (аудит п.4).
+       calc_row чистый, параллелится чанками; запись результатов — всегда
+       одним процессом. Любая проблема с Pool -> тихий откат на 1 процесс.
+       В frozen-сборке (PyInstaller) Pool не используем: spawn там ненадёжен."""
+    seq = lambda: [calc_row(r, st) for r in rows]
+    if len(rows) < 2000 or os.environ.get('UC_ENGINE_NO_PARALLEL') or getattr(sys, 'frozen', False):
+        return seq(), False
+    try:
+        import multiprocessing as mp
+        workers = int(os.environ.get('UC_ENGINE_WORKERS') or min(4, os.cpu_count() or 1))
+        if workers <= 1: return seq(), False
+        step = max(500, -(-len(rows) // (workers * 4)))
+        chunks = [rows[i:i + step] for i in range(0, len(rows), step)]
+        with mp.Pool(workers) as pool:
+            parts = pool.map(_calc_rows_chunk, [(c, st) for c in chunks])
+        return [r for part in parts for r in part], True
+    except Exception:
+        return seq(), False
+
 def recalc_catalog(conn, st):
     """Экономика по ВСЕМ SKU каталога SQLite. Результат — в eco_results,
        наружу отдаётся постранично: браузеру не нужно держать расчёт у себя."""
-    rows = conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume FROM products').fetchall()
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume FROM products').fetchall()]
     conn.execute('DELETE FROM eco_results')
-    n = profitable = 0
-    total_profit = 0.0
-    for r in rows:
-        res = calc_row(dict(r), st)
-        conn.execute('INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at) VALUES(?,?,?,?,?,?,?,?,datetime("now"))',
-                     (res['article'], r['brand'], res['total'], res['profit'], res['margin'], res['roi'], res['break_even'], res['target']))
-        n += 1
-        if res['profit'] > 0: profitable += 1
-        total_profit += res['profit']
+    results, parallel = _calc_all(rows, st)  # порядок результатов = порядку строк и в Pool.map, и в seq
+    conn.executemany('INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at) VALUES(?,?,?,?,?,?,?,?,datetime("now"))',
+                     [(res['article'], row['brand'], res['total'], res['profit'], res['margin'],
+                       res['roi'], res['break_even'], res['target']) for row, res in zip(rows, results)])
+    n = len(results)
+    profitable = sum(1 for res in results if res['profit'] > 0)
+    total_profit = sum(res['profit'] for res in results)
     conn.commit()
     log_api(conn, 'recalcCatalog', 'sqlite', 'ok', f'{n} SKU')
     return {'recalculated': n, 'profitable': profitable,
-            'avg_profit': rnd(total_profit / n, 2) if n else 0}
+            'avg_profit': rnd(total_profit / n, 2) if n else 0, 'parallel': parallel}
 
 # ---------------- импорт файла целиком + обогащение OE (v12.9.105) ----------------
 def import_file_bytes(conn, filename, data):
@@ -453,6 +552,285 @@ def enrich_oe(conn):
     log_api(conn, 'enrichOe', 'sqlite', 'ok', f'групп {multi_groups}, заполнено {filled}')
     return {'groups': multi_groups, 'filled': filled,
             'oe_links': conn.execute('SELECT COUNT(*) c FROM oe_links').fetchone()['c']}
+
+# ---------------- полное обогащение (Каталог V на движке, v12.9.110) ----------------
+def import_donors(conn, rows, source):
+    """Реестр доноров (аналог HVC.parts): записи справочных файлов, по ключу
+       Артикул+Бренд, несколько источников на ключ допустимы."""
+    n = 0
+    for r in rows:
+        art = str(r.get('article', '')).strip()
+        if not art: continue
+        conn.execute('''INSERT INTO donors(article,brand,source,name,category,tnved,applicability,warranty,country,
+            weight,length,width,height,oe_numbers) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(article,brand,source) DO UPDATE SET
+              name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE donors.name END,
+              category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE donors.category END,
+              tnved=CASE WHEN excluded.tnved<>'' THEN excluded.tnved ELSE donors.tnved END,
+              applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE donors.applicability END,
+              warranty=CASE WHEN excluded.warranty<>'' THEN excluded.warranty ELSE donors.warranty END,
+              country=CASE WHEN excluded.country<>'' THEN excluded.country ELSE donors.country END,
+              weight=excluded.weight, length=excluded.length, width=excluded.width, height=excluded.height,
+              oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END''',
+            (art, str(r.get('brand', '')).strip(), source, str(r.get('name', '')), str(r.get('category', '')),
+             str(r.get('tnved', '')), str(r.get('applicability', '')), str(r.get('warranty', '')), str(r.get('country', '')),
+             num(r.get('weight')), num(r.get('length')),
+             num(r.get('width')), num(r.get('height')), str(r.get('oe_numbers', ''))))
+        n += 1
+    conn.commit()
+    return n
+
+def _dims_of(r):
+    return (num(r['length']), num(r['width']), num(r['height']), num(r['weight']))
+
+def enrich_full(conn, cat_mode='artbrand'):
+    """Полное обогащение по правилам приложения (HVC):
+       - доноры: та же пара Артикул+Бренд (реестр donors) и транзитивная OE-группа;
+       - категория/ТН ВЭД: по умолчанию только Артикул+Бренд (cat_mode='artbrand');
+         по OE (cat_mode='oe') — только при единогласии доноров, конфликт = пропуск;
+       - название/применимость: Артикул+Бренд, иначе самое частое в OE-группе;
+       - габариты: цельный комплект той же пары, иначе меньший комплект OE-группы;
+         совместимость с уже заполненными обязательна, заполняются только пустые;
+       - аналоги: артикулы OE-группы (как enrich_oe). Заполненные поля не трогаем."""
+    prods = [dict(r) for r in conn.execute(
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list FROM products')]
+    donors = [dict(r) for r in conn.execute(
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers FROM donors')]
+    donors_by_key = {}
+    for d in donors: donors_by_key.setdefault((d['article'], d['brand']), []).append(d)
+    # OE-граф: продукты и доноры в одних группах (узел = ('p'|'d', article, brand, idx))
+    nodes = [('p', i) for i in range(len(prods))] + [('d', i) for i in range(len(donors))]
+    parent = {n: n for n in nodes}
+    def find(x):
+        while parent[x] != x: parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb: parent[rb] = ra
+    oe_map = {}
+    for kind, i in nodes:
+        r = prods[i] if kind == 'p' else donors[i]
+        for oe in _oe_codes(r['oe_numbers']): oe_map.setdefault(oe, []).append((kind, i))
+    for lst in oe_map.values():
+        for other in lst[1:]: union(lst[0], other)
+    groups = {}
+    for n in nodes: groups.setdefault(find(n), []).append(n)
+    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0}
+    conflicts = {'category': 0, 'tnved': 0}
+    def unanimous(values):
+        vals = [str(v).strip() for v in values if str(v or '').strip()]
+        uniq = set(vals)
+        return (vals[0] if len(uniq) == 1 else None), len(uniq) > 1
+    def frequent(values):
+        vals = [str(v).strip() for v in values if str(v or '').strip()]
+        return max(set(vals), key=vals.count) if vals else ''
+    for members in groups.values():
+        group_prods = [prods[i] for kind, i in members if kind == 'p']
+        if not group_prods: continue
+        group_donors = [donors[i] for kind, i in members if kind == 'd']
+        for p in group_prods:
+            pair = donors_by_key.get((p['article'], p['brand']), [])
+            updates = {}
+            if not str(p['name'] or '').strip():
+                v = frequent([d['name'] for d in pair]) or frequent(
+                    [d['name'] for d in group_donors] + [g['name'] for g in group_prods])
+                if v: updates['name'] = v; filled['name'] += 1
+            if not str(p['applicability'] or '').strip():
+                v = frequent([d['applicability'] for d in pair]) or frequent(
+                    [d['applicability'] for d in group_donors] + [g['applicability'] for g in group_prods])
+                if v: updates['applicability'] = v; filled['applicability'] += 1
+            for field in ('category', 'tnved'):
+                if str(p[field] or '').strip(): continue
+                v, conf = unanimous([d[field] for d in pair])
+                if conf: conflicts[field] += 1
+                if not v and cat_mode in ('oe', 'auto'):
+                    v, conf2 = unanimous([d[field] for d in group_donors] + [g[field] for g in group_prods if g is not p])
+                    if conf2: conflicts[field] += 1
+                if v: updates[field] = v; filled[field] += 1
+            # гарантия/страна: только точная пара справочника, единогласно (как ozonSourceAttributes)
+            for field in ('warranty', 'country'):
+                if str(p[field] or '').strip(): continue
+                v, conf = unanimous([d[field] for d in pair])
+                if v: updates[field] = v; filled[field] = filled.get(field, 0) + 1
+            cur = _dims_of(p)
+            if not all(v > 0 for v in cur):
+                cands = []
+                for d in pair + group_donors + group_prods:
+                    t = _dims_of(d)
+                    if all(v > 0 for v in t): cands.append(t)
+                # та же пара — приоритет; далее меньший объём комплекта
+                pair_cands = [_dims_of(d) for d in pair if all(v > 0 for v in _dims_of(d))]
+                pool = pair_cands + sorted(cands, key=lambda t: t[0] * t[1] * t[2])
+                for t in pool:
+                    if all(not (c > 0) or c == tv for c, tv in zip(cur, t)):  # совместимость с заполненным
+                        for i, f in enumerate(('length', 'width', 'height', 'weight')):
+                            if not cur[i] > 0: updates[f] = t[i]
+                        filled['dims'] += 1
+                        break
+            others = sorted({g['article'] for g in group_prods if g['article'] != p['article']})
+            if others:
+                cur_set = {x.strip() for x in str(p['analog_list'] or '').split(',') if x.strip()}
+                merged = sorted(cur_set | set(others))
+                if merged != sorted(cur_set):
+                    updates['analog_list'] = ', '.join(merged); filled['analog_list'] += 1
+            if updates:
+                sets = ', '.join(f'{k}=?' for k in updates)
+                conn.execute(f'UPDATE products SET {sets} WHERE article=? AND brand=?',
+                             (*updates.values(), p['article'], p['brand']))
+    conn.commit()
+    log_api(conn, 'enrichFull', 'sqlite', 'ok', f'cat_mode={cat_mode}, заполнено {filled}, конфликты {conflicts}')
+    return {'cat_mode': cat_mode, 'filled': filled, 'conflicts': conflicts, 'donors': len(donors)}
+
+# ---------------- обобщённый разбор файлов (п.5 аудита, v12.9.111) ----------------
+def _raw_table(filename, data):
+    """Файл -> (заголовки, строки-списки) без привязки к каталогу.
+       CSV — stdlib; XLSX — openpyxl, если есть; ZIP — первый файл внутри."""
+    name = os.path.basename(str(filename or 'file'))
+    if name.lower().endswith('.zip'):
+        files = files_from_zip(data)
+        if not files: raise RuntimeError('в ZIP нет CSV/XLSX')
+        name, data = files[0]
+    if name.lower().endswith('.xlsx'):
+        try:
+            import openpyxl
+        except ImportError:
+            raise RuntimeError('XLSX на движке требует openpyxl; пришлите CSV или поставьте openpyxl')
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        table = [list(r) for r in wb.active.iter_rows(values_only=True)]
+    else:
+        text = data.decode('utf-8-sig', errors='replace')
+        if '\ufffd' in text[:400]:
+            try: text = data.decode('cp1251')
+            except Exception: pass
+        first = text.split('\n', 1)[0]
+        delim = ';' if first.count(';') >= first.count(',') and first.count(';') >= first.count('\t') else ('\t' if first.count('\t') > first.count(',') else ',')
+        table = list(csv.reader(io.StringIO(text), delimiter=delim))
+    table = [r for r in table if any(str(c).strip() for c in r if c is not None)]
+    if not table: return [], []
+    headers = [str(h).strip() if h is not None else '' for h in table[0]]
+    return headers, table[1:]
+
+def parse_file_bytes(conn, filename, data):
+    """Разобрать файл в кэш парсинга: наружу — постранично через /parse/rows.
+       Каталог не трогаем: это сырьё для импортов приложения (цены конкурентов,
+       продажи, заказы, тарифы — у каждого свои правила применения)."""
+    headers, table = _raw_table(filename, data)
+    import uuid
+    sid = uuid.uuid4().hex[:16]
+    conn.execute('INSERT INTO parse_sessions(id,filename,headers,total,created) VALUES(?,?,?,?,datetime("now"))',
+                 (sid, os.path.basename(str(filename or 'file')), json.dumps(headers, ensure_ascii=False), len(table)))
+    conn.executemany('INSERT INTO parse_rows(session,idx,data) VALUES(?,?,?)',
+                     [(sid, i, json.dumps({headers[j]: (r[j] if j < len(r) else '') for j in range(len(headers))},
+                                           ensure_ascii=False, default=str)) for i, r in enumerate(table)])
+    # держим только 5 последних разборов
+    old = [r[0] for r in conn.execute('SELECT id FROM parse_sessions ORDER BY created DESC, rowid DESC LIMIT 100 OFFSET 5')]
+    for o in old:
+        conn.execute('DELETE FROM parse_sessions WHERE id=?', (o,))
+        conn.execute('DELETE FROM parse_rows WHERE session=?', (o,))
+    conn.commit()
+    log_api(conn, 'parseFile', str(filename), 'ok', f'строк {len(table)}')
+    return {'parse_id': sid, 'headers': headers, 'total': len(table)}
+
+# ---------------- история цен и снапшоты (п.6 аудита, v12.9.112) ----------------
+def price_changes(conn, days=30, limit=200):
+    """Изменения цен за период: LAG по истории даёт предыдущую цену SKU."""
+    days = max(1, min(3650, int(num(days) or 30)))
+    rows = conn.execute('''SELECT article,brand,price,cost,ts,source,prev_price FROM (
+            SELECT *, LAG(price) OVER (PARTITION BY article,brand ORDER BY ts,rowid) prev_price
+            FROM price_history)
+        WHERE ts >= datetime("now", ?) AND prev_price IS NOT NULL AND ABS(price-prev_price) > 1e-9
+        ORDER BY ts DESC LIMIT ?''', (f'-{days} days', int(limit))).fetchall()
+    agg = conn.execute('''SELECT COUNT(DISTINCT article || '|' || brand) sku,
+            SUM(price > prev_price) rises, SUM(price < prev_price) falls FROM (
+            SELECT *, LAG(price) OVER (PARTITION BY article,brand ORDER BY ts,rowid) prev_price
+            FROM price_history)
+        WHERE ts >= datetime("now", ?) AND prev_price IS NOT NULL AND ABS(price-prev_price) > 1e-9''',
+        (f'-{days} days',)).fetchone()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['delta_pct'] = rnd((d['price'] - d['prev_price']) / d['prev_price'] * 100, 2) if d['prev_price'] else 0
+        out.append(d)
+    return {'days': days, 'changed_sku': agg[0] or 0, 'rises': agg[1] or 0, 'falls': agg[2] or 0, 'rows': out}
+
+def make_snapshot(conn, note=''):
+    total = conn.execute('SELECT COUNT(*) FROM products').fetchone()[0]
+    cur = conn.execute('INSERT INTO snapshots(created,note,total) VALUES(datetime("now"),?,?)', (str(note)[:200], total))
+    sid = cur.lastrowid
+    conn.execute('INSERT INTO snapshot_rows(snapshot_id,article,brand,price,cost,stock) '
+                 'SELECT ?,article,brand,price,cost,stock FROM products', (sid,))
+    conn.commit()
+    log_api(conn, 'snapshot', str(sid), 'ok', f'{total} SKU')
+    return {'snapshot_id': sid, 'total': total}
+
+def snapshot_diff(conn, id1, id2):
+    q = lambda sql, args: conn.execute(sql, args).fetchall()
+    added = q('SELECT a.article,a.brand,a.price FROM snapshot_rows a LEFT JOIN snapshot_rows b '
+              'ON b.snapshot_id=? AND b.article=a.article AND b.brand=a.brand WHERE a.snapshot_id=? AND b.article IS NULL',
+              (id1, id2))
+    removed = q('SELECT a.article,a.brand,a.price FROM snapshot_rows a LEFT JOIN snapshot_rows b '
+                'ON b.snapshot_id=? AND b.article=a.article AND b.brand=a.brand WHERE a.snapshot_id=? AND b.article IS NULL',
+                (id2, id1))
+    changed = q('SELECT a.article,a.brand,b.price old_price,a.price new_price FROM snapshot_rows a '
+                'JOIN snapshot_rows b ON b.snapshot_id=? AND b.article=a.article AND b.brand=a.brand '
+                'WHERE a.snapshot_id=? AND ABS(a.price-b.price) > 1e-9 ORDER BY ABS(a.price-b.price) DESC LIMIT 500',
+                (id1, id2))
+    return {'from': id1, 'to': id2, 'added': [dict(r) for r in added], 'removed': [dict(r) for r in removed],
+            'price_changed': [dict(r) for r in changed]}
+
+# ---------------- fuzzy-подсказки аналогов (п.7 аудита, v12.9.113) ----------------
+def _norm_article(v):
+    return re.sub(r'[^A-Z0-9А-ЯЁ]', '', str(v or '').upper())
+
+def analog_suggestions(conn, limit=100):
+    """ТОЛЬКО подсказки оператору (запрет авто-поиска аналогов v12.9.85 не тронут):
+       ничего не записываем. Кандидаты для SKU без аналогов: тот же нормализованный
+       артикул у другого бренда и похожие артикулы (опечатки, ratio>=0.86),
+       блокирование по префиксу, пары с общим OE исключены (они уже связаны)."""
+    import difflib
+    prods = [dict(r) for r in conn.execute('SELECT article,brand,analog_list,oe_numbers FROM products')]
+    oe_of = {}
+    oe_pairs = set()
+    by_oe = {}
+    for p in prods:
+        key = (p['article'], p['brand'])
+        codes = set(_oe_codes(p['oe_numbers']))
+        oe_of[key] = codes
+        for oe in codes: by_oe.setdefault(oe, []).append(key)
+    for keys in by_oe.values():
+        for a in keys:
+            for b in keys:
+                if a != b: oe_pairs.add((a, b))
+    blocks = {}
+    for p in prods:
+        n = _norm_article(p['article'])
+        if len(n) >= 3: blocks.setdefault(n[:3], []).append(p)
+    out = []
+    seen = set()
+    for lst in blocks.values():
+        for i in range(len(lst)):
+            for j in range(i + 1, len(lst)):
+                a, b = lst[i], lst[j]
+                ka, kb = (a['article'], a['brand']), (b['article'], b['brand'])
+                na, nb = _norm_article(a['article']), _norm_article(b['article'])
+                if abs(len(na) - len(nb)) > 2: continue
+                if na == nb:
+                    score, reason = 1.0, 'тот же артикул, другой бренд'
+                else:
+                    score = difflib.SequenceMatcher(None, na, nb).ratio()
+                    if score < 0.86: continue
+                    reason = 'похожий артикул (возможна опечатка)'
+                for src, dst in ((a, b), (b, a)):
+                    ks, kd = (src['article'], src['brand']), (dst['article'], dst['brand'])
+                    if str(src['analog_list'] or '').strip(): continue       # аналоги уже есть
+                    if (ks, kd) in oe_pairs or (ks, kd) in seen: continue    # уже связаны по OE
+                    seen.add((ks, kd))
+                    out.append({'article': src['article'], 'brand': src['brand'],
+                                'candidate_article': dst['article'], 'candidate_brand': dst['brand'],
+                                'score': rnd(score, 3), 'reason': reason})
+    out.sort(key=lambda r: -r['score'])
+    return {'suggestions': out[:int(limit)], 'total_found': len(out),
+            'note': 'только подсказки оператору: аналоги автоматически не проставляются'}
 
 # ---------------- очередь отправки на площадки ----------------
 def enqueue(conn, kind, marketplace, items):
@@ -548,6 +926,190 @@ def summary_report(conn):
     return {'products': agg['n'], 'stock_value': agg['stock_value'],
             'outbox': {r['status']: r['c'] for r in outbox}, 'mail_imports_ok': mail['c']}
 
+def dashboard_report(conn):
+    """Сводка каталога одним SQL-проходом (аудит v12.9.107, п.3):
+       агрегаты по eco_results и аномалии — вместо проходов по строкам вкладки."""
+    base = conn.execute('SELECT COUNT(*) n, ROUND(SUM(price*stock),2) stock_value FROM products').fetchone()
+    eco = conn.execute('SELECT COUNT(*) n, SUM(profit>0) profitable, ROUND(AVG(margin),2) avg_margin, '
+                       'ROUND(SUM(profit),2) profit_units FROM eco_results').fetchone()
+    an = conn.execute("SELECT SUM(price>0 AND cost>price) below_cost, SUM(length=0 OR width=0 OR height=0) no_dims, "
+                      "SUM(oe_numbers='') no_oe, SUM(name='') no_name FROM products").fetchone()
+    top = conn.execute('SELECT p.brand brand, ROUND(SUM(e.profit*p.sales),2) profit_month FROM eco_results e '
+                       'JOIN products p ON p.article=e.article AND p.brand=e.brand '
+                       'GROUP BY p.brand ORDER BY profit_month DESC LIMIT 5').fetchall()
+    return {'products': base['n'], 'stock_value': base['stock_value'],
+            'recalculated': eco['n'], 'profitable': eco['profitable'] or 0,
+            'avg_margin': eco['avg_margin'], 'profit_units_sum': eco['profit_units'],
+            'anomalies': {'below_cost': an['below_cost'] or 0, 'no_dims': an['no_dims'] or 0,
+                          'no_oe': an['no_oe'] or 0, 'no_name': an['no_name'] or 0},
+            'top_brands': [dict(r) for r in top]}
+
+# ---------------- экспорт каталога (аудит v12.9.107, п.1; v12.9.108) ----------------
+EXPORT_COLS = [('article','Артикул'),('brand','Бренд'),('name','Название'),('price','Цена'),('cost','Себестоимость'),
+    ('stock','Остаток'),('sales','Продажи/мес'),('weight','Вес, кг'),('length','Длина, см'),('width','Ширина, см'),
+    ('height','Высота, см'),('volume','Объём, л'),('oe_numbers','OE номера'),('analog_list','Аналоги'),
+    ('total','Расходы всего'),('profit','Прибыль'),('margin','Маржа, %'),('roi','ROI, %'),
+    ('break_even','Безубыток'),('target','Целевая цена')]
+_EXPORT_SQL = ('SELECT p.article,p.brand,p.name,p.price,p.cost,p.stock,p.sales,p.weight,p.length,p.width,p.height,'
+    'p.volume,p.oe_numbers,p.analog_list,e.total,e.profit,e.margin,e.roi,e.break_even,e.target '
+    'FROM products p LEFT JOIN eco_results e ON e.article=p.article AND e.brand=p.brand ORDER BY p.article,p.brand')
+
+def export_catalog_csv_bytes(conn, enc='utf-8'):
+    import csv as _csv
+    buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
+    w.writerow([h for _, h in EXPORT_COLS])
+    for r in conn.execute(_EXPORT_SQL):
+        w.writerow(['' if r[k] is None else r[k] for k, _ in EXPORT_COLS])
+    text = buf.getvalue()
+    if enc == 'cp1251': return text.encode('cp1251', errors='replace')
+    return ('\ufeff' + text).encode('utf-8')
+
+def _xml_esc(v):
+    return (str(v).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;'))
+
+def _xlsx_from_rows(headers, data_rows, sheet_name='Лист'):
+    """Общий XLSX-писатель без openpyxl: zip из XML (stdlib)."""
+    import zipfile
+    def col_letter(i):
+        out = ''
+        i += 1
+        while i: i, rem = divmod(i - 1, 26); out = chr(65 + rem) + out
+        return out
+    rows_xml = []
+    header = ''.join(f'<c r="{col_letter(i)}1" t="inlineStr"><is><t>{_xml_esc(h)}</t></is></c>'
+                     for i, h in enumerate(headers))
+    rows_xml.append(f'<row r="1">{header}</row>')
+    rn = 1
+    for row in data_rows:
+        rn += 1
+        cells = []
+        for i, v in enumerate(row):
+            if v is None or v == '': continue
+            ref = f'{col_letter(i)}{rn}'
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                cells.append(f'<c r="{ref}"><v>{v}</v></c>')
+            else:
+                cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>')
+        rows_xml.append(f'<row r="{rn}">{"".join(cells)}</row>')
+    sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+             f'<sheetData>{"".join(rows_xml)}</sheetData></worksheet>')
+    sheet_title = _xml_esc(str(sheet_name)[:31] or 'Лист')
+    parts = {
+        '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+        '_rels/.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<sheets><sheet name="{sheet_title}" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        'xl/worksheets/sheet1.xml': sheet}
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name, content in parts.items(): z.writestr(name, content)
+    return out.getvalue()
+
+def export_catalog_xlsx_bytes(conn):
+    rows = conn.execute(_EXPORT_SQL).fetchall()
+    return _xlsx_from_rows([h for _, h in EXPORT_COLS],
+                           [[r[k] for k, _ in EXPORT_COLS] for r in rows], 'Каталог')
+
+# ---------------- выгрузка Ozon, 46 колонок (этап 1, v12.9.115) ----------------
+OZON_HEADERS = ['№','Артикул*','Название товара','Предельная цена без акций, руб.*','Зачёркнутая цена, руб.',
+  'НДС, %*','Рассрочка','Ускоренный сбор отзывов','Сбор первых отзывов','SKU','Штрихкод (Серийный номер / EAN)',
+  'ТН ВЭД коды ЕАЭС*','Вес в упаковке, г*','Ширина упаковки, мм*','Высота упаковки, мм*','Длина упаковки, мм*',
+  'Ссылка на главное фото*','Ссылки на дополнительные фото','Артикул фото','Бренд*','Партномер (артикул производителя)',
+  'Тип*','Название модели (для объединения в одну карточку)*','Нужен код маркировки*','Количество в упаковке, шт',
+  'Вес товара, г','Класс опасности товара','Количество товара в УЕИ','Минимальное количество оптом','#Хештеги',
+  'Аннотация','Rich-контент JSON','Объединить в похожие товары','OEM-номер','Альтернативные артикулы товара',
+  'Количество, штук','Внутренний диаметр, мм','Материал','Вид техники','Цвет товара','Гарантия',
+  'Страна-изготовитель','Комплектация','Количество заводских упаковок','Ошибка','Недочёты']
+
+def _split_codes(raw):
+    return [x for x in (p.strip() for p in re.split(r'[,;/|]+', str(raw or ''))) if x]
+
+def ozon_row(p, idx, vat='Не облагается', discount_pct=0, vehicle_type='Легковые автомобили'):
+    """Строка шаблона Ozon из полей карточки. Правила приложения, которые
+       портированы 1-в-1: цена не выдумывается (нет цены — пустая ячейка);
+       зачёркнутая — только явная старая цена выше цены или выбранная
+       продавцом надбавка; габариты сортируются длина>=ширина>=высота;
+       вес в граммы, размеры в миллиметры; аннотация — описание или
+       шаблон «Название. Артикул детали: … Производитель: …»."""
+    art = str(p.get('article', '')).strip()
+    name = str(p.get('name', '')).strip()
+    brand = str(p.get('brand', '')).strip()
+    price = num(p.get('price'))
+    price_out = int(round(price)) if price > 0 else ''
+    old = num(p.get('old_price'))
+    if old > price and price > 0: old_out = int(round(old))
+    elif discount_pct > 0 and price > 0: old_out = int(round(price * (1 + discount_pct / 100)))
+    else: old_out = ''
+    def grams(v): return int(round(num(v) * 1000)) if num(v) > 0 and round(num(v) * 1000) > 0 else ''
+    def millis(v): return int(round(num(v) * 10)) if num(v) > 0 and round(num(v) * 10) > 0 else ''
+    dims = [millis(p.get('length')), millis(p.get('width')), millis(p.get('height'))]
+    if all(isinstance(d, int) for d in dims):
+        dims.sort(reverse=True)  # длина — наибольшее, высота — наименьшее (документация Ozon)
+        length_mm, width_mm, height_mm = dims
+    else:
+        width_mm, height_mm, length_mm = dims[1], dims[2], dims[0]
+    oem = '; '.join(_split_codes(p.get('oe_numbers')))
+    cross = '; '.join(c for c in _split_codes(p.get('cross_numbers') or p.get('group_articles'))
+                      if c != art and c != oem)
+    bnorm = _norm_article(brand).lower()
+    hashtags = ('#автозапчасти #запчасти' + (' #' + bnorm if bnorm else '')).strip()
+    annotation = str(p.get('description', '')).strip() or f'{name}. Артикул детали: {art}. Производитель: {brand}.'
+    model = str(p.get('group_articles') or p.get('model') or art)
+    errors, notes = [], []
+    if not brand: errors.append('не заполнен бренд')
+    if not str(p.get('ozon_type', '')).strip(): errors.append('не определён тип Ozon')
+    if not str(p.get('tnved', '')).strip(): errors.append('не заполнен ТН ВЭД')
+    if not grams(p.get('weight')) or not all(isinstance(d, int) for d in (width_mm, height_mm, length_mm)):
+        errors.append('не заполнены ОВХ (вес/габариты)')
+    if not str(p.get('image_url', '')).strip(): errors.append('нет ссылки на главное фото')
+    if not str(p.get('barcode', '')).strip(): notes.append('нет штрихкода — Ozon не сможет принять поставку без него')
+    if not price_out: errors.append('не заполнена цена')
+    return [idx, art, name, price_out, old_out, vat, '', '', '', str(p.get('ozon_sku', '')),
+            str(p.get('barcode', '')), str(p.get('tnved', '')), grams(p.get('weight')), width_mm, height_mm, length_mm,
+            str(p.get('image_url', '')), str(p.get('extra_photos', '')), '', brand, art,
+            str(p.get('ozon_type', '')), model, str(p.get('mark_required', '')),
+            max(1, int(round(num(p.get('multiplicity')) or 1))),
+            (round(num(p.get('net_weight')) * 1000, 6) if num(p.get('net_weight')) > 0 else ''),
+            str(p.get('hazard_class', '')), '', '', hashtags, annotation,
+            str(p.get('rich_content', '')), str(p.get('group_articles', '')), oem, cross, '1',
+            str(p.get('diameter', '')), str(p.get('material', '')), vehicle_type, str(p.get('color', '')),
+            str(p.get('warranty', '')), str(p.get('country', '')),
+            str(p.get('package_contents', '')).strip() or f'{name} - 1 шт., упаковка', '1',
+            '; '.join(errors), '; '.join(notes)]
+
+def _ozon_rows_data(conn, keys=None, discount_pct=0, vat='Не облагается'):
+    rows = conn.execute('SELECT * FROM products ORDER BY article,brand').fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if keys is not None and (d['article'], d['brand']) not in keys: continue
+        out.append(ozon_row(d, len(out) + 1, vat=vat, discount_pct=discount_pct))
+    return out
+
+def export_ozon_csv_bytes(conn, discount_pct=0, vat='Не облагается', enc='utf-8', keys=None):
+    import csv as _csv
+    buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
+    w.writerow(OZON_HEADERS)
+    for row in _ozon_rows_data(conn, keys, discount_pct, vat):
+        w.writerow(row)
+    text = buf.getvalue()
+    if enc == 'cp1251': return text.encode('cp1251', errors='replace')
+    return ('\ufeff' + text).encode('utf-8')
+
 # ---------------- HTTP ----------------
 def render_app_html():
     """Приложение с авто-токеном: страница отдана самим движком с его же адреса,
@@ -568,6 +1130,14 @@ def get_token():
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    def _send_bytes(self, code, body, content_type, filename):
+        self.send_response(code)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-UC-Token')
+        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers(); self.wfile.write(body)
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
@@ -600,6 +1170,55 @@ class Handler(BaseHTTPRequestHandler):
         if not self._auth(): return self._send(401, {'ok': False, 'error': 'X-UC-Token'})
         conn = db()
         if self.path == '/report/summary': return self._send(200, {'ok': True, **summary_report(conn)})
+        if self.path == '/report/dashboard': return self._send(200, {'ok': True, **dashboard_report(conn)})
+        if self.path.startswith('/analogs/suggestions'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            return self._send(200, {'ok': True, **analog_suggestions(conn, (qs.get('limit') or ['100'])[0])})
+        if self.path.startswith('/report/price-changes'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            return self._send(200, {'ok': True, **price_changes(conn, (qs.get('days') or ['30'])[0])})
+        if self.path.startswith('/snapshots/diff'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            return self._send(200, {'ok': True, **snapshot_diff(conn, int(num((qs.get('from') or ['0'])[0])), int(num((qs.get('to') or ['0'])[0])))})
+        if self.path == '/snapshots':
+            rows = conn.execute('SELECT id,created,note,total FROM snapshots ORDER BY id DESC LIMIT 50').fetchall()
+            return self._send(200, {'ok': True, 'rows': [dict(r) for r in rows]})
+        if self.path.startswith('/parse/rows'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            sid = (qs.get('parse_id') or [''])[0]
+            off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
+            rows = conn.execute('SELECT data FROM parse_rows WHERE session=? ORDER BY idx LIMIT ? OFFSET ?', (sid, lim, off)).fetchall()
+            total = conn.execute('SELECT total FROM parse_sessions WHERE id=?', (sid,)).fetchone()
+            if total is None: return self._send(404, {'ok': False, 'error': 'parse_id не найден'})
+            return self._send(200, {'ok': True, 'total': total[0], 'rows': [json.loads(r[0]) for r in rows]})
+        if self.path.startswith('/export/ozon.xlsx'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            data = _xlsx_from_rows(OZON_HEADERS, _ozon_rows_data(conn, None,
+                num((qs.get('discount_pct') or ['0'])[0]), (qs.get('vat') or ['Не облагается'])[0]), 'Ozon')
+            return self._send_bytes(200, data,
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
+        if self.path.startswith('/export/ozon.csv'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            return self._send_bytes(200, export_ozon_csv_bytes(conn,
+                discount_pct=num((qs.get('discount_pct') or ['0'])[0]),
+                vat=(qs.get('vat') or ['Не облагается'])[0],
+                enc=(qs.get('enc') or ['utf-8'])[0]),
+                'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
+        if self.path.startswith('/export/catalog'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            enc = (qs.get('enc') or ['utf-8'])[0]
+            if '.xlsx' in self.path or (qs.get('format') or [''])[0] == 'xlsx':
+                return self._send_bytes(200, export_catalog_xlsx_bytes(conn),
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_catalog_engine.xlsx')
+            return self._send_bytes(200, export_catalog_csv_bytes(conn, enc),
+                'text/csv; charset=' + ('windows-1251' if enc == 'cp1251' else 'utf-8'), 'UC_catalog_engine.csv')
         if self.path.startswith('/search'):
             from urllib.parse import urlparse, parse_qs
             q = (parse_qs(urlparse(self.path).query).get('q', [''])[0] or '').strip()
@@ -611,7 +1230,7 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
-            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
             total = conn.execute('SELECT COUNT(*) c FROM products').fetchone()['c']
             return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
         if self.path.startswith('/catalog/results'):
@@ -637,6 +1256,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data)})
             except Exception as e:
                 return self._send(500, {'ok': False, 'error': str(e)[:300]})
+        if self.path == '/parse/file':
+            from urllib.parse import unquote
+            fname = unquote(self.headers.get('X-Filename', 'file.csv'))
+            ln = int(self.headers.get('Content-Length', 0) or 0)
+            data = self.rfile.read(ln) if ln else b''
+            try:
+                return self._send(200, {'ok': True, **parse_file_bytes(db(), fname, data)})
+            except Exception as e:
+                return self._send(500, {'ok': False, 'error': str(e)[:300]})
         body = self._body()
         conn = db()
         try:
@@ -650,6 +1278,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'ok': True, 'imported': n})
             if self.path == '/catalog/enrich':
                 return self._send(200, {'ok': True, **enrich_oe(conn)})
+            if self.path == '/donors/import':
+                n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
+                return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/catalog/enrich-full':
+                return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand')})
             if self.path == '/catalog/recalc':
                 return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {})})
             if self.path.startswith('/catalog/results'):
@@ -659,6 +1292,15 @@ class Handler(BaseHTTPRequestHandler):
                 rows = conn.execute('SELECT article,brand,total,profit,margin,roi,break_even,target FROM eco_results ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
                 total = conn.execute('SELECT COUNT(*) c FROM eco_results').fetchone()['c']
                 return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
+            if self.path == '/snapshots':
+                return self._send(200, {'ok': True, **make_snapshot(conn, body.get('note', ''))})
+            if self.path == '/export/ozon.csv':
+                keys = None
+                if body.get('articles') is not None:
+                    keys = {(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']}
+                return self._send_bytes(200, export_ozon_csv_bytes(conn,
+                    discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys),
+                    'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
             if self.path == '/outbox':
                 n = enqueue(conn, body.get('kind', ''), body.get('marketplace', ''), body.get('items') or [])
                 return self._send(200, {'ok': True, 'queued': n})
@@ -707,6 +1349,10 @@ if __name__ == '__main__':
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--once', action='store_true')
     args = ap.parse_args()
+    try:
+        import multiprocessing as _mp
+        _mp.freeze_support()  # Windows spawn / PyInstaller: дочерние процессы не должны стартовать сервер
+    except Exception: pass
     if args.cmd == 'serve': serve(args.port)
     elif args.cmd == 'watch': watch_loop()
     elif args.cmd == 'mail': print(mail_check_once(get_settings(db())))
