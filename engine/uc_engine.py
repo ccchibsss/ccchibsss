@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.107-pyengine-4'
+VERSION = '12.9.108-pyengine-5'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -566,6 +566,82 @@ def dashboard_report(conn):
                           'no_oe': an['no_oe'] or 0, 'no_name': an['no_name'] or 0},
             'top_brands': [dict(r) for r in top]}
 
+# ---------------- экспорт каталога (аудит v12.9.107, п.1; v12.9.108) ----------------
+EXPORT_COLS = [('article','Артикул'),('brand','Бренд'),('name','Название'),('price','Цена'),('cost','Себестоимость'),
+    ('stock','Остаток'),('sales','Продажи/мес'),('weight','Вес, кг'),('length','Длина, см'),('width','Ширина, см'),
+    ('height','Высота, см'),('volume','Объём, л'),('oe_numbers','OE номера'),('analog_list','Аналоги'),
+    ('total','Расходы всего'),('profit','Прибыль'),('margin','Маржа, %'),('roi','ROI, %'),
+    ('break_even','Безубыток'),('target','Целевая цена')]
+_EXPORT_SQL = ('SELECT p.article,p.brand,p.name,p.price,p.cost,p.stock,p.sales,p.weight,p.length,p.width,p.height,'
+    'p.volume,p.oe_numbers,p.analog_list,e.total,e.profit,e.margin,e.roi,e.break_even,e.target '
+    'FROM products p LEFT JOIN eco_results e ON e.article=p.article AND e.brand=p.brand ORDER BY p.article,p.brand')
+
+def export_catalog_csv_bytes(conn, enc='utf-8'):
+    import csv as _csv
+    buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
+    w.writerow([h for _, h in EXPORT_COLS])
+    for r in conn.execute(_EXPORT_SQL):
+        w.writerow(['' if r[k] is None else r[k] for k, _ in EXPORT_COLS])
+    text = buf.getvalue()
+    if enc == 'cp1251': return text.encode('cp1251', errors='replace')
+    return ('\ufeff' + text).encode('utf-8')
+
+def _xml_esc(v):
+    return (str(v).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;'))
+
+def export_catalog_xlsx_bytes(conn):
+    """XLSX без openpyxl: zip из XML (stdlib). Inline-строки, числа как есть —
+       Excel/LibreOffice/Sheets открывают; portable-сборке зависимости не нужны."""
+    import zipfile
+    def col_letter(i):
+        out = ''
+        i += 1
+        while i: i, rem = divmod(i - 1, 26); out = chr(65 + rem) + out
+        return out
+    rows_xml = []
+    header = ''.join(f'<c r="{col_letter(i)}1" t="inlineStr"><is><t>{_xml_esc(h)}</t></is></c>'
+                     for i, (_, h) in enumerate(EXPORT_COLS))
+    rows_xml.append(f'<row r="1">{header}</row>')
+    rn = 1
+    for r in conn.execute(_EXPORT_SQL):
+        rn += 1
+        cells = []
+        for i, (k, _) in enumerate(EXPORT_COLS):
+            v = r[k]
+            if v is None or v == '': continue
+            ref = f'{col_letter(i)}{rn}'
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                cells.append(f'<c r="{ref}"><v>{v}</v></c>')
+            else:
+                cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>')
+        rows_xml.append(f'<row r="{rn}">{"".join(cells)}</row>')
+    sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+             f'<sheetData>{"".join(rows_xml)}</sheetData></worksheet>')
+    parts = {
+        '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+        '_rels/.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="Каталог" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        'xl/worksheets/sheet1.xml': sheet}
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name, content in parts.items(): z.writestr(name, content)
+    return out.getvalue()
+
 # ---------------- HTTP ----------------
 def render_app_html():
     """Приложение с авто-токеном: страница отдана самим движком с его же адреса,
@@ -586,6 +662,14 @@ def get_token():
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    def _send_bytes(self, code, body, content_type, filename):
+        self.send_response(code)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-UC-Token')
+        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers(); self.wfile.write(body)
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
@@ -619,6 +703,15 @@ class Handler(BaseHTTPRequestHandler):
         conn = db()
         if self.path == '/report/summary': return self._send(200, {'ok': True, **summary_report(conn)})
         if self.path == '/report/dashboard': return self._send(200, {'ok': True, **dashboard_report(conn)})
+        if self.path.startswith('/export/catalog'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            enc = (qs.get('enc') or ['utf-8'])[0]
+            if '.xlsx' in self.path or (qs.get('format') or [''])[0] == 'xlsx':
+                return self._send_bytes(200, export_catalog_xlsx_bytes(conn),
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_catalog_engine.xlsx')
+            return self._send_bytes(200, export_catalog_csv_bytes(conn, enc),
+                'text/csv; charset=' + ('windows-1251' if enc == 'cp1251' else 'utf-8'), 'UC_catalog_engine.csv')
         if self.path.startswith('/search'):
             from urllib.parse import urlparse, parse_qs
             q = (parse_qs(urlparse(self.path).query).get('q', [''])[0] or '').strip()

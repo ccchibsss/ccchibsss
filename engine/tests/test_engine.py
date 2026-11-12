@@ -114,6 +114,32 @@ class TestDashboard(unittest.TestCase):
         self.assertEqual(d['anomalies']['below_cost'], 1)   # F100: себестоимость выше цены
         self.assertEqual(d['anomalies']['no_oe'], 1)        # F200 без OE
 
+class TestExport(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'name': 'Фильтр & Co', 'price': 700, 'cost': 400, 'stock': 2}], 'test')
+    def test_export_csv(self):
+        data = E.export_catalog_csv_bytes(self.conn)
+        self.assertTrue(data.startswith(b'\xef\xbb\xbf'))  # BOM для Excel
+        text = data.decode('utf-8-sig')
+        self.assertIn('Артикул;Бренд', text)
+        self.assertIn('F100;BOSCH;Фильтр & Co;700', text)
+        self.assertIn('F100;BOSCH', E.export_catalog_csv_bytes(self.conn, 'cp1251').decode('cp1251'))
+    def test_export_xlsx_stdlib(self):
+        import io as _io, zipfile
+        data = E.export_catalog_xlsx_bytes(self.conn)
+        z = zipfile.ZipFile(_io.BytesIO(data))  # валидный zip-контейнер XLSX
+        self.assertIn('xl/worksheets/sheet1.xml', z.namelist())
+        sheet = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
+        self.assertIn('F100', sheet)
+        self.assertIn('Фильтр &amp; Co', sheet)  # XML-экранирование
+        self.assertIn('<v>700.0</v>', sheet)       # числа — числами, не строками
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib
