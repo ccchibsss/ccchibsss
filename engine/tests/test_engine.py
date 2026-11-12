@@ -471,6 +471,21 @@ class TestOneFilePaths(unittest.TestCase):
             E.BUNDLE, E.DATA = old_b, old_data
             E._ASSET_CACHE.pop('ozon_template.json', None)
 
+class TestDiag(unittest.TestCase):
+    def test_diag_fields(self):
+        import tempfile, pathlib, json as _json
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        (tmp / 'index.html').write_text('<head></head><script>/*! xlsx lib */</script>', encoding='utf-8')
+        old_b, old_base = E.BUNDLE, E.BASE
+        E.BUNDLE, E.BASE = tmp, tmp / 'engine'
+        try:
+            p = E._app_html_path()
+            txt = p.read_text(encoding='utf-8')
+            self.assertTrue('<script>/*! xlsx' in txt)
+            self.assertTrue(len(_json.dumps({'size': p.stat().st_size})) > 0)
+        finally:
+            E.BUNDLE, E.BASE = old_b, old_base
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib

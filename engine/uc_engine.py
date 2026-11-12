@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.124-pyengine-17'
+VERSION = '12.9.126-pyengine-18'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -1354,6 +1354,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {'ok': False, 'error': 'index.html не найден рядом с движком'})
         if self.path == '/health':
             return self._send(200, {'ok': True, 'service': 'UC-PyEngine', 'version': VERSION})
+        if self.path == '/diag':
+            # v12.9.126: диагностика «что движок реально отдаёт» — для случаев,
+            # когда у пользователя страница выглядит не так, как в репозитории.
+            import hashlib
+            info = {'engine_version': VERSION, 'frozen': bool(FROZEN)}
+            ap = _app_html_path()
+            info['app_path'] = str(ap) if ap else None
+            if ap:
+                raw = ap.read_bytes()
+                info['app_size'] = len(raw)
+                info['app_sha256'] = hashlib.sha256(raw).hexdigest()[:16]
+                txt = raw.decode('utf-8', errors='replace')
+                info['xlsx_executable_script'] = '<script>/*! xlsx' in txt
+                info['xlsx_textplain_block'] = 'id="xlsx-lib"' in txt
+                info['has_token_inject_point'] = '</head>' in txt
+            return self._send(200, {'ok': True, **info})
         if not self._auth(): return self._send(401, {'ok': False, 'error': 'X-UC-Token'})
         conn = db()
         if self.path == '/report/summary': return self._send(200, {'ok': True, **summary_report(conn)})
