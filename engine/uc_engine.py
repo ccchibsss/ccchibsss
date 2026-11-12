@@ -24,12 +24,17 @@ from urllib import request as urlrequest
 from urllib.error import URLError
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / 'engine_data'
+FROZEN = getattr(sys, 'frozen', False)
+# v12.9.124: один файл. В frozen-сборке (PyInstaller --onefile) ресурсы лежат
+# во временной распаковке _MEIPASS, а данные обязаны жить РЯДОМ с exe —
+# иначе каталог и токен терялись бы при каждом закрытии.
+BUNDLE = Path(getattr(sys, '_MEIPASS', BASE)) if FROZEN else BASE
+DATA = (Path(sys.executable).resolve().parent / 'engine_data') if FROZEN else BASE / 'engine_data'
 DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.123-pyengine-16'
+VERSION = '12.9.124-pyengine-17'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -1099,7 +1104,7 @@ def _asset(name):
     if name not in _ASSET_CACHE:
         import json as _json
         data = None
-        for base in (Path(__file__).resolve().parent, DATA):
+        for base in (Path(__file__).resolve().parent, BUNDLE, DATA):
             try:
                 fp = base / name
                 if fp.exists(): data = _json.loads(fp.read_text(encoding='utf-8')); break
@@ -1271,12 +1276,18 @@ def export_ozon_xlsx_bytes(conn, discount_pct=0, vat='Не облагается'
     return _xlsx_from_rows(OZON_HEADERS, rows, 'Ozon', yellow=yellow)
 
 # ---------------- HTTP ----------------
+def _app_html_path():
+    for cand in (BASE.parent / 'index.html', BUNDLE / 'index.html',
+                 Path(sys.executable).resolve().parent / 'index.html', Path.cwd() / 'index.html'):
+        if cand.exists(): return cand
+    return None
+
 def render_app_html():
     """Приложение с авто-токеном: страница отдана самим движком с его же адреса,
        поэтому токен можно вшить в HTML — пользователю не нужно ничего вставлять.
        Чужой сайт прочитать эту страницу не может (нет CORS-заголовка на /)."""
-    app_file = BASE.parent / 'index.html'
-    if not app_file.exists(): return None
+    app_file = _app_html_path()
+    if app_file is None: return None
     html = app_file.read_text(encoding='utf-8')
     inject = '<script>window.__UC_PY_TOKEN__=' + json.dumps(get_token()) + ';</script>'
     if '</head>' in html: html = html.replace('</head>', inject + '</head>', 1)
@@ -1507,7 +1518,12 @@ class Handler(BaseHTTPRequestHandler):
 def serve(port=8765):
     get_token()
     srv = ThreadingHTTPServer(('127.0.0.1', port), Handler)
-    print(f'UC PyEngine {VERSION}: http://127.0.0.1:{port}  (токен: {TOKEN_PATH})')
+    url = f'http://127.0.0.1:{port}/'
+    print(f'UC PyEngine {VERSION}: {url}  (токен: {TOKEN_PATH})')
+    print('Приложение открыто в браузере. Не закрывайте это окно, пока работаете; закрыть окно = остановить движок.')
+    if not os.environ.get('UC_NO_BROWSER'):
+        import threading, webbrowser
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     srv.serve_forever()
 
 def watch_loop():
@@ -1527,6 +1543,7 @@ def watch_loop():
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
+    if FROZEN and len(sys.argv) == 1: sys.argv.append('serve')  # двойной клик по exe
     ap.add_argument('cmd', choices=['serve', 'watch', 'mail', 'folder', 'outbox', 'backup', 'calc'])
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--once', action='store_true')
