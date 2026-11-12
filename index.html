@@ -7149,26 +7149,14 @@ html { -webkit-text-size-adjust: 100%; }
   <div class="vhead">
     <div><h2>Данные <span class="hint mono" style="font-size:11px">/ virtual scroll</span></h2><p>Виртуальная прокрутка (окно строк, фикс. высота ряда) — локально в браузере (IndexedDB) до ~300 000 SKU. <b style="color:var(--amber)">Облачная синхронизация с Google Sheets рекомендована до ~20 000 SKU</b> — Apps Script ограничен 6 минутами исполнения и кэш одной записи CacheService лимитирован 100 КБ; выше этого объёма используйте только локальный режим и XLSX/CSV-экспорт напрямую из браузера.</p></div>
     <div class="sp"></div>
-    <button type="button" class="btn pri" id="btnImport"><i class="fa-solid fa-file-arrow-up"></i> Импорт / дозагрузка</button>
+    <button type="button" class="btn pri" id="btnImport" title="Если локальный движок запущен, файл разбирает он (CSV/XLSX/ZIP в SQLite, подмешивание только в пустые поля); если движок недоступен — обычный мастер импорта приложения"><i class="fa-solid fa-file-arrow-up"></i> Импорт / дозагрузка</button>
     <button type="button" class="btn" id="btnDiskImport" title="Прайс и кросс-листы пишутся потоком сразу в хранилище приложения (IndexedDB), файл целиком в память не поднимается. CSV или XLSX (через воркер), каталог заменяется целиком."><i class="fa-solid fa-hard-drive"></i> Прайс + кроссы — сразу в приложение</button>
     <button type="button" class="btn gh" id="btnSettingsSnapshot" title="Скачать снимок ключевых настроек (без секретов) в формате проекта arena-project — для сверки и переноса между проектами"><i class="fa-solid fa-camera"></i> Снимок настроек</button>
     <button type="button" class="btn gh" id="btnReviewExport" title="Сформировать очередь ручной проверки (конфликты габаритов по OE, висячие кроссы, похожие артикулы) и скачать CSV: заполните колонку «Решение» и загрузите обратно соседней кнопкой"><i class="fa-solid fa-list-check"></i> Очередь проверки ↓</button>
-    <button type="button" class="btn gh" id="btnPyCheck" title="Независимая проверка юнит-экономики локальным Python-движком (SQLite): движок пересчитывает текущий фильтр своим кодом, приложение сверяет прибыль с браузерным расчётом. Нужен запущенный UC-движок (engine/run_engine.bat)"><i class="fa-brands fa-python"></i> Python: проверить расчёт</button>
-    <button type="button" class="btn gh" id="btnPyRecalc" title="Полный пересчёт каталога на локальном Python-движке: строки уходят в SQLite, экономика считается там, приложение применяет готовый результат. Вкладка при этом не нагружается"><i class="fa-brands fa-python"></i> Python: пересчитать каталог</button>
-    <button type="button" class="btn gh" id="btnPyImport" title="Импорт файла целиком на Python-движке: файл разбирает движок (CSV/XLSX/ZIP), а не браузер; строки попадают в SQLite каталога движка и подмешиваются в таблицу только в пустые поля"><i class="fa-brands fa-python"></i> Python: импорт файла</button>
-    <button type="button" class="btn gh" id="btnPyEnrich" title="Обогащение по OE на Python-движке: транзитивные OE-группы в SQLite, заполняются только пустые поля (название, габариты, аналоги), результат подмешивается в таблицу"><i class="fa-brands fa-python"></i> Python: обогатить (OE)</button>
-    <button type="button" class="btn gh" id="btnPyDashboard" title="Сводка каталога на Python-движке: агрегаты и аномалии одним SQL-проходом по SQLite вместо перебора строк вкладки"><i class="fa-brands fa-python"></i> Python: сводка каталога</button>
-    <button type="button" class="btn gh" id="btnPyExport" title="Экспорт каталога на Python-движке: файл собирает движок из SQLite (XLSX без openpyxl, на стандартном zip/XML), вкладка не зависает на больших каталогах"><i class="fa-brands fa-python"></i> Python: экспорт каталога</button>
-    <button type="button" class="btn gh" id="btnPyEnrichFull" title="Полное обогащение на Python-движке (Каталог V в SQLite): доноры Артикул+Бренд и OE-группы; категория и ТН ВЭД — по умолчанию только от той же пары, по OE — лишь при единогласии доноров; заполняются только пустые поля"><i class="fa-brands fa-python"></i> Python: полное обогащение</button>
-    <button type="button" class="btn gh" id="btnPyHistory" title="История цен на Python-движке: движок пишет изменения цен и себестоимости при каждом импорте; сводка подорожаний и удешевлений за 30 дней — одним SQL-запросом"><i class="fa-brands fa-python"></i> Python: история цен</button>
-    <button type="button" class="btn gh" id="btnPySnapshot" title="Снапшот каталога на Python-движке: снимок цен, себестоимости и остатков в SQLite для последующих сравнений (дифф — GET /snapshots/diff)"><i class="fa-brands fa-python"></i> Python: снапшот цен</button>
-    <button type="button" class="btn gh" id="btnPyAnalogs" title="Подсказки аналогов на Python-движке: похожие артикулы (опечатки, тот же артикул у другого бренда) для SKU без аналогов. ТОЛЬКО подсказки — автоматически аналоги не проставляются, решение за оператором"><i class="fa-brands fa-python"></i> Python: подсказки аналогов</button>
-    <button type="button" class="btn gh" id="btnPySnapshotDiff" title="Сравнение двух последних снапшотов каталога на Python-движке: добавленные и удалённые SKU, изменения цен между снимками"><i class="fa-brands fa-python"></i> Python: сравнить снапшоты</button>
-    <button type="button" class="btn gh" id="btnPyOzon" title="Выгрузка OZON на Python-движке (этап 1): CSV шаблона Ozon на 46 колонок собирает движок из SQLite. Правила: цена не выдумывается, зачёркнутая — только явная или по надбавке из настроек приложения, габариты сортируются длина≥ширина≥высота"><i class="fa-brands fa-python"></i> Python: экспорт OZON</button>
     <button type="button" class="btn gh" id="btnPyToken" title="Задать токен доступа к локальному Python-движку (файл engine/engine_data/token.txt)"><i class="fa-solid fa-key"></i> Токен Python</button>
     <span class="hint" id="pyEngineStatus" title="Статус локального Python-движка">Python: не проверен</span>
     <button type="button" class="btn gh" id="btnReviewImport" title="Загрузить CSV очереди проверки с заполненными решениями: принятые пары запомнятся и применятся, отклонённые больше не предложатся"><i class="fa-solid fa-file-import"></i> Решения проверки ↑</button>
-    <button type="button" class="btn ok" id="btnExportOzon" style="font-weight:700" title="Рабочая выгрузка Ozon; актуальный шаблон проверьте в кабинете"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON</button>
+    <button type="button" class="btn ok" id="btnExportOzon" style="font-weight:700" title="Если локальный движок запущен, выгрузку Ozon (46 колонок, выделенные строки или весь каталог) собирает он; если недоступен — рабочая выгрузка приложения, актуальный шаблон проверьте в кабинете"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON</button>
     <button type="button" class="btn ok" id="btnPriceListUpsert" title="Обновление сумм (цен, себестоимости) и остатков по связке Артикул + Бренд с добавлением новых позиций"><i class="fa-solid fa-file-invoice-dollar"></i> Прайс-лист (Артикул+Бренд)</button>
     <button type="button" class="btn gh" id="btnDemoImport" title="Локальный демонстрационный CSV откроется в обычном мастере маппинга и не отправляется в GAS"><i class="fa-solid fa-flask"></i> Демо-набор</button>
     <button type="button" class="btn" id="btnMinStock"><i class="fa-solid fa-sliders"></i> Мин. остаток</button>
@@ -9237,6 +9225,23 @@ try {
     <div class="grid2" style="align-items:start">
       <div><div class="hint" style="letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px">Топ-10 брендов по артикулам</div><table class="plain" id="hvcBrands"></table></div>
       <div><div class="hint" style="letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px">Категории OE-реестра</div><table class="plain" id="hvcCats"></table></div>
+    </div>
+    <div class="sep"></div>
+    <div class="hint" style="letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px">Локальный движок (SQLite) · операции с каталогом</div>
+    <div class="hint" style="margin-bottom:7px;line-height:1.55">Те же действия, что в «Данные», но считает локальный движок — быстрее на больших каталогах и не нагружает вкладку. При выключенном движке каждая кнопка честно предупредит, а обычные кнопки приложения продолжают работать.</div>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:6px">
+      <button type="button" class="btn sm gh" id="btnPyCheck" title="Независимая проверка юнит-экономики движком: пересчёт текущего фильтра и сверка прибыли с браузерным расчётом"><i class="fa-solid fa-list-check"></i> Проверить расчёт</button>
+      <button type="button" class="btn sm gh" id="btnPyRecalc" title="Пересчёт каталога движком: строки в SQLite, экономика там, приложение применяет результат (инкрементально — только изменившиеся SKU)"><i class="fa-solid fa-calculator"></i> Пересчитать каталог</button>
+      <button type="button" class="btn sm gh" id="btnPyImport" title="Импорт файла движком (CSV/XLSX/ZIP): разбор в SQLite, в таблицу — только в пустые поля"><i class="fa-solid fa-file-arrow-up"></i> Импорт файла</button>
+      <button type="button" class="btn sm gh" id="btnPyEnrich" title="Обогащение по OE движком: транзитивные OE-группы в SQLite, только пустые поля"><i class="fa-solid fa-diagram-project"></i> Обогатить (OE)</button>
+      <button type="button" class="btn sm gh" id="btnPyEnrichFull" title="Полное обогащение движком: доноры Артикул+Бренд и OE-группы; категория/ТН ВЭД только от пары или при единогласии по OE"><i class="fa-solid fa-layer-group"></i> Полное обогащение</button>
+      <button type="button" class="btn sm gh" id="btnPyDashboard" title="Сводка каталога движком: агрегаты и аномалии одним SQL-проходом"><i class="fa-solid fa-chart-column"></i> Сводка каталога</button>
+      <button type="button" class="btn sm gh" id="btnPyExport" title="Экспорт каталога движком из SQLite (XLSX/CSV)"><i class="fa-solid fa-file-export"></i> Экспорт каталога</button>
+      <button type="button" class="btn sm gh" id="btnPyHistory" title="История цен движка: изменения цен и себестоимости при импортах, сводка за 30 дней"><i class="fa-solid fa-clock-rotate-left"></i> История цен</button>
+      <button type="button" class="btn sm gh" id="btnPySnapshot" title="Снапшот цен, себестоимости и остатков в SQLite для сравнений"><i class="fa-solid fa-camera"></i> Снапшот цен</button>
+      <button type="button" class="btn sm gh" id="btnPySnapshotDiff" title="Сравнение двух последних снапшотов: добавленные/удалённые SKU и изменения цен"><i class="fa-solid fa-code-compare"></i> Сравнить снапшоты</button>
+      <button type="button" class="btn sm gh" id="btnPyAnalogs" title="Подсказки аналогов: похожие артикулы для SKU без аналогов. ТОЛЬКО подсказки — автоматически не проставляются"><i class="fa-solid fa-lightbulb"></i> Подсказки аналогов</button>
+      <button type="button" class="btn sm gh" id="btnPyOzon" title="Выгрузка OZON движком: шаблон 46 колонок из SQLite; выделенные строки или весь каталог; цена не выдумывается"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON</button>
     </div>
     <div class="sep"></div>
     <div class="hint" style="letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px;color:var(--red)">Управление данными · операции необратимы</div>
@@ -13576,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.119-client+pyengine-incr';
+const APP_VERSION = '12.9.121-client+engine-embedded';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26164,7 +26169,9 @@ const UI = {
       applyFilter();
       Toast.info('Показ включён', 'исключённые SKU видны в таблице со статусом «Исключён»');
     };
-    $('#btnImport').onclick = () => Import.pick();
+    $('#btnImport').onclick = async () => { // v12.9.121: движок встроен в существующую кнопку
+      if (await PyEngine.health()) PyEngine.importFile(); else Import.pick();
+    };
     const _bdi = $('#btnDiskImport'); if (_bdi) _bdi.onclick = () => DiskImport.pick();
     const _bss = $('#btnSettingsSnapshot'); if (_bss) _bss.onclick = () => SettingsSnapshot.download();
     const _bre = $('#btnReviewExport'); if (_bre) _bre.onclick = () => ReviewQueue.exportCsv();
@@ -33822,7 +33829,9 @@ const OzonExport = {
   /* Привязка обработчиков */
   bind() {
     const bindBtn = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
-    bindBtn('#btnExportOzon', () => OzonExport.open());
+    bindBtn('#btnExportOzon', async () => { // v12.9.121: движок встроен в существующую кнопку
+      if (await PyEngine.health()) PyEngine.exportOzon(); else OzonExport.open();
+    });
     bindBtn('#btnExportOzonTop', () => OzonExport.open());
     bindBtn('#btnExportOzonCard', () => OzonExport.open());
     bindBtn('#btnExportOzonFromModal', () => { modal('#mExport', false); OzonExport.open(); });
