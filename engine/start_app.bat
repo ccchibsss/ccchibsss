@@ -6,8 +6,10 @@ rem  Сам находит движок: сначала готовый exe, по
 rem  Токен вставлять не нужно: приложение получает его само.
 rem ============================================================
 cd /d %~dp0
-curl -s http://127.0.0.1:8765/health >nul 2>nul
+echo Запуск UNIT CONTROL...
+curl -s --max-time 2 http://127.0.0.1:8765/health >nul 2>nul
 if %errorlevel%==0 goto open
+echo Движок не запущен - запускаю...
 
 if exist "UC-движок.exe" (
   start "" /min "UC-движок.exe" serve
@@ -35,7 +37,8 @@ exit /b 1
 
 :wait
 for /l %%i in (1,1,20) do (
-  curl -s http://127.0.0.1:8765/health >nul 2>nul && goto open
+  curl -s --max-time 2 http://127.0.0.1:8765/health >nul 2>nul && goto open
+  echo Жду движок... %%i
   timeout /t 1 /nobreak >nul
 )
 echo Движок не поднялся за 20 секунд. Запустите run_engine.bat и посмотрите ошибку.
@@ -43,4 +46,5 @@ pause
 exit /b 1
 
 :open
+echo Движок работает - открываю браузер...
 start "" http://127.0.0.1:8765/

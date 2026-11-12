@@ -447,6 +447,30 @@ class TestIncrementalRecalc(unittest.TestCase):
         r5 = E.recalc_catalog(self.conn, self.st, force=True)
         self.assertEqual(r5['recalculated'], 3)                          # force — полный пересчёт
 
+class TestOneFilePaths(unittest.TestCase):
+    def test_app_html_found_in_bundle(self):
+        import tempfile, pathlib
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        (tmp / 'index.html').write_text('<html>app</html>', encoding='utf-8')
+        old_b, old_base = E.BUNDLE, E.BASE
+        E.BUNDLE, E.BASE = tmp, tmp / 'engine'
+        try:
+            self.assertEqual(E._app_html_path(), tmp / 'index.html')
+        finally:
+            E.BUNDLE, E.BASE = old_b, old_base
+    def test_assets_found_in_bundle(self):
+        import tempfile, pathlib
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        (tmp / 'ozon_template.json').write_text('[["g"],["h"],["m"],["x"]]', encoding='utf-8')
+        old_b, old_data = E.BUNDLE, E.DATA
+        E.BUNDLE, E.DATA = tmp, tmp / 'nope'
+        E._ASSET_CACHE.pop('ozon_template.json', None)
+        try:
+            self.assertEqual(len(E.ozon_template_rows()), 4)
+        finally:
+            E.BUNDLE, E.DATA = old_b, old_data
+            E._ASSET_CACHE.pop('ozon_template.json', None)
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib
