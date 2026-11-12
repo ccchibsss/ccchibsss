@@ -1,5 +1,5 @@
 @echo off
-chcp 6501 >nul
+chcp 6501 >nul 2>&1
 rem ============================================================
 rem  Сборка ПОРТАТИВНОЙ папки UNIT·CONTROL (один раз, на машине
 rem  сборщика). Итог: папка UC-portable, которую пользователь
@@ -23,7 +23,7 @@ copy /y "%~dp0std_dims.json" "%OUT%\engine\" >nul
 copy /y "%~dp0..\index.html" "%OUT%\" >nul
 (
 echo @echo off
-echo chcp 6501 ^>nul
+echo chcp 6501 ^>nul 2^>^&1
 echo cd /d %%~dp0
 echo curl -s http://127.0.0.1:8765/health ^>nul 2^>nul
 echo if %%errorlevel%%==0 goto open

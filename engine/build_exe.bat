@@ -1,5 +1,5 @@
 @echo off
-chcp 6501 >nul
+chcp 6501 >nul 2>&1
 rem Сборка одного exe без консоли: нужна один раз машина с Python и PyInstaller
 cd /d %~dp0
 pip install pyinstaller openpyxl
