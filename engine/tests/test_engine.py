@@ -214,6 +214,28 @@ class TestEnrichFull(unittest.TestCase):
         self.assertEqual(row[4], 10)   # длина своя не тронута (совместима с меньшим комплектом)
         self.assertEqual(row[5], 1)    # вес — из меньшего комплекта группы (F2, не F3)
 
+class TestParseFile(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_parse_csv_and_paging(self):
+        res = E.parse_file_bytes(self.conn, 'comp.csv',
+            'Артикул;Цена конкурента\nA1;100\nA2;200\nA3;300\n'.encode('utf-8'))
+        self.assertEqual(res['total'], 3)
+        self.assertEqual(res['headers'], ['Артикул', 'Цена конкурента'])
+        rows = self.conn.execute('SELECT data FROM parse_rows WHERE session=? ORDER BY idx LIMIT 2 OFFSET 2',
+                                 (res['parse_id'],)).fetchall()
+        import json as _j
+        self.assertEqual(_j.loads(rows[0][0])['Артикул'], 'A3')  # постраничность кэша
+        # каталог парсингом не тронут
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM products').fetchone()[0], 0)
+    def test_parse_cp1251_and_tab(self):
+        res = E.parse_file_bytes(self.conn, 'comp.csv', 'Артикул\tЦена\nA1\t100\n'.encode('cp1251'))
+        self.assertEqual(res['total'], 1)
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib

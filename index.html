@@ -13571,7 +13571,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.110-client+pyengine-enrich-full';
+const APP_VERSION = '12.9.111-client+pyengine-parse';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -25157,8 +25157,13 @@ const CompetitorIntel = {
     inp.onchange = async () => {
       const f = inp.files[0]; if (!f) return;
       await withProgress('Импорт цен конкурентов', f.name, async () => {
+        let rows = null;
+        if (typeof PyEngine !== 'undefined' && await PyEngine.health()) {
+          try { rows = await PyEngine.parseFile(f); } catch (e) { rows = null; /* откат на браузерный разбор */ }
+        }
+        if (!rows) { /* движок не разобрал — прежний браузерный путь */
         const bytes = await f.arrayBuffer();
-        let rows = [];
+        rows = [];
         if (/\.csv$/i.test(f.name)) {
           let txt = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
           if (txt.slice(0, 400).indexOf('\uFFFD') > -1) txt = new TextDecoder('windows-1251').decode(bytes);
@@ -25170,6 +25175,7 @@ const CompetitorIntel = {
         } else {
           const wb = XLSX.read(bytes, { type: 'array', cellDates: false });
           rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: true });
+        }
         }
 
         if (!rows.length) throw new Error('Файл не содержит строк данных');
@@ -26718,6 +26724,24 @@ const PyEngine = {
       ' · аномалий: цена<себест. ' + fmt(an.below_cost || 0) + ', нет габаритов ' + fmt(an.no_dims || 0) +
       ', нет OE ' + fmt(an.no_oe || 0) + (top ? ' · топ брендов по прибыли/мес: ' + top : '') +
       '. Один SQL-проход вместо перебора строк вкладки.');
+  },
+  async parseFile(f) {
+    /* обобщённый разбор файла на движке (v12.9.111): возвращает строки-объекты
+       по заголовкам; каталог движка не трогается — правила применения у импортов свои */
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 600000);
+    try {
+      const r = await fetch(this.base() + '/parse/file', { method: 'POST', signal: ctl.signal,
+        headers: { 'X-UC-Token': this.token(), 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream' }, body: f });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+      const out = [];
+      for (let off = 0; ; off += 5000) {
+        const page = await this._fetch('/parse/rows?parse_id=' + encodeURIComponent(j.parse_id) + '&offset=' + off + '&limit=5000', { timeout: 120000 });
+        out.push(...(page.rows || []));
+        if (!page.rows || !page.rows.length || off + 5000 >= (page.total || 0)) break;
+      }
+      return out;
+    } finally { clearTimeout(to); }
   },
   async enrichFull() {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Полное обогащение на движке недоступно — используйте обогащение приложения.'); return; }

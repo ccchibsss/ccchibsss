@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.110-pyengine-7'
+VERSION = '12.9.111-pyengine-8'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -169,6 +169,10 @@ CREATE TABLE IF NOT EXISTS outbox(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, marketplace TEXT, article TEXT,
   payload TEXT, idempotency_key TEXT UNIQUE, status TEXT DEFAULT 'pending',
   attempts INTEGER DEFAULT 0, last_error TEXT DEFAULT '', created_at TEXT, sent_at TEXT);
+CREATE TABLE IF NOT EXISTS parse_sessions(id TEXT PRIMARY KEY, filename TEXT, headers TEXT,
+  total INTEGER, created TEXT);
+CREATE TABLE IF NOT EXISTS parse_rows(session TEXT, idx INTEGER, data TEXT,
+  PRIMARY KEY(session, idx));
 CREATE TABLE IF NOT EXISTS donors(article TEXT NOT NULL, brand TEXT DEFAULT '', source TEXT DEFAULT '',
   name TEXT DEFAULT '', category TEXT DEFAULT '', tnved TEXT DEFAULT '', applicability TEXT DEFAULT '',
   weight REAL DEFAULT 0, length REAL DEFAULT 0, width REAL DEFAULT 0, height REAL DEFAULT 0,
@@ -612,6 +616,56 @@ def enrich_full(conn, cat_mode='artbrand'):
     log_api(conn, 'enrichFull', 'sqlite', 'ok', f'cat_mode={cat_mode}, заполнено {filled}, конфликты {conflicts}')
     return {'cat_mode': cat_mode, 'filled': filled, 'conflicts': conflicts, 'donors': len(donors)}
 
+# ---------------- обобщённый разбор файлов (п.5 аудита, v12.9.111) ----------------
+def _raw_table(filename, data):
+    """Файл -> (заголовки, строки-списки) без привязки к каталогу.
+       CSV — stdlib; XLSX — openpyxl, если есть; ZIP — первый файл внутри."""
+    name = os.path.basename(str(filename or 'file'))
+    if name.lower().endswith('.zip'):
+        files = files_from_zip(data)
+        if not files: raise RuntimeError('в ZIP нет CSV/XLSX')
+        name, data = files[0]
+    if name.lower().endswith('.xlsx'):
+        try:
+            import openpyxl
+        except ImportError:
+            raise RuntimeError('XLSX на движке требует openpyxl; пришлите CSV или поставьте openpyxl')
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        table = [list(r) for r in wb.active.iter_rows(values_only=True)]
+    else:
+        text = data.decode('utf-8-sig', errors='replace')
+        if '\ufffd' in text[:400]:
+            try: text = data.decode('cp1251')
+            except Exception: pass
+        first = text.split('\n', 1)[0]
+        delim = ';' if first.count(';') >= first.count(',') and first.count(';') >= first.count('\t') else ('\t' if first.count('\t') > first.count(',') else ',')
+        table = list(csv.reader(io.StringIO(text), delimiter=delim))
+    table = [r for r in table if any(str(c).strip() for c in r if c is not None)]
+    if not table: return [], []
+    headers = [str(h).strip() if h is not None else '' for h in table[0]]
+    return headers, table[1:]
+
+def parse_file_bytes(conn, filename, data):
+    """Разобрать файл в кэш парсинга: наружу — постранично через /parse/rows.
+       Каталог не трогаем: это сырьё для импортов приложения (цены конкурентов,
+       продажи, заказы, тарифы — у каждого свои правила применения)."""
+    headers, table = _raw_table(filename, data)
+    import uuid
+    sid = uuid.uuid4().hex[:16]
+    conn.execute('INSERT INTO parse_sessions(id,filename,headers,total,created) VALUES(?,?,?,?,datetime("now"))',
+                 (sid, os.path.basename(str(filename or 'file')), json.dumps(headers, ensure_ascii=False), len(table)))
+    conn.executemany('INSERT INTO parse_rows(session,idx,data) VALUES(?,?,?)',
+                     [(sid, i, json.dumps({headers[j]: (r[j] if j < len(r) else '') for j in range(len(headers))},
+                                           ensure_ascii=False, default=str)) for i, r in enumerate(table)])
+    # держим только 5 последних разборов
+    old = [r[0] for r in conn.execute('SELECT id FROM parse_sessions ORDER BY created DESC, rowid DESC LIMIT 100 OFFSET 5')]
+    for o in old:
+        conn.execute('DELETE FROM parse_sessions WHERE id=?', (o,))
+        conn.execute('DELETE FROM parse_rows WHERE session=?', (o,))
+    conn.commit()
+    log_api(conn, 'parseFile', str(filename), 'ok', f'строк {len(table)}')
+    return {'parse_id': sid, 'headers': headers, 'total': len(table)}
+
 # ---------------- очередь отправки на площадки ----------------
 def enqueue(conn, kind, marketplace, items):
     n = 0
@@ -861,6 +915,15 @@ class Handler(BaseHTTPRequestHandler):
         conn = db()
         if self.path == '/report/summary': return self._send(200, {'ok': True, **summary_report(conn)})
         if self.path == '/report/dashboard': return self._send(200, {'ok': True, **dashboard_report(conn)})
+        if self.path.startswith('/parse/rows'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            sid = (qs.get('parse_id') or [''])[0]
+            off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
+            rows = conn.execute('SELECT data FROM parse_rows WHERE session=? ORDER BY idx LIMIT ? OFFSET ?', (sid, lim, off)).fetchall()
+            total = conn.execute('SELECT total FROM parse_sessions WHERE id=?', (sid,)).fetchone()
+            if total is None: return self._send(404, {'ok': False, 'error': 'parse_id не найден'})
+            return self._send(200, {'ok': True, 'total': total[0], 'rows': [json.loads(r[0]) for r in rows]})
         if self.path.startswith('/export/catalog'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -905,6 +968,15 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(ln) if ln else b''
             try:
                 return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data)})
+            except Exception as e:
+                return self._send(500, {'ok': False, 'error': str(e)[:300]})
+        if self.path == '/parse/file':
+            from urllib.parse import unquote
+            fname = unquote(self.headers.get('X-Filename', 'file.csv'))
+            ln = int(self.headers.get('Content-Length', 0) or 0)
+            data = self.rfile.read(ln) if ln else b''
+            try:
+                return self._send(200, {'ok': True, **parse_file_bytes(db(), fname, data)})
             except Exception as e:
                 return self._send(500, {'ok': False, 'error': str(e)[:300]})
         body = self._body()
