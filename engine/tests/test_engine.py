@@ -97,6 +97,36 @@ class TestRecalc(unittest.TestCase):
         self.assertAlmostEqual(row[0], 3394.33, delta=0.011)
         self.assertEqual(row[1], 14377)
 
+class TestParallelRecalc(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        self.st = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10,
+                   'pack': 18, 'transit': 30, 'returns_per_unit': 2.17,
+                   'tax_regime': 'usn_income_6', 'tax_pct': 6}
+    def test_parallel_matches_sequential(self):
+        rows = [{'article': f'A{i}', 'brand': 'B', 'price': 500 + (i % 5000),
+                 'cost': 300 + (i % 3000), 'sales': i % 20} for i in range(2100)]
+        E.import_rows(self.conn, rows, 'test')
+        res = E.recalc_catalog(self.conn, self.st)
+        self.assertEqual(res['recalculated'], 2100)
+        # каждый результат параллельного пересчёта равен последовательному calc_row
+        got = {(r[0], r[1]): r[2] for r in self.conn.execute('SELECT article,brand,profit FROM eco_results')}
+        for row in rows[:50] + rows[-50:]:
+            self.assertAlmostEqual(got[(row['article'], 'B')], E.calc_row(row, self.st)['profit'], delta=0.001)
+    def test_no_parallel_env_fallback(self):
+        import os
+        os.environ['UC_ENGINE_NO_PARALLEL'] = '1'
+        try:
+            out, par = E._calc_all([{'article': 'X', 'price': 1000, 'cost': 500, 'sales': 1}] * 3, self.st)
+            self.assertFalse(par)
+            self.assertEqual(len(out), 3)
+        finally:
+            del os.environ['UC_ENGINE_NO_PARALLEL']
+
 class TestDashboard(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib

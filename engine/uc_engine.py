@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.108-pyengine-5'
+VERSION = '12.9.109-pyengine-6'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -351,24 +351,46 @@ def mail_check_once(cfg=None, sec=None):
     return {'attachments': seen, 'imported_rows': imported}
 
 # ---------------- полный пересчёт каталога (v12.9.104) ----------------
+def _calc_rows_chunk(task):
+    rows, st = task
+    return [calc_row(r, st) for r in rows]
+
+def _calc_all(rows, st):
+    """Пересчёт всех строк: многопроцессно, где можно (аудит п.4).
+       calc_row чистый, параллелится чанками; запись результатов — всегда
+       одним процессом. Любая проблема с Pool -> тихий откат на 1 процесс.
+       В frozen-сборке (PyInstaller) Pool не используем: spawn там ненадёжен."""
+    seq = lambda: [calc_row(r, st) for r in rows]
+    if len(rows) < 2000 or os.environ.get('UC_ENGINE_NO_PARALLEL') or getattr(sys, 'frozen', False):
+        return seq(), False
+    try:
+        import multiprocessing as mp
+        workers = int(os.environ.get('UC_ENGINE_WORKERS') or min(4, os.cpu_count() or 1))
+        if workers <= 1: return seq(), False
+        step = max(500, -(-len(rows) // (workers * 4)))
+        chunks = [rows[i:i + step] for i in range(0, len(rows), step)]
+        with mp.Pool(workers) as pool:
+            parts = pool.map(_calc_rows_chunk, [(c, st) for c in chunks])
+        return [r for part in parts for r in part], True
+    except Exception:
+        return seq(), False
+
 def recalc_catalog(conn, st):
     """Экономика по ВСЕМ SKU каталога SQLite. Результат — в eco_results,
        наружу отдаётся постранично: браузеру не нужно держать расчёт у себя."""
-    rows = conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume FROM products').fetchall()
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume FROM products').fetchall()]
     conn.execute('DELETE FROM eco_results')
-    n = profitable = 0
-    total_profit = 0.0
-    for r in rows:
-        res = calc_row(dict(r), st)
-        conn.execute('INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at) VALUES(?,?,?,?,?,?,?,?,datetime("now"))',
-                     (res['article'], r['brand'], res['total'], res['profit'], res['margin'], res['roi'], res['break_even'], res['target']))
-        n += 1
-        if res['profit'] > 0: profitable += 1
-        total_profit += res['profit']
+    results, parallel = _calc_all(rows, st)  # порядок результатов = порядку строк и в Pool.map, и в seq
+    conn.executemany('INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at) VALUES(?,?,?,?,?,?,?,?,datetime("now"))',
+                     [(res['article'], row['brand'], res['total'], res['profit'], res['margin'],
+                       res['roi'], res['break_even'], res['target']) for row, res in zip(rows, results)])
+    n = len(results)
+    profitable = sum(1 for res in results if res['profit'] > 0)
+    total_profit = sum(res['profit'] for res in results)
     conn.commit()
     log_api(conn, 'recalcCatalog', 'sqlite', 'ok', f'{n} SKU')
     return {'recalculated': n, 'profitable': profitable,
-            'avg_profit': rnd(total_profit / n, 2) if n else 0}
+            'avg_profit': rnd(total_profit / n, 2) if n else 0, 'parallel': parallel}
 
 # ---------------- импорт файла целиком + обогащение OE (v12.9.105) ----------------
 def import_file_bytes(conn, filename, data):
@@ -819,6 +841,10 @@ if __name__ == '__main__':
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--once', action='store_true')
     args = ap.parse_args()
+    try:
+        import multiprocessing as _mp
+        _mp.freeze_support()  # Windows spawn / PyInstaller: дочерние процессы не должны стартовать сервер
+    except Exception: pass
     if args.cmd == 'serve': serve(args.port)
     elif args.cmd == 'watch': watch_loop()
     elif args.cmd == 'mail': print(mail_check_once(get_settings(db())))
