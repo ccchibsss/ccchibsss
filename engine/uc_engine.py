@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.109-pyengine-6'
+VERSION = '12.9.110-pyengine-7'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -169,6 +169,10 @@ CREATE TABLE IF NOT EXISTS outbox(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, marketplace TEXT, article TEXT,
   payload TEXT, idempotency_key TEXT UNIQUE, status TEXT DEFAULT 'pending',
   attempts INTEGER DEFAULT 0, last_error TEXT DEFAULT '', created_at TEXT, sent_at TEXT);
+CREATE TABLE IF NOT EXISTS donors(article TEXT NOT NULL, brand TEXT DEFAULT '', source TEXT DEFAULT '',
+  name TEXT DEFAULT '', category TEXT DEFAULT '', tnved TEXT DEFAULT '', applicability TEXT DEFAULT '',
+  weight REAL DEFAULT 0, length REAL DEFAULT 0, width REAL DEFAULT 0, height REAL DEFAULT 0,
+  oe_numbers TEXT DEFAULT '', PRIMARY KEY(article, brand, source));
 CREATE TABLE IF NOT EXISTS oe_links(oe TEXT NOT NULL, article TEXT NOT NULL, brand TEXT DEFAULT '',
   PRIMARY KEY(oe, article, brand));
 CREATE INDEX IF NOT EXISTS ix_oe_links_article ON oe_links(article, brand);
@@ -186,6 +190,12 @@ def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # миграция баз до v12.9.110: обогащаемые текстовые поля каталога
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(products)')}
+    for col in ('category', 'tnved', 'applicability'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT DEFAULT ''")
+    conn.commit()
     return conn
 
 def log_api(conn, action, endpoint, status, detail=''):
@@ -214,6 +224,8 @@ ALIASES = {
     'name': ('название', 'name', 'наименование'), 'price': ('цена', 'price'),
     'cost': ('себестоимость', 'cost', 'закупка'), 'stock': ('остаток', 'stock', 'количество'),
     'oe_numbers': ('oe', 'oem', 'ое', 'номер oe'), 'weight': ('вес', 'weight'),
+    'sales': ('продажи', 'sales'), 'category': ('категор', 'category'),
+    'tnved': ('тн вэд', 'тнвэд', 'tnved', 'hs code'), 'applicability': ('применяем', 'applicab', 'совмест'),
     'length': ('длина', 'length'), 'width': ('ширина', 'width'), 'height': ('высота', 'height')}
 def map_header(header):
     out = {}
@@ -273,8 +285,8 @@ def import_rows(conn, rows, source, rebuild_fts=True):
     for r in rows:
         art = str(r.get('article', '')).strip()
         if not art: continue
-        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,source,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
+        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,category,tnved,applicability,source,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
               name=COALESCE(NULLIF(excluded.name,''),products.name),
               price=CASE WHEN excluded.price>0 THEN excluded.price ELSE products.price END,
@@ -282,11 +294,15 @@ def import_rows(conn, rows, source, rebuild_fts=True):
               stock=excluded.stock, sales=excluded.sales, weight=excluded.weight, length=excluded.length,
               width=excluded.width, height=excluded.height,
               oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE products.oe_numbers END,
+              category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE products.category END,
+              tnved=CASE WHEN excluded.tnved<>'' THEN excluded.tnved ELSE products.tnved END,
+              applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE products.applicability END,
               source=excluded.source, updated_at=datetime("now")''',
             (art, str(r.get('brand', '')).strip(), str(r.get('name', '')),
              num(r.get('price')), num(r.get('cost')), num(r.get('stock')), num(r.get('sales')), num(r.get('weight')),
              num(r.get('length')), num(r.get('width')), num(r.get('height')),
-             str(r.get('oe_numbers', '')), source))
+             str(r.get('oe_numbers', '')), str(r.get('category', '')), str(r.get('tnved', '')),
+             str(r.get('applicability', '')), source))
         n += 1
     if rebuild_fts:
         conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
@@ -475,6 +491,126 @@ def enrich_oe(conn):
     log_api(conn, 'enrichOe', 'sqlite', 'ok', f'групп {multi_groups}, заполнено {filled}')
     return {'groups': multi_groups, 'filled': filled,
             'oe_links': conn.execute('SELECT COUNT(*) c FROM oe_links').fetchone()['c']}
+
+# ---------------- полное обогащение (Каталог V на движке, v12.9.110) ----------------
+def import_donors(conn, rows, source):
+    """Реестр доноров (аналог HVC.parts): записи справочных файлов, по ключу
+       Артикул+Бренд, несколько источников на ключ допустимы."""
+    n = 0
+    for r in rows:
+        art = str(r.get('article', '')).strip()
+        if not art: continue
+        conn.execute('''INSERT INTO donors(article,brand,source,name,category,tnved,applicability,
+            weight,length,width,height,oe_numbers) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(article,brand,source) DO UPDATE SET
+              name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE donors.name END,
+              category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE donors.category END,
+              tnved=CASE WHEN excluded.tnved<>'' THEN excluded.tnved ELSE donors.tnved END,
+              applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE donors.applicability END,
+              weight=excluded.weight, length=excluded.length, width=excluded.width, height=excluded.height,
+              oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END''',
+            (art, str(r.get('brand', '')).strip(), source, str(r.get('name', '')), str(r.get('category', '')),
+             str(r.get('tnved', '')), str(r.get('applicability', '')), num(r.get('weight')), num(r.get('length')),
+             num(r.get('width')), num(r.get('height')), str(r.get('oe_numbers', ''))))
+        n += 1
+    conn.commit()
+    return n
+
+def _dims_of(r):
+    return (num(r['length']), num(r['width']), num(r['height']), num(r['weight']))
+
+def enrich_full(conn, cat_mode='artbrand'):
+    """Полное обогащение по правилам приложения (HVC):
+       - доноры: та же пара Артикул+Бренд (реестр donors) и транзитивная OE-группа;
+       - категория/ТН ВЭД: по умолчанию только Артикул+Бренд (cat_mode='artbrand');
+         по OE (cat_mode='oe') — только при единогласии доноров, конфликт = пропуск;
+       - название/применимость: Артикул+Бренд, иначе самое частое в OE-группе;
+       - габариты: цельный комплект той же пары, иначе меньший комплект OE-группы;
+         совместимость с уже заполненными обязательна, заполняются только пустые;
+       - аналоги: артикулы OE-группы (как enrich_oe). Заполненные поля не трогаем."""
+    prods = [dict(r) for r in conn.execute(
+        'SELECT article,brand,name,category,tnved,applicability,weight,length,width,height,oe_numbers,analog_list FROM products')]
+    donors = [dict(r) for r in conn.execute(
+        'SELECT article,brand,name,category,tnved,applicability,weight,length,width,height,oe_numbers FROM donors')]
+    donors_by_key = {}
+    for d in donors: donors_by_key.setdefault((d['article'], d['brand']), []).append(d)
+    # OE-граф: продукты и доноры в одних группах (узел = ('p'|'d', article, brand, idx))
+    nodes = [('p', i) for i in range(len(prods))] + [('d', i) for i in range(len(donors))]
+    parent = {n: n for n in nodes}
+    def find(x):
+        while parent[x] != x: parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb: parent[rb] = ra
+    oe_map = {}
+    for kind, i in nodes:
+        r = prods[i] if kind == 'p' else donors[i]
+        for oe in _oe_codes(r['oe_numbers']): oe_map.setdefault(oe, []).append((kind, i))
+    for lst in oe_map.values():
+        for other in lst[1:]: union(lst[0], other)
+    groups = {}
+    for n in nodes: groups.setdefault(find(n), []).append(n)
+    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'dims': 0, 'analog_list': 0}
+    conflicts = {'category': 0, 'tnved': 0}
+    def unanimous(values):
+        vals = [str(v).strip() for v in values if str(v or '').strip()]
+        uniq = set(vals)
+        return (vals[0] if len(uniq) == 1 else None), len(uniq) > 1
+    def frequent(values):
+        vals = [str(v).strip() for v in values if str(v or '').strip()]
+        return max(set(vals), key=vals.count) if vals else ''
+    for members in groups.values():
+        group_prods = [prods[i] for kind, i in members if kind == 'p']
+        if not group_prods: continue
+        group_donors = [donors[i] for kind, i in members if kind == 'd']
+        for p in group_prods:
+            pair = donors_by_key.get((p['article'], p['brand']), [])
+            updates = {}
+            if not str(p['name'] or '').strip():
+                v = frequent([d['name'] for d in pair]) or frequent(
+                    [d['name'] for d in group_donors] + [g['name'] for g in group_prods])
+                if v: updates['name'] = v; filled['name'] += 1
+            if not str(p['applicability'] or '').strip():
+                v = frequent([d['applicability'] for d in pair]) or frequent(
+                    [d['applicability'] for d in group_donors] + [g['applicability'] for g in group_prods])
+                if v: updates['applicability'] = v; filled['applicability'] += 1
+            for field in ('category', 'tnved'):
+                if str(p[field] or '').strip(): continue
+                v, conf = unanimous([d[field] for d in pair])
+                if conf: conflicts[field] += 1
+                if not v and cat_mode in ('oe', 'auto'):
+                    v, conf2 = unanimous([d[field] for d in group_donors] + [g[field] for g in group_prods if g is not p])
+                    if conf2: conflicts[field] += 1
+                if v: updates[field] = v; filled[field] += 1
+            cur = _dims_of(p)
+            if not all(v > 0 for v in cur):
+                cands = []
+                for d in pair + group_donors + group_prods:
+                    t = _dims_of(d)
+                    if all(v > 0 for v in t): cands.append(t)
+                # та же пара — приоритет; далее меньший объём комплекта
+                pair_cands = [_dims_of(d) for d in pair if all(v > 0 for v in _dims_of(d))]
+                pool = pair_cands + sorted(cands, key=lambda t: t[0] * t[1] * t[2])
+                for t in pool:
+                    if all(not (c > 0) or c == tv for c, tv in zip(cur, t)):  # совместимость с заполненным
+                        for i, f in enumerate(('length', 'width', 'height', 'weight')):
+                            if not cur[i] > 0: updates[f] = t[i]
+                        filled['dims'] += 1
+                        break
+            others = sorted({g['article'] for g in group_prods if g['article'] != p['article']})
+            if others:
+                cur_set = {x.strip() for x in str(p['analog_list'] or '').split(',') if x.strip()}
+                merged = sorted(cur_set | set(others))
+                if merged != sorted(cur_set):
+                    updates['analog_list'] = ', '.join(merged); filled['analog_list'] += 1
+            if updates:
+                sets = ', '.join(f'{k}=?' for k in updates)
+                conn.execute(f'UPDATE products SET {sets} WHERE article=? AND brand=?',
+                             (*updates.values(), p['article'], p['brand']))
+    conn.commit()
+    log_api(conn, 'enrichFull', 'sqlite', 'ok', f'cat_mode={cat_mode}, заполнено {filled}, конфликты {conflicts}')
+    return {'cat_mode': cat_mode, 'filled': filled, 'conflicts': conflicts, 'donors': len(donors)}
 
 # ---------------- очередь отправки на площадки ----------------
 def enqueue(conn, kind, marketplace, items):
@@ -745,7 +881,7 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
-            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
             total = conn.execute('SELECT COUNT(*) c FROM products').fetchone()['c']
             return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
         if self.path.startswith('/catalog/results'):
@@ -784,6 +920,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'ok': True, 'imported': n})
             if self.path == '/catalog/enrich':
                 return self._send(200, {'ok': True, **enrich_oe(conn)})
+            if self.path == '/donors/import':
+                n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
+                return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/catalog/enrich-full':
+                return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand')})
             if self.path == '/catalog/recalc':
                 return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {})})
             if self.path.startswith('/catalog/results'):

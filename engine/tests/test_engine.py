@@ -170,6 +170,50 @@ class TestExport(unittest.TestCase):
         self.assertIn('Фильтр &amp; Co', sheet)  # XML-экранирование
         self.assertIn('<v>700.0</v>', sheet)       # числа — числами, не строками
 
+class TestEnrichFull(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def _prod(self, art):
+        return self.conn.execute('SELECT name,category,tnved,applicability,length,weight FROM products WHERE article=?', (art,)).fetchone()
+    def test_artbrand_donor_fills_and_conflict_skips(self):
+        E.import_rows(self.conn, [{'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 400, 'oe_numbers': 'OE1'}], 'test')
+        E.import_donors(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'name': 'Фильтр масляный', 'category': 'Фильтры',
+             'tnved': '8421230000', 'weight': 0.3, 'length': 10, 'width': 6, 'height': 6}], 'catalogV')
+        E.import_donors(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'category': 'Двигатель'}], 'other')  # конфликт категории
+        res = E.enrich_full(self.conn)
+        row = self._prod('F100')
+        self.assertEqual(row[0], 'Фильтр масляный')   # название от пары
+        self.assertEqual(row[1], '')                   # категория: конфликт доноров — не берём
+        self.assertEqual(row[2], '8421230000')         # ТН ВЭД от пары (конфликта нет)
+        self.assertEqual(row[4], 10)                   # габариты цельным комплектом пары
+        self.assertEqual(row[5], 0.3)
+        self.assertEqual(res['conflicts']['category'], 1)
+    def test_oe_category_only_in_oe_mode_and_unanimous(self):
+        E.import_rows(self.conn, [
+            {'article': 'F200', 'brand': 'MANN', 'price': 800, 'cost': 400, 'oe_numbers': 'OE9'},
+            {'article': 'F300', 'brand': 'MAHLE', 'price': 900, 'cost': 500, 'oe_numbers': 'OE9', 'category': 'Фильтры'}], 'test')
+        E.enrich_full(self.conn)  # artbrand по умолчанию: OE-категорию НЕ берём
+        self.assertEqual(self._prod('F200')[1], '')
+        E.enrich_full(self.conn, 'oe')  # oe-режим: доноры единогласны — берём
+        self.assertEqual(self._prod('F200')[1], 'Фильтры')
+    def test_dims_smallest_and_compatible(self):
+        E.import_rows(self.conn, [
+            {'article': 'F1', 'brand': 'B', 'price': 100, 'cost': 50, 'oe_numbers': 'OE5', 'length': 10},
+            {'article': 'F2', 'brand': 'C', 'price': 100, 'cost': 50, 'oe_numbers': 'OE5',
+             'weight': 1, 'length': 10, 'width': 5, 'height': 5},
+            {'article': 'F3', 'brand': 'D', 'price': 100, 'cost': 50, 'oe_numbers': 'OE5',
+             'weight': 2, 'length': 20, 'width': 10, 'height': 10}], 'test')
+        E.enrich_full(self.conn, 'oe')
+        row = self._prod('F1')
+        self.assertEqual(row[4], 10)   # длина своя не тронута (совместима с меньшим комплектом)
+        self.assertEqual(row[5], 1)    # вес — из меньшего комплекта группы (F2, не F3)
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib
