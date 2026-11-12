@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.119-pyengine-15'
+VERSION = '12.9.123-pyengine-16'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -1333,6 +1333,10 @@ class Handler(BaseHTTPRequestHandler):
             if body is not None:
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
+                # v12.9.123: страницу приложения нельзя кэшировать — иначе после
+                # обновления файлов браузер показывает старую копию (был случай:
+                # баннер «SheetJS не загрузился» на уже исправленной версии).
+                self.send_header('Cache-Control', 'no-store')
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers(); self.wfile.write(body)
                 return

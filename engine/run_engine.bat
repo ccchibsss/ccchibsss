@@ -1,5 +1,5 @@
 @echo off
-chcp 6501 >nul
+chcp 6501 >nul 2>&1
 title UC PyEngine
 cd /d %~dp0
 where python >nul 2>nul

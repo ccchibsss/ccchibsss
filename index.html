@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.122-client+token-autocheck';
+const APP_VERSION = '12.9.123-client+libcheck-fix';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -46824,8 +46824,8 @@ window.addEventListener('DOMContentLoaded', () => {
     if (missing.length || optMissing.length) {
       const m = document.createElement('div');
       m.style.cssText = 'position:fixed;z-index:200;left:50%;top:12px;transform:translateX(-50%);background:#2b2211;border:1px solid #7a5a12;color:#ffd98a;border-radius:11px;padding:10px 14px;font-size:12px;max-width:640px';
-      m.innerHTML = '<b>Не загрузились CDN-библиотеки:</b> ' + missing.concat(optMissing.map(o => o + ' (опц.)')).join(', ') +
-        '. Проверьте сеть/VPN и обновите страницу.' + (missing.length ? ' Без Dexie/SheetJS старт невозможен.' : ' Графики или XLSX-экспорт могут быть недоступны (остальное работает).');
+      m.innerHTML = '<b>Не загрузились встроенные библиотеки:</b> ' + missing.concat(optMissing.map(o => o + ' (опц.)')).join(', ') +
+        '. Библиотеки встроены в index.html, сеть не нужна — значит, открыта старая копия страницы или файл index.html не соответствует версии движка. Закройте все вкладки приложения, перезапустите движок и обновите страницу (Ctrl+F5).' + (missing.length ? ' Без Dexie/SheetJS старт невозможен.' : ' Графики или XLSX-экспорт могут быть недоступны (остальное работает).');
       document.body.appendChild(m);
     }
     if (missing.length) return; // без базы и парсера стартовать бессмысленно
