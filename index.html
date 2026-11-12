@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.121-client+engine-embedded';
+const APP_VERSION = '12.9.122-client+token-autocheck';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26546,18 +26546,46 @@ const PyEngine = {
     try { const r = await fetch(this.base() + '/health', { signal: AbortSignal.timeout ? AbortSignal.timeout(1500) : undefined }); const j = await r.json(); return !!j.ok; }
     catch (e) { return false; }
   },
+  async verifyAuth() {
+    /* /health публичный и токен не проверяет — настоящая проверка это
+       авторизованный запрос: 200 — токен принят, 401 — токен не тот. */
+    try {
+      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 2500);
+      try {
+        const r = await fetch(this.base() + '/catalog/results?offset=0&limit=1',
+          { signal: ctl.signal, headers: { 'X-UC-Token': this.token() } });
+        if (r.status === 401) return 'bad-token';
+        return r.ok ? 'ok' : 'down';
+      } finally { clearTimeout(to); }
+    } catch (e) { return 'down'; }
+  },
   async refreshStatus() {
     const el = $('#pyEngineStatus'); if (!el) return;
-    const ok = await this.health();
-    el.textContent = ok ? 'Python: подключён · 127.0.0.1:8765' : 'Python: не запущен (встроенный расчёт)';
-    el.style.color = ok ? 'var(--ok,#2fd6a3)' : 'var(--mut)';
-    return ok;
+    if (!await this.health()) {
+      el.textContent = 'Python: не запущен (встроенный расчёт)';
+      el.style.color = 'var(--mut)';
+      return false;
+    }
+    const v = await this.verifyAuth();
+    if (v === 'ok') { el.textContent = 'Python: подключён · 127.0.0.1:8765'; el.style.color = 'var(--ok,#2fd6a3)'; return true; }
+    el.textContent = 'Python: запущен, но токен не принят — задайте токен кнопкой «Токен Python»';
+    el.style.color = 'var(--amber,#f7b32b)';
+    return false;
   },
-  askToken() {
+  async askToken() {
     const t = prompt('Токен локального Python-движка (файл engine/engine_data/token.txt):', this.token());
     if (t === null) return;
     lsSet('uc.pyToken', t.trim());
-    Toast.ok('Токен сохранён', 'Проверьте статус движка кнопкой «Python: проверить расчёт».');
+    // v12.9.122: статус проверяется автоматически сразу после сохранения
+    if (!await this.health()) {
+      Toast.warn('Токен сохранён, но движок не запущен',
+        'Запустите движок ярлыком «UNIT CONTROL» — проверка пройдёт при следующем открытии. Приложение считает встроенным расчётом.');
+      this.refreshStatus(); return;
+    }
+    const v = await this.verifyAuth();
+    if (v === 'ok') Toast.ok('Токен верный — движок подключён', 'Статус автоматически проверен: движок на 127.0.0.1:8765 принял токен.');
+    else Toast.warn('Движок запущен, но токен не принят',
+      'Сверьте значение с файлом engine/engine_data/token.txt и введите ещё раз кнопкой «Токен Python».');
     this.refreshStatus();
   },
   _settingsSnapshot() {
