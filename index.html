@@ -7153,6 +7153,9 @@ html { -webkit-text-size-adjust: 100%; }
     <button type="button" class="btn" id="btnDiskImport" title="Прайс и кросс-листы пишутся потоком сразу в хранилище приложения (IndexedDB), файл целиком в память не поднимается. CSV или XLSX (через воркер), каталог заменяется целиком."><i class="fa-solid fa-hard-drive"></i> Прайс + кроссы — сразу в приложение</button>
     <button type="button" class="btn gh" id="btnSettingsSnapshot" title="Скачать снимок ключевых настроек (без секретов) в формате проекта arena-project — для сверки и переноса между проектами"><i class="fa-solid fa-camera"></i> Снимок настроек</button>
     <button type="button" class="btn gh" id="btnReviewExport" title="Сформировать очередь ручной проверки (конфликты габаритов по OE, висячие кроссы, похожие артикулы) и скачать CSV: заполните колонку «Решение» и загрузите обратно соседней кнопкой"><i class="fa-solid fa-list-check"></i> Очередь проверки ↓</button>
+    <button type="button" class="btn gh" id="btnPyCheck" title="Независимая проверка юнит-экономики локальным Python-движком (SQLite): движок пересчитывает текущий фильтр своим кодом, приложение сверяет прибыль с браузерным расчётом. Нужен запущенный UC-движок (engine/run_engine.bat)"><i class="fa-brands fa-python"></i> Python: проверить расчёт</button>
+    <button type="button" class="btn gh" id="btnPyToken" title="Задать токен доступа к локальному Python-движку (файл engine/engine_data/token.txt)"><i class="fa-solid fa-key"></i> Токен Python</button>
+    <span class="hint" id="pyEngineStatus" title="Статус локального Python-движка">Python: не проверен</span>
     <button type="button" class="btn gh" id="btnReviewImport" title="Загрузить CSV очереди проверки с заполненными решениями: принятые пары запомнятся и применятся, отклонённые больше не предложатся"><i class="fa-solid fa-file-import"></i> Решения проверки ↑</button>
     <button type="button" class="btn ok" id="btnExportOzon" style="font-weight:700" title="Рабочая выгрузка Ozon; актуальный шаблон проверьте в кабинете"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON</button>
     <button type="button" class="btn ok" id="btnPriceListUpsert" title="Обновление сумм (цен, себестоимости) и остатков по связке Артикул + Бренд с добавлением новых позиций"><i class="fa-solid fa-file-invoice-dollar"></i> Прайс-лист (Артикул+Бренд)</button>
@@ -13562,7 +13565,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.100-client+audit-fixes-all';
+const APP_VERSION = '12.9.101-client+pyengine';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26148,6 +26151,9 @@ const UI = {
     const _bdi = $('#btnDiskImport'); if (_bdi) _bdi.onclick = () => DiskImport.pick();
     const _bss = $('#btnSettingsSnapshot'); if (_bss) _bss.onclick = () => SettingsSnapshot.download();
     const _bre = $('#btnReviewExport'); if (_bre) _bre.onclick = () => ReviewQueue.exportCsv();
+    const _bpc = $('#btnPyCheck'); if (_bpc) _bpc.onclick = () => PyEngine.checkEconomics();
+    const _bpt = $('#btnPyToken'); if (_bpt) _bpt.onclick = () => PyEngine.askToken();
+    PyEngine.refreshStatus();
     const _bri = $('#btnReviewImport'); if (_bri) _bri.onclick = () => ReviewQueue.pickDecisions();
     $('#btnMinStock').onclick = () => MinStock.open();
     $('#btnCols').onclick = () => ColPicker.open();
@@ -26472,6 +26478,88 @@ const SettingsSnapshot = {
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
     Toast.ok('Снимок настроек скачан', 'settings.snapshot.json — без секретов; можно положить в arena-project вместо прежнего снимка');
+  }
+};
+
+/* ================== ЛОКАЛЬНЫЙ PYTHON-ДВИЖОК (v12.9.101) ==================
+   Независимый второй контур: локальный UC PyEngine (engine/uc_engine.py,
+   Python+SQLite) пересчитывает экономику своим кодом — приложение сверяет.
+   Движок недоступен — приложение работает как раньше (встроенный расчёт). */
+const PyEngine = {
+  base() { return String((S.settings && S.settings.pyEngineUrl) || 'http://127.0.0.1:8765').replace(/\/$/, ''); },
+  token() { return lsGet('uc.pyToken') || ''; },
+  async _fetch(path, opts) {
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), (opts && opts.timeout) || 4000);
+    try {
+      const r = await fetch(this.base() + path, {
+        ...(opts || {}), signal: ctl.signal,
+        headers: { 'Content-Type': 'application/json', 'X-UC-Token': this.token(), ...((opts && opts.headers) || {}) }
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+      return j;
+    } finally { clearTimeout(to); }
+  },
+  async health() {
+    try { const r = await fetch(this.base() + '/health', { signal: AbortSignal.timeout ? AbortSignal.timeout(1500) : undefined }); const j = await r.json(); return !!j.ok; }
+    catch (e) { return false; }
+  },
+  async refreshStatus() {
+    const el = $('#pyEngineStatus'); if (!el) return;
+    const ok = await this.health();
+    el.textContent = ok ? 'Python: подключён · 127.0.0.1:8765' : 'Python: не запущен (встроенный расчёт)';
+    el.style.color = ok ? 'var(--ok,#2fd6a3)' : 'var(--mut)';
+    return ok;
+  },
+  askToken() {
+    const t = prompt('Токен локального Python-движка (файл engine/engine_data/token.txt):', this.token());
+    if (t === null) return;
+    lsSet('uc.pyToken', t.trim());
+    Toast.ok('Токен сохранён', 'Проверьте статус движка кнопкой «Python: проверить расчёт».');
+    this.refreshStatus();
+  },
+  _settingsSnapshot() {
+    const cfg = S.settings || {};
+    return {
+      commission_pct: num(cfg.ozonCommissionPct == null ? 14 : cfg.ozonCommissionPct),
+      transfer_pct: num(cfg.ozonAcquiringPct == null ? 1.5 : cfg.ozonAcquiringPct),
+      last_mile: num(cfg.ozonLastMileFixed == null ? 25 : cfg.ozonLastMileFixed),
+      handover: 10, pack: num(cfg.fbsPack == null ? 18 : cfg.fbsPack), transit: num(cfg.fbsPackTransit == null ? 30 : cfg.fbsPackTransit),
+      tax_regime: cfg.taxRegime || 'usn_income_6', tax_pct: num(cfg.taxPct == null ? 6 : cfg.taxPct),
+      tax_osno_share: num(cfg.taxOsnoEligibleSharePct || 0),
+      target_margin: num(cfg.tgtMargin == null ? 20 : cfg.tgtMargin)
+    };
+  },
+  async checkEconomics() {
+    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Запустите engine/run_engine.bat (или UC-движок.exe) и задайте токен кнопкой «Токен Python». Приложение продолжает считать встроенным расчётом.'); this.refreshStatus(); return; }
+    const rows = (typeof currentViewRows === 'function' ? currentViewRows() : S.rows).slice(0, 5000);
+    if (!rows.length) { Toast.warn('Нет строк', 'Текущий фильтр пуст — нечего проверять.'); return; }
+    await withProgress('Python: независимый пересчёт', fmt(rows.length) + ' строк вторым контуром', async () => {
+      const payload = rows.map(p => ({ article: p.article, price: num(p.effPrice || p.price), cost: num(p.cost),
+        sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width), height: num(p.height), volume: num(p.volume) }));
+      const j = await this._fetch('/calc/batch', { method: 'POST', body: JSON.stringify({ settings: this._settingsSnapshot(), rows: payload }), timeout: 120000 });
+      const byArt = new Map((j.results || []).map(r => [r.article, r]));
+      let checked = 0, maxDiff = 0, worst = '';
+      for (const p of rows) {
+        const r = byArt.get(p.article); if (!r) continue;
+        checked++;
+        const d = Math.abs(num(r.profit) - num(p.netProfit));
+        if (d > maxDiff) { maxDiff = d; worst = p.article; }
+      }
+      const report = await this._fetch('/report/summary').catch(() => null);
+      Toast[maxDiff <= 0.011 ? 'ok' : 'warn']('Сверка с Python-движком завершена',
+        'проверено ' + fmt(checked) + ' строк · максимальное расхождение прибыли ' + fmt(maxDiff, 2) + ' ₽' +
+        (worst && maxDiff > 0.011 ? ' (' + esc(worst) + ')' : '') +
+        (report ? ' · в SQLite каталога движка: ' + fmt(report.products || 0) + ' SKU' : '') +
+        (maxDiff > 0.011 ? '. Расхождение ожидаемо, если настройки движка отличаются от приложения (возвраты/хранение задаются отдельно).' : ' — расчёты совпадают.'));
+    });
+  },
+  async enqueuePrices(items) {
+    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Очередь отправки цен работает через локальный движок.'); return 0; }
+    const j = await this._fetch('/outbox', { method: 'POST', body: JSON.stringify({ kind: 'prices', marketplace: 'OZON', items }) });
+    Toast.ok('Цены поставлены в очередь движка', fmt(j.queued || 0) + ' заданий. По умолчанию dry-run: реальная отправка выключена в настройках движка.');
+    return j.queued || 0;
   }
 };
 
