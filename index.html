@@ -7154,6 +7154,9 @@ html { -webkit-text-size-adjust: 100%; }
     <button type="button" class="btn gh" id="btnSettingsSnapshot" title="Скачать снимок ключевых настроек (без секретов) в формате проекта arena-project — для сверки и переноса между проектами"><i class="fa-solid fa-camera"></i> Снимок настроек</button>
     <button type="button" class="btn gh" id="btnReviewExport" title="Сформировать очередь ручной проверки (конфликты габаритов по OE, висячие кроссы, похожие артикулы) и скачать CSV: заполните колонку «Решение» и загрузите обратно соседней кнопкой"><i class="fa-solid fa-list-check"></i> Очередь проверки ↓</button>
     <button type="button" class="btn gh" id="btnPyCheck" title="Независимая проверка юнит-экономики локальным Python-движком (SQLite): движок пересчитывает текущий фильтр своим кодом, приложение сверяет прибыль с браузерным расчётом. Нужен запущенный UC-движок (engine/run_engine.bat)"><i class="fa-brands fa-python"></i> Python: проверить расчёт</button>
+    <button type="button" class="btn gh" id="btnPyRecalc" title="Полный пересчёт каталога на локальном Python-движке: строки уходят в SQLite, экономика считается там, приложение применяет готовый результат. Вкладка при этом не нагружается"><i class="fa-brands fa-python"></i> Python: пересчитать каталог</button>
+    <button type="button" class="btn gh" id="btnPyImport" title="Импорт файла целиком на Python-движке: файл разбирает движок (CSV/XLSX/ZIP), а не браузер; строки попадают в SQLite каталога движка и подмешиваются в таблицу только в пустые поля"><i class="fa-brands fa-python"></i> Python: импорт файла</button>
+    <button type="button" class="btn gh" id="btnPyEnrich" title="Обогащение по OE на Python-движке: транзитивные OE-группы в SQLite, заполняются только пустые поля (название, габариты, аналоги), результат подмешивается в таблицу"><i class="fa-brands fa-python"></i> Python: обогатить (OE)</button>
     <button type="button" class="btn gh" id="btnPyToken" title="Задать токен доступа к локальному Python-движку (файл engine/engine_data/token.txt)"><i class="fa-solid fa-key"></i> Токен Python</button>
     <span class="hint" id="pyEngineStatus" title="Статус локального Python-движка">Python: не проверен</span>
     <button type="button" class="btn gh" id="btnReviewImport" title="Загрузить CSV очереди проверки с заполненными решениями: принятые пары запомнятся и применятся, отклонённые больше не предложатся"><i class="fa-solid fa-file-import"></i> Решения проверки ↑</button>
@@ -13565,7 +13568,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.103-client+pyengine-ux';
+const APP_VERSION = '12.9.105-client+pyengine-import-enrich';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26152,6 +26155,9 @@ const UI = {
     const _bss = $('#btnSettingsSnapshot'); if (_bss) _bss.onclick = () => SettingsSnapshot.download();
     const _bre = $('#btnReviewExport'); if (_bre) _bre.onclick = () => ReviewQueue.exportCsv();
     const _bpc = $('#btnPyCheck'); if (_bpc) _bpc.onclick = () => PyEngine.checkEconomics();
+    const _bpr = $('#btnPyRecalc'); if (_bpr) _bpr.onclick = () => PyEngine.recalcCatalog();
+    const _bpi = $('#btnPyImport'); if (_bpi) _bpi.onclick = () => PyEngine.importFile();
+    const _bpe = $('#btnPyEnrich'); if (_bpe) _bpe.onclick = () => PyEngine.enrichOe();
     const _bpt = $('#btnPyToken'); if (_bpt) _bpt.onclick = () => PyEngine.askToken();
     PyEngine.refreshStatus();
     const _bri = $('#btnReviewImport'); if (_bri) _bri.onclick = () => ReviewQueue.pickDecisions();
@@ -26559,6 +26565,127 @@ const PyEngine = {
         (worst && maxDiff > 0.011 ? ' (' + esc(worst) + ')' : '') +
         (report ? ' · в SQLite каталога движка: ' + fmt(report.products || 0) + ' SKU' : '') +
         (maxDiff > 0.011 ? '. Расхождение ожидаемо, если настройки движка отличаются от приложения (возвраты/хранение задаются отдельно).' : ' — расчёты совпадают.'));
+    });
+  },
+  async recalcCatalog() {
+    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Полный пересчёт на движке недоступен — приложение считает встроенным расчётом. Запустите движок ярлыком «UNIT CONTROL».'); this.refreshStatus(); return; }
+    if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала загрузите прайс.'); return; }
+    await withProgress('Python: пересчёт каталога', 'строки → SQLite → экономика на движке', async (prog) => {
+      const CH = 5000;
+      const payloadOf = p => ({ article: p.article, brand: p.brand || '', name: p.name || '', price: num(p.price), cost: num(p.cost),
+        stock: num(p.stock), sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width),
+        height: num(p.height), volume: num(p.volume), oe_numbers: p.oe_numbers || '' });
+      for (let i = 0; i < S.rows.length; i += CH) {
+        const chunk = S.rows.slice(i, i + CH);
+        await this._fetch('/import/rows', { method: 'POST', timeout: 120000,
+          body: JSON.stringify({ rows: chunk.map(payloadOf), source: 'app-catalog', final: i + CH >= S.rows.length }) });
+        if (prog) prog('отправка в SQLite: ' + fmt(Math.min(i + CH, S.rows.length)) + ' из ' + fmt(S.rows.length));
+      }
+      const st = this._settingsSnapshot();
+      const rec = await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: st }) });
+      if (prog) prog('применение результата: ' + fmt(rec.recalculated || 0) + ' SKU посчитано на движке');
+      let applied = 0;
+      const byKey = new Map();
+      for (let off = 0; ; off += CH) {
+        const page = await this._fetch('/catalog/results?offset=' + off + '&limit=' + CH, { timeout: 120000 });
+        for (const r of page.rows || []) byKey.set(normArticle(r.article) + '|' + normArticle(r.brand), r);
+        if (!page.rows || !page.rows.length || off + CH >= (page.total || 0)) break;
+      }
+      for (const p of S.rows) {
+        const r = byKey.get(normArticle(p.article) + '|' + normArticle(p.brand || ''));
+        if (!r) continue;
+        p.netProfit = num(r.profit); p.margin = num(r.margin); p.roi = num(r.roi);
+        p.breakEvenPrice = num(r.break_even); p.tgtPrice = num(r.target);
+        p.pyEngineCalc = '12.9.104';
+        applied++;
+      }
+      bumpVersion();
+      try { Table.paint(); } catch (e) { }
+      Toast.ok('Каталог пересчитан на Python-движке',
+        'применено к ' + fmt(applied) + ' SKU из ' + fmt(S.rows.length) +
+        ' · прибыльных по движку: ' + fmt(rec.profitable || 0) +
+        ' · средняя прибыль ' + fmt(rec.avg_profit || 0, 2) + ' ₽. Расчёт выполнен в SQLite, вкладка не нагружалась.');
+    });
+  },
+  async _pullProducts() {
+    const out = [];
+    for (let off = 0; ; off += 5000) {
+      const page = await this._fetch('/catalog/products?offset=' + off + '&limit=5000', { timeout: 120000 });
+      out.push(...(page.rows || []));
+      if (!page.rows || !page.rows.length || off + 5000 >= (page.total || 0)) break;
+    }
+    return out;
+  },
+  _mergeProducts(products, onlyEmpty) {
+    const byKey = new Map(S.rows.map(p => [normArticle(p.article) + '|' + normArticle(p.brand || ''), p]));
+    let touched = 0, added = 0;
+    for (const r of products) {
+      const p = byKey.get(normArticle(r.article) + '|' + normArticle(r.brand || ''));
+      if (!p) {
+        if (!onlyEmpty) {
+          S.rows.push({ article: r.article, brand: r.brand || '', name: r.name || '', price: num(r.price), cost: num(r.cost),
+            stock: num(r.stock), sales: num(r.sales), weight: num(r.weight), length: num(r.length), width: num(r.width),
+            height: num(r.height), volume: num(r.volume), oe_numbers: r.oe_numbers || '', analog_list: r.analog_list || '' });
+          added++;
+        }
+        continue;
+      }
+      let ch = false;
+      for (const f of ['name', 'oe_numbers', 'analog_list']) {
+        if (!String(p[f] || '').trim() && String(r[f] || '').trim()) { p[f] = r[f]; ch = true; }
+      }
+      for (const f of ['weight', 'length', 'width', 'height', 'volume']) {
+        if (!(num(p[f]) > 0) && num(r[f]) > 0) { p[f] = num(r[f]); ch = true; }
+      }
+      if (ch) touched++;
+    }
+    return { touched, added };
+  },
+  importFile() {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.csv,.xlsx,.zip';
+    inp.onchange = async () => {
+      const f = inp.files && inp.files[0]; if (!f) return;
+      if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Импорт файла на движке недоступен — используйте обычный импорт приложения.'); return; }
+      await withProgress('Python: импорт файла', f.name, async () => {
+        const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 600000);
+        try {
+          const r = await fetch(this.base() + '/import/file', { method: 'POST', signal: ctl.signal,
+            headers: { 'X-UC-Token': this.token(), 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream' }, body: f });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+          const products = await this._pullProducts();
+          const m = this._mergeProducts(products, false);
+          bumpVersion();
+          try { await runPipeline(true, { skipEconomics: true, persist: false }); } catch (e) { try { Table.paint(); } catch (e2) { } }
+          Toast.ok('Файл импортирован на Python-движке',
+            f.name + ': строк в движок ' + fmt(j.imported || 0) + ' · в таблицу добавлено ' + fmt(m.added) + ', дополнено ' + fmt(m.touched) + '. Файл разбирал движок, не браузер.');
+        } finally { clearTimeout(to); }
+      });
+    };
+    inp.click();
+  },
+  async enrichOe() {
+    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Обогащение на движке недоступно — используйте обогащение приложения.'); return; }
+    await withProgress('Python: обогащение по OE', 'группы и заполнение пустых полей в SQLite', async () => {
+      /* актуальный каталог — в движок, затем обогащение и подмешивание обратно */
+      const CH = 5000;
+      const payloadOf = p => ({ article: p.article, brand: p.brand || '', name: p.name || '', price: num(p.price), cost: num(p.cost),
+        stock: num(p.stock), sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width),
+        height: num(p.height), volume: num(p.volume), oe_numbers: p.oe_numbers || '', analog_list: p.analog_list || '' });
+      for (let i = 0; i < S.rows.length; i += CH) {
+        await this._fetch('/import/rows', { method: 'POST', timeout: 120000,
+          body: JSON.stringify({ rows: S.rows.slice(i, i + CH).map(payloadOf), source: 'app-enrich', final: i + CH >= S.rows.length }) });
+      }
+      const res = await this._fetch('/catalog/enrich', { method: 'POST', timeout: 600000, body: '{}' });
+      const products = await this._pullProducts();
+      const m = this._mergeProducts(products, true);
+      bumpVersion();
+      try { Table.paint(); } catch (e) { }
+      Toast.ok('Обогащение по OE выполнено на движке',
+        'OE-групп: ' + fmt(res.groups || 0) + ' · заполнено названий ' + fmt((res.filled || {}).name || 0) +
+        ', габаритов ' + fmt((res.filled || {}).dims || 0) + ', аналогов ' + fmt((res.filled || {}).analog_list || 0) +
+        ' · в таблицу подмешано строк: ' + fmt(m.touched) + '. Заполнялись только пустые поля.');
     });
   },
   async enqueuePrices(items) {

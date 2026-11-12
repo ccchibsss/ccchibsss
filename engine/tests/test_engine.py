@@ -75,3 +75,83 @@ class TestAppServing(unittest.TestCase):
             self.skipTest('index.html не найден')
         self.assertIn(b'__UC_PY_TOKEN__', html)
         self.assertIn(b'</head>', html)
+
+
+class TestRecalc(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_recalc_catalog(self):
+        st = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10,
+              'pack': 18, 'transit': 30, 'returns_per_unit': 2.17,
+              'tax_regime': 'usn_income_6', 'tax_pct': 6}
+        E.import_rows(self.conn, [
+            {'article': 'DEMO-CLT-001', 'brand': 'X', 'price': 18700, 'cost': 11200, 'sales': 10},
+            {'article': 'DEMO-FLT-001', 'brand': 'X', 'price': 890, 'cost': 410, 'sales': 10}], 'test')
+        res = E.recalc_catalog(self.conn, st)
+        self.assertEqual(res['recalculated'], 2)
+        row = self.conn.execute("SELECT profit, break_even FROM eco_results WHERE article='DEMO-CLT-001'").fetchone()
+        self.assertAlmostEqual(row[0], 3394.33, delta=0.011)
+        self.assertEqual(row[1], 14377)
+
+class TestImportEnrich(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_import_file_bytes(self):
+        res = E.import_file_bytes(self.conn, 'price.csv',
+            'Артикул;Бренд;Цена\nF100;BOSCH;700\n'.encode('utf-8'))
+        self.assertEqual(res['imported'], 1)
+    def test_http_import_file_no_hang(self):
+        # регрессия v12.9.105: do_POST читал тело как JSON до обработчика файла -> зависание
+        import pathlib, threading, urllib.request
+        from http.server import ThreadingHTTPServer
+        E.TOKEN_PATH = pathlib.Path(self.tmp) / 'token.txt'
+        srv = ThreadingHTTPServer(('127.0.0.1', 0), E.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request(
+                f'http://127.0.0.1:{srv.server_address[1]}/import/file',
+                data='Артикул;Бренд;Цена\nF100;BOSCH;700\n'.encode('utf-8'), method='POST',
+                headers={'X-UC-Token': E.get_token(), 'X-Filename': 'price.csv',
+                         'Content-Type': 'application/octet-stream'})
+            import json as _json
+            with urllib.request.urlopen(req, timeout=10) as r:
+                self.assertEqual(_json.loads(r.read())['imported'], 1)
+        finally:
+            srv.shutdown()
+    def test_import_csv_cp1251(self):
+        # аудит v12.9.106: браузерный импорт умеет windows-1251 — движок обязан тоже
+        res = E.import_file_bytes(self.conn, 'price.csv',
+            'Артикул;Бренд;Цена\nF100;BOSCH;700\n'.encode('cp1251'))
+        self.assertEqual(res['imported'], 1)
+    def test_enrich_partial_dims_not_overwritten(self):
+        # аудит v12.9.106: заполняются только пустые компоненты габаритов
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 400,
+             'weight': 0.3, 'length': 10, 'width': 6, 'height': 6, 'oe_numbers': 'OE1'},
+            {'article': 'F200', 'brand': 'MANN', 'price': 800, 'cost': 450,
+             'weight': 9.9, 'oe_numbers': 'OE1'}], 'test')  # вес свой, габаритов нет
+        E.enrich_oe(self.conn)
+        row = self.conn.execute("SELECT weight, length FROM products WHERE article='F200'").fetchone()
+        self.assertEqual(row[0], 9.9)   # свой вес не перетёрт донором
+        self.assertEqual(row[1], 10)    # пустая длина заполнена
+    def test_enrich_transitive(self):
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'name': 'Фильтр', 'price': 700, 'cost': 400,
+             'weight': 0.3, 'length': 10, 'width': 6, 'height': 6, 'oe_numbers': 'OE1'},
+            {'article': 'F200', 'brand': 'MANN', 'name': '', 'price': 800, 'cost': 450, 'oe_numbers': 'OE1, OE2'},
+            {'article': 'F300', 'brand': 'MAHLE', 'name': '', 'price': 900, 'cost': 500, 'oe_numbers': 'OE2'}], 'test')
+        res = E.enrich_oe(self.conn)
+        self.assertEqual(res['groups'], 1)  # F100-F200-F300 одна транзитивная группа
+        row = self.conn.execute("SELECT name, analog_list FROM products WHERE article='F300'").fetchone()
+        self.assertEqual(row[0], 'Фильтр')            # название подтянулось через цепочку OE
+        self.assertIn('F100', row[1])                 # аналоги дописаны
+        dims = self.conn.execute("SELECT length FROM products WHERE article='F200'").fetchone()
+        self.assertEqual(dims[0], 10)                 # габариты заполнены от донора группы

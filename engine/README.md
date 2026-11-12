@@ -21,7 +21,7 @@
 
 | Команда | Что делает |
 |---|---|
-| `serve` | HTTP API для приложения: /health, /calc/batch, /import/rows, /outbox, /outbox/process, /mail/check, /folder/check, /backup, /report/summary, /search |
+| `serve` | HTTP API для приложения: /health, /calc/batch, /import/rows, /import/file, /catalog/recalc, /catalog/results, /catalog/products, /catalog/enrich, /outbox, /outbox/process, /mail/check, /folder/check, /backup, /report/summary, /search |
 | `watch` | Цикл: импорт из папки и почты, отправка очереди, ночной бэкап |
 | `mail` | Одна проверка почты (IMAP) |
 | `folder` | Один проход по `engine_data/inbox` |
