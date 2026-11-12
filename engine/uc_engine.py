@@ -457,6 +457,17 @@ class Handler(BaseHTTPRequestHandler):
         try: return json.loads(raw.decode('utf-8') or '{}')
         except Exception: return {}
     def do_GET(self):
+        if self.path in ('/', '/index.html', '/app'):
+            # одно окно: приложение отдаёт сам движок с того же адреса
+            app_file = BASE.parent / 'index.html'
+            if app_file.exists():
+                body = app_file.read_bytes()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+                return
+            return self._send(404, {'ok': False, 'error': 'index.html не найден рядом с движком'})
         if self.path == '/health':
             return self._send(200, {'ok': True, 'service': 'UC-PyEngine', 'version': VERSION})
         if not self._auth(): return self._send(401, {'ok': False, 'error': 'X-UC-Token'})
