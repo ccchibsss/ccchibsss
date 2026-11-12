@@ -291,6 +291,38 @@ class TestAnalogSuggestions(unittest.TestCase):
         row = self.conn.execute("SELECT analog_list FROM products WHERE article='ABC12345' AND brand='BOSCH'").fetchone()
         self.assertEqual(row[0], '')
 
+class TestOzonExport(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_ozon_row_rules(self):
+        p = {'article': 'F100', 'brand': 'BOSCH', 'name': 'Фильтр', 'price': 1000.4, 'cost': 500,
+             'weight': 0.3, 'length': 6, 'width': 10, 'height': 8, 'tnved': '8421230000',
+             'barcode': '4600000000001', 'image_url': 'http://x/1.jpg', 'ozon_type': 'Фильтр масляный',
+             'oe_numbers': 'OE1, OE2', 'multiplicity': 2}
+        r = E.ozon_row(p, 1)
+        self.assertEqual(len(r), 46)
+        self.assertEqual(r[3], 1000)          # цена округлена
+        self.assertEqual(r[4], '')            # зачёркнутая не выдумывается
+        self.assertEqual(r[12], 300)          # вес кг -> г
+        self.assertEqual((r[13], r[14], r[15]), (80, 60, 100))  # Ш/В/Д мм, длина наибольшая
+        self.assertEqual(r[21], 'Фильтр масляный')
+        self.assertEqual(r[24], 2)            # кратность
+        self.assertEqual(r[33], 'OE1; OE2')   # OEM через '; '
+        self.assertEqual(r[30], 'Фильтр. Артикул детали: F100. Производитель: BOSCH.')
+        self.assertEqual(r[44], '')           # ошибок нет
+    def test_ozon_row_no_invented_price(self):
+        r = E.ozon_row({'article': 'F1', 'brand': 'B', 'name': 'X', 'price': 0}, 1, discount_pct=30)
+        self.assertEqual(r[3], '')            # нет цены — пустая ячейка даже со скидкой
+        self.assertIn('не заполнена цена', r[44])
+        r2 = E.ozon_row({'article': 'F1', 'brand': 'B', 'name': 'X', 'price': 100, 'old_price': 150}, 1)
+        self.assertEqual(r2[4], 150)          # явная старая цена выше цены
+        r3 = E.ozon_row({'article': 'F1', 'brand': 'B', 'name': 'X', 'price': 100}, 1, discount_pct=30)
+        self.assertEqual(r3[4], 130)          # надбавка только по выбору продавца
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib

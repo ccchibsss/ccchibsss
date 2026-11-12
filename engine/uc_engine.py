@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.114-pyengine-10'
+VERSION = '12.9.115-pyengine-11'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -202,9 +202,16 @@ def db():
     conn.executescript(SCHEMA)
     # миграция баз до v12.9.110: обогащаемые текстовые поля каталога
     cols = {r[1] for r in conn.execute('PRAGMA table_info(products)')}
-    for col in ('category', 'tnved', 'applicability'):
+    for col in ('category', 'tnved', 'applicability',
+                'barcode', 'image_url', 'extra_photos', 'ozon_sku', 'ozon_type', 'ozon_category',
+                'model', 'hazard_class', 'color', 'material', 'country', 'warranty', 'diameter',
+                'package_contents', 'rich_content', 'description', 'mark_required',
+                'group_articles', 'cross_numbers'):
         if col not in cols:
             conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT DEFAULT ''")
+    for col in ('multiplicity', 'net_weight', 'old_price'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
     conn.commit()
     return conn
 
@@ -297,8 +304,8 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         if not art: continue
         brand = str(r.get('brand', '')).strip()
         old = conn.execute('SELECT price,cost FROM products WHERE article=? AND brand=?', (art, brand)).fetchone()
-        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,analog_list,category,tnved,applicability,source,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
+        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,analog_list,category,tnved,applicability,barcode,image_url,extra_photos,ozon_sku,ozon_type,ozon_category,model,hazard_class,color,material,country,warranty,diameter,package_contents,rich_content,description,mark_required,group_articles,cross_numbers,multiplicity,net_weight,old_price,source,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
               name=COALESCE(NULLIF(excluded.name,''),products.name),
               price=CASE WHEN excluded.price>0 THEN excluded.price ELSE products.price END,
@@ -310,12 +317,42 @@ def import_rows(conn, rows, source, rebuild_fts=True):
               category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE products.category END,
               tnved=CASE WHEN excluded.tnved<>'' THEN excluded.tnved ELSE products.tnved END,
               applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE products.applicability END,
+              barcode=CASE WHEN excluded.barcode<>'' THEN excluded.barcode ELSE products.barcode END,
+              image_url=CASE WHEN excluded.image_url<>'' THEN excluded.image_url ELSE products.image_url END,
+              extra_photos=CASE WHEN excluded.extra_photos<>'' THEN excluded.extra_photos ELSE products.extra_photos END,
+              ozon_sku=CASE WHEN excluded.ozon_sku<>'' THEN excluded.ozon_sku ELSE products.ozon_sku END,
+              ozon_type=CASE WHEN excluded.ozon_type<>'' THEN excluded.ozon_type ELSE products.ozon_type END,
+              ozon_category=CASE WHEN excluded.ozon_category<>'' THEN excluded.ozon_category ELSE products.ozon_category END,
+              model=CASE WHEN excluded.model<>'' THEN excluded.model ELSE products.model END,
+              hazard_class=CASE WHEN excluded.hazard_class<>'' THEN excluded.hazard_class ELSE products.hazard_class END,
+              color=CASE WHEN excluded.color<>'' THEN excluded.color ELSE products.color END,
+              material=CASE WHEN excluded.material<>'' THEN excluded.material ELSE products.material END,
+              country=CASE WHEN excluded.country<>'' THEN excluded.country ELSE products.country END,
+              warranty=CASE WHEN excluded.warranty<>'' THEN excluded.warranty ELSE products.warranty END,
+              diameter=CASE WHEN excluded.diameter<>'' THEN excluded.diameter ELSE products.diameter END,
+              package_contents=CASE WHEN excluded.package_contents<>'' THEN excluded.package_contents ELSE products.package_contents END,
+              rich_content=CASE WHEN excluded.rich_content<>'' THEN excluded.rich_content ELSE products.rich_content END,
+              description=CASE WHEN excluded.description<>'' THEN excluded.description ELSE products.description END,
+              mark_required=CASE WHEN excluded.mark_required<>'' THEN excluded.mark_required ELSE products.mark_required END,
+              group_articles=CASE WHEN excluded.group_articles<>'' THEN excluded.group_articles ELSE products.group_articles END,
+              cross_numbers=CASE WHEN excluded.cross_numbers<>'' THEN excluded.cross_numbers ELSE products.cross_numbers END,
+              multiplicity=CASE WHEN excluded.multiplicity>0 THEN excluded.multiplicity ELSE products.multiplicity END,
+              net_weight=CASE WHEN excluded.net_weight>0 THEN excluded.net_weight ELSE products.net_weight END,
+              old_price=CASE WHEN excluded.old_price>0 THEN excluded.old_price ELSE products.old_price END,
               source=excluded.source, updated_at=datetime("now")''',
             (art, str(r.get('brand', '')).strip(), str(r.get('name', '')),
              num(r.get('price')), num(r.get('cost')), num(r.get('stock')), num(r.get('sales')), num(r.get('weight')),
              num(r.get('length')), num(r.get('width')), num(r.get('height')),
              str(r.get('oe_numbers', '')), str(r.get('analog_list', '')), str(r.get('category', '')), str(r.get('tnved', '')),
-             str(r.get('applicability', '')), source))
+             str(r.get('applicability', '')),
+             str(r.get('barcode', '')), str(r.get('image_url', '')), str(r.get('extra_photos', '')),
+             str(r.get('ozon_sku', '')), str(r.get('ozon_type', '')), str(r.get('ozon_category', '')),
+             str(r.get('model', '')), str(r.get('hazard_class', '')), str(r.get('color', '')),
+             str(r.get('material', '')), str(r.get('country', '')), str(r.get('warranty', '')),
+             str(r.get('diameter', '')), str(r.get('package_contents', '')), str(r.get('rich_content', '')),
+             str(r.get('description', '')), str(r.get('mark_required', '')), str(r.get('group_articles', '')),
+             str(r.get('cross_numbers', '')), num(r.get('multiplicity')), num(r.get('net_weight')),
+             num(r.get('old_price')), source))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old[0] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old[1] if old else 0)
@@ -970,6 +1007,84 @@ def export_catalog_xlsx_bytes(conn):
         for name, content in parts.items(): z.writestr(name, content)
     return out.getvalue()
 
+# ---------------- выгрузка Ozon, 46 колонок (этап 1, v12.9.115) ----------------
+OZON_HEADERS = ['№','Артикул*','Название товара','Предельная цена без акций, руб.*','Зачёркнутая цена, руб.',
+  'НДС, %*','Рассрочка','Ускоренный сбор отзывов','Сбор первых отзывов','SKU','Штрихкод (Серийный номер / EAN)',
+  'ТН ВЭД коды ЕАЭС*','Вес в упаковке, г*','Ширина упаковки, мм*','Высота упаковки, мм*','Длина упаковки, мм*',
+  'Ссылка на главное фото*','Ссылки на дополнительные фото','Артикул фото','Бренд*','Партномер (артикул производителя)',
+  'Тип*','Название модели (для объединения в одну карточку)*','Нужен код маркировки*','Количество в упаковке, шт',
+  'Вес товара, г','Класс опасности товара','Количество товара в УЕИ','Минимальное количество оптом','#Хештеги',
+  'Аннотация','Rich-контент JSON','Объединить в похожие товары','OEM-номер','Альтернативные артикулы товара',
+  'Количество, штук','Внутренний диаметр, мм','Материал','Вид техники','Цвет товара','Гарантия',
+  'Страна-изготовитель','Комплектация','Количество заводских упаковок','Ошибка','Недочёты']
+
+def _split_codes(raw):
+    return [x for x in (p.strip() for p in re.split(r'[,;/|]+', str(raw or ''))) if x]
+
+def ozon_row(p, idx, vat='Не облагается', discount_pct=0, vehicle_type='Легковые автомобили'):
+    """Строка шаблона Ozon из полей карточки. Правила приложения, которые
+       портированы 1-в-1: цена не выдумывается (нет цены — пустая ячейка);
+       зачёркнутая — только явная старая цена выше цены или выбранная
+       продавцом надбавка; габариты сортируются длина>=ширина>=высота;
+       вес в граммы, размеры в миллиметры; аннотация — описание или
+       шаблон «Название. Артикул детали: … Производитель: …»."""
+    art = str(p.get('article', '')).strip()
+    name = str(p.get('name', '')).strip()
+    brand = str(p.get('brand', '')).strip()
+    price = num(p.get('price'))
+    price_out = int(round(price)) if price > 0 else ''
+    old = num(p.get('old_price'))
+    if old > price and price > 0: old_out = int(round(old))
+    elif discount_pct > 0 and price > 0: old_out = int(round(price * (1 + discount_pct / 100)))
+    else: old_out = ''
+    def grams(v): return int(round(num(v) * 1000)) if num(v) > 0 and round(num(v) * 1000) > 0 else ''
+    def millis(v): return int(round(num(v) * 10)) if num(v) > 0 and round(num(v) * 10) > 0 else ''
+    dims = [millis(p.get('length')), millis(p.get('width')), millis(p.get('height'))]
+    if all(isinstance(d, int) for d in dims):
+        dims.sort(reverse=True)  # длина — наибольшее, высота — наименьшее (документация Ozon)
+        length_mm, width_mm, height_mm = dims
+    else:
+        width_mm, height_mm, length_mm = dims[1], dims[2], dims[0]
+    oem = '; '.join(_split_codes(p.get('oe_numbers')))
+    cross = '; '.join(c for c in _split_codes(p.get('cross_numbers') or p.get('group_articles'))
+                      if c != art and c != oem)
+    bnorm = _norm_article(brand).lower()
+    hashtags = ('#автозапчасти #запчасти' + (' #' + bnorm if bnorm else '')).strip()
+    annotation = str(p.get('description', '')).strip() or f'{name}. Артикул детали: {art}. Производитель: {brand}.'
+    model = str(p.get('group_articles') or p.get('model') or art)
+    errors, notes = [], []
+    if not brand: errors.append('не заполнен бренд')
+    if not str(p.get('ozon_type', '')).strip(): errors.append('не определён тип Ozon')
+    if not str(p.get('tnved', '')).strip(): errors.append('не заполнен ТН ВЭД')
+    if not grams(p.get('weight')) or not all(isinstance(d, int) for d in (width_mm, height_mm, length_mm)):
+        errors.append('не заполнены ОВХ (вес/габариты)')
+    if not str(p.get('image_url', '')).strip(): errors.append('нет ссылки на главное фото')
+    if not str(p.get('barcode', '')).strip(): notes.append('нет штрихкода — Ozon не сможет принять поставку без него')
+    if not price_out: errors.append('не заполнена цена')
+    return [idx, art, name, price_out, old_out, vat, '', '', '', str(p.get('ozon_sku', '')),
+            str(p.get('barcode', '')), str(p.get('tnved', '')), grams(p.get('weight')), width_mm, height_mm, length_mm,
+            str(p.get('image_url', '')), str(p.get('extra_photos', '')), '', brand, art,
+            str(p.get('ozon_type', '')), model, str(p.get('mark_required', '')),
+            max(1, int(round(num(p.get('multiplicity')) or 1))),
+            (round(num(p.get('net_weight')) * 1000, 6) if num(p.get('net_weight')) > 0 else ''),
+            str(p.get('hazard_class', '')), '', '', hashtags, annotation,
+            str(p.get('rich_content', '')), str(p.get('group_articles', '')), oem, cross, '1',
+            str(p.get('diameter', '')), str(p.get('material', '')), vehicle_type, str(p.get('color', '')),
+            str(p.get('warranty', '')), str(p.get('country', '')),
+            str(p.get('package_contents', '')).strip() or f'{name} - 1 шт., упаковка', '1',
+            '; '.join(errors), '; '.join(notes)]
+
+def export_ozon_csv_bytes(conn, discount_pct=0, vat='Не облагается', enc='utf-8'):
+    import csv as _csv
+    buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
+    w.writerow(OZON_HEADERS)
+    rows = conn.execute('SELECT * FROM products ORDER BY article,brand').fetchall()
+    for i, r in enumerate(rows, 1):
+        w.writerow(ozon_row(dict(r), i, vat=vat, discount_pct=discount_pct))
+    text = buf.getvalue()
+    if enc == 'cp1251': return text.encode('cp1251', errors='replace')
+    return ('\ufeff' + text).encode('utf-8')
+
 # ---------------- HTTP ----------------
 def render_app_html():
     """Приложение с авто-токеном: страница отдана самим движком с его же адреса,
@@ -1055,6 +1170,14 @@ class Handler(BaseHTTPRequestHandler):
             total = conn.execute('SELECT total FROM parse_sessions WHERE id=?', (sid,)).fetchone()
             if total is None: return self._send(404, {'ok': False, 'error': 'parse_id не найден'})
             return self._send(200, {'ok': True, 'total': total[0], 'rows': [json.loads(r[0]) for r in rows]})
+        if self.path.startswith('/export/ozon.csv'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            return self._send_bytes(200, export_ozon_csv_bytes(conn,
+                discount_pct=num((qs.get('discount_pct') or ['0'])[0]),
+                vat=(qs.get('vat') or ['Не облагается'])[0],
+                enc=(qs.get('enc') or ['utf-8'])[0]),
+                'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
         if self.path.startswith('/export/catalog'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
