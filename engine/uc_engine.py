@@ -169,6 +169,9 @@ CREATE TABLE IF NOT EXISTS outbox(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, marketplace TEXT, article TEXT,
   payload TEXT, idempotency_key TEXT UNIQUE, status TEXT DEFAULT 'pending',
   attempts INTEGER DEFAULT 0, last_error TEXT DEFAULT '', created_at TEXT, sent_at TEXT);
+CREATE TABLE IF NOT EXISTS oe_links(oe TEXT NOT NULL, article TEXT NOT NULL, brand TEXT DEFAULT '',
+  PRIMARY KEY(oe, article, brand));
+CREATE INDEX IF NOT EXISTS ix_oe_links_article ON oe_links(article, brand);
 CREATE TABLE IF NOT EXISTS eco_results(
   article TEXT NOT NULL, brand TEXT DEFAULT '', total REAL, profit REAL, margin REAL,
   roi REAL, break_even REAL, target REAL, computed_at TEXT DEFAULT '',
@@ -363,6 +366,87 @@ def recalc_catalog(conn, st):
     return {'recalculated': n, 'profitable': profitable,
             'avg_profit': rnd(total_profit / n, 2) if n else 0}
 
+# ---------------- импорт файла целиком + обогащение OE (v12.9.105) ----------------
+def import_file_bytes(conn, filename, data):
+    """Файл разбирает движок, а не браузер: CSV/XLSX/ZIP -> строки -> каталог."""
+    name = os.path.basename(str(filename or 'file'))
+    files = files_from_zip(data) if name.lower().endswith('.zip') else [(name, data)]
+    total = 0
+    for fname, blob in files:
+        rows = rows_from_xlsx_bytes(blob) if fname.lower().endswith('.xlsx') else rows_from_csv_bytes(blob)
+        total += import_rows(conn, rows, f'file:{name}', rebuild_fts=False)
+    conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
+    conn.commit()
+    log_api(conn, 'importFile', name, 'ok', f'строк {total}')
+    return {'file': name, 'imported': total}
+
+def _oe_codes(raw):
+    out = []
+    for part in re.split(r'[,;/|\s]+', str(raw or '').upper()):
+        code = re.sub(r'[^A-Z0-9А-ЯЁ]', '', part)
+        if code: out.append(code)
+    return out
+
+def enrich_oe(conn):
+    """Обогащение по OE-графу в SQL: транзитивные группы (union-find по oe_links),
+       заполняются только пустые поля; артикулы группы дописываются в аналоги."""
+    conn.execute('DELETE FROM oe_links')
+    prods = conn.execute('SELECT article,brand,name,weight,length,width,height,oe_numbers,analog_list FROM products').fetchall()
+    by_key = {(r['article'], r['brand']): dict(r) for r in prods}
+    oe_to_keys = {}
+    for r in prods:
+        for oe in _oe_codes(r['oe_numbers']):
+            conn.execute('INSERT OR IGNORE INTO oe_links(oe,article,brand) VALUES(?,?,?)', (oe, r['article'], r['brand']))
+            oe_to_keys.setdefault(oe, set()).add((r['article'], r['brand']))
+    conn.commit()
+    parent = {k: k for k in by_key}
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb: parent[rb] = ra
+    for keys in oe_to_keys.values():
+        keys = list(keys)
+        for k in keys[1:]: union(keys[0], k)
+    groups = {}
+    for k in by_key: groups.setdefault(find(k), []).append(k)
+    filled = {'name': 0, 'dims': 0, 'analog_list': 0}
+    multi_groups = 0
+    for members in groups.values():
+        if len(members) < 2: continue
+        multi_groups += 1
+        rows = [by_key[k] for k in members]
+        def dims_of(r): return (num(r['length']), num(r['width']), num(r['height']), num(r['weight']))
+        complete = [r for r in rows if all(v > 0 for v in dims_of(r))]
+        names = [r['name'] for r in rows if str(r['name'] or '').strip()]
+        best_name = max(set(names), key=names.count) if names else ''
+        for r in rows:
+            updates = {}
+            if not str(r['name'] or '').strip() and best_name:
+                updates['name'] = best_name; filled['name'] += 1
+            if complete and not all(v > 0 for v in dims_of(r)):
+                same_art = [d for d in complete if d['article'] == r['article']]
+                donor = same_art[0] if same_art else complete[0]
+                d = dims_of(donor)
+                updates.update({'length': d[0], 'width': d[1], 'height': d[2], 'weight': d[3]})
+                filled['dims'] += 1
+            others = sorted({m[0] for m in members if m[0] != r['article']})
+            if others:
+                cur = {x.strip() for x in str(r['analog_list'] or '').split(',') if x.strip()}
+                merged = sorted(cur | set(others))
+                if merged != sorted(cur):
+                    updates['analog_list'] = ', '.join(merged); filled['analog_list'] += 1
+            if updates:
+                sets = ', '.join(f'{k}=?' for k in updates)
+                conn.execute(f'UPDATE products SET {sets} WHERE article=? AND brand=?',
+                             (*updates.values(), r['article'], r['brand']))
+    conn.commit()
+    log_api(conn, 'enrichOe', 'sqlite', 'ok', f'групп {multi_groups}, заполнено {filled}')
+    return {'groups': multi_groups, 'filled': filled,
+            'oe_links': conn.execute('SELECT COUNT(*) c FROM oe_links').fetchone()['c']}
+
 # ---------------- очередь отправки на площадки ----------------
 def enqueue(conn, kind, marketplace, items):
     n = 0
@@ -516,6 +600,13 @@ class Handler(BaseHTTPRequestHandler):
                 WHERE p.rowid IN (SELECT rowid FROM products_fts WHERE products_fts MATCH ?) LIMIT 100''',
                 ('"' + q.replace('"', '') + '"',)).fetchall() if q else []
             return self._send(200, {'ok': True, 'rows': [dict(r) for r in rows]})
+        if self.path.startswith('/catalog/products'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
+            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+            total = conn.execute('SELECT COUNT(*) c FROM products').fetchone()['c']
+            return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
         if self.path.startswith('/catalog/results'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -529,6 +620,16 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {'ok': False, 'error': 'not found'})
     def do_POST(self):
         if not self._auth(): return self._send(401, {'ok': False, 'error': 'X-UC-Token'})
+        if self.path == '/import/file':
+            # бинарное тело НЕЛЬЗЯ читать через _body() (JSON): читаем один раз здесь
+            from urllib.parse import unquote
+            fname = unquote(self.headers.get('X-Filename', 'file.csv'))
+            ln = int(self.headers.get('Content-Length', 0) or 0)
+            data = self.rfile.read(ln) if ln else b''
+            try:
+                return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data)})
+            except Exception as e:
+                return self._send(500, {'ok': False, 'error': str(e)[:300]})
         body = self._body()
         conn = db()
         try:
@@ -540,6 +641,8 @@ class Handler(BaseHTTPRequestHandler):
                 n = import_rows(conn, body.get('rows') or [], body.get('source', 'app'),
                                 rebuild_fts=body.get('final') is not False)
                 return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/catalog/enrich':
+                return self._send(200, {'ok': True, **enrich_oe(conn)})
             if self.path == '/catalog/recalc':
                 return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {})})
             if self.path.startswith('/catalog/results'):
