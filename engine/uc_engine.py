@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.117-pyengine-13'
+VERSION = '12.9.118-pyengine-14'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -200,6 +200,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS products_fts USING fts5(article, brand, name,
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # v12.9.118: WAL кратно ускоряет массовые записи (импорт/обогащение) и не
+    # блокирует чтение на время записи; synchronous=NORMAL безопасен при WAL.
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA temp_store=MEMORY')
+    except Exception: pass
     conn.executescript(SCHEMA)
     # миграция баз до v12.9.110: обогащаемые текстовые поля каталога
     dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
@@ -1256,19 +1263,31 @@ def get_token():
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _send_bytes(self, code, body, content_type, filename):
+        # gzip только для текстовых типов: CSV/JSON/XML сжимаются кратно;
+        # XLSX уже zip — повторное сжатие бесполезно.
+        extra = {}
+        if content_type.startswith('text/') or 'json' in content_type:
+            body, extra = self._maybe_gzip(body)
         self.send_response(code)
         self.send_header('Content-Type', content_type)
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-UC-Token')
         self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        for k, v in extra.items(): self.send_header(k, v)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers(); self.wfile.write(body)
+    def _maybe_gzip(self, body):
+        if len(body) < 1024 or 'gzip' not in (self.headers.get('Accept-Encoding', '') or ''): return body, {}
+        import gzip as _gz
+        return _gz.compress(body, compresslevel=6), {'Content-Encoding': 'gzip'}
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+        body, extra = self._maybe_gzip(body)
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-UC-Token')
+        for k, v in extra.items(): self.send_header(k, v)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers(); self.wfile.write(body)
     def do_OPTIONS(self): self._send(200, {'ok': True})

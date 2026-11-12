@@ -399,6 +399,27 @@ class TestOzonStage3(unittest.TestCase):
         self.assertIn('Название товара', sheet)         # шапка шаблона
         self.assertIn('xl/styles.xml', z.namelist())    # стили для заливки
 
+class TestPerfBasics(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_wal_mode_on(self):
+        mode = self.conn.execute('PRAGMA journal_mode').fetchone()[0]
+        self.assertEqual(str(mode).lower(), 'wal')
+    def test_gzip_helper(self):
+        import gzip as _gz
+        class FakeH: headers = {'Accept-Encoding': 'gzip, deflate'}
+        body = b'{"ok": true, "data": "' + b'x' * 5000 + b'"}'
+        out, extra = E.Handler._maybe_gzip(FakeH(), body)
+        self.assertEqual(extra.get('Content-Encoding'), 'gzip')
+        self.assertLess(len(out), len(body))
+        self.assertEqual(_gz.decompress(out), body)
+        small, extra2 = E.Handler._maybe_gzip(FakeH(), b'{}')
+        self.assertEqual((small, extra2), (b'{}', {}))  # мелкие ответы не сжимаем
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib
