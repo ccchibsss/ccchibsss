@@ -236,6 +236,34 @@ class TestParseFile(unittest.TestCase):
         res = E.parse_file_bytes(self.conn, 'comp.csv', 'Артикул\tЦена\nA1\t100\n'.encode('cp1251'))
         self.assertEqual(res['total'], 1)
 
+class TestHistorySnapshots(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp)
+        E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [{'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 400, 'stock': 2}], 's1')
+    def test_history_only_real_changes(self):
+        E.import_rows(self.conn, [{'article': 'F100', 'brand': 'BOSCH', 'price': 700, 'cost': 400, 'stock': 5}], 's2')  # та же цена
+        n = self.conn.execute('SELECT COUNT(*) FROM price_history').fetchone()[0]
+        self.assertEqual(n, 1)  # только первичная запись, повтор без изменений не пишется
+        E.import_rows(self.conn, [{'article': 'F100', 'brand': 'BOSCH', 'price': 770, 'cost': 400, 'stock': 5}], 's3')
+        rep = E.price_changes(self.conn, 30)
+        self.assertEqual(rep['changed_sku'], 1)
+        self.assertEqual(rep['rises'], 1)
+        self.assertEqual(rep['rows'][0]['delta_pct'], 10.0)
+    def test_snapshot_diff(self):
+        s1 = E.make_snapshot(self.conn, 'первый')['snapshot_id']
+        E.import_rows(self.conn, [
+            {'article': 'F100', 'brand': 'BOSCH', 'price': 800, 'cost': 400},
+            {'article': 'F200', 'brand': 'MANN', 'price': 100, 'cost': 50}], 's2')
+        s2 = E.make_snapshot(self.conn, 'второй')['snapshot_id']
+        d = E.snapshot_diff(self.conn, s1, s2)
+        self.assertEqual([r['article'] for r in d['added']], ['F200'])
+        self.assertEqual(d['removed'], [])
+        self.assertEqual(d['price_changed'][0]['new_price'], 800)
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib

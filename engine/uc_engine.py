@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.111-pyengine-8'
+VERSION = '12.9.112-pyengine-9'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -169,6 +169,12 @@ CREATE TABLE IF NOT EXISTS outbox(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, marketplace TEXT, article TEXT,
   payload TEXT, idempotency_key TEXT UNIQUE, status TEXT DEFAULT 'pending',
   attempts INTEGER DEFAULT 0, last_error TEXT DEFAULT '', created_at TEXT, sent_at TEXT);
+CREATE TABLE IF NOT EXISTS price_history(article TEXT, brand TEXT DEFAULT '', price REAL, cost REAL,
+  stock REAL, source TEXT, ts TEXT);
+CREATE INDEX IF NOT EXISTS ix_price_history_key ON price_history(article, brand, ts);
+CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, note TEXT, total INTEGER);
+CREATE TABLE IF NOT EXISTS snapshot_rows(snapshot_id INTEGER, article TEXT, brand TEXT DEFAULT '',
+  price REAL, cost REAL, stock REAL, PRIMARY KEY(snapshot_id, article, brand));
 CREATE TABLE IF NOT EXISTS parse_sessions(id TEXT PRIMARY KEY, filename TEXT, headers TEXT,
   total INTEGER, created TEXT);
 CREATE TABLE IF NOT EXISTS parse_rows(session TEXT, idx INTEGER, data TEXT,
@@ -289,6 +295,8 @@ def import_rows(conn, rows, source, rebuild_fts=True):
     for r in rows:
         art = str(r.get('article', '')).strip()
         if not art: continue
+        brand = str(r.get('brand', '')).strip()
+        old = conn.execute('SELECT price,cost FROM products WHERE article=? AND brand=?', (art, brand)).fetchone()
         conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,category,tnved,applicability,source,updated_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
@@ -307,6 +315,12 @@ def import_rows(conn, rows, source, rebuild_fts=True):
              num(r.get('length')), num(r.get('width')), num(r.get('height')),
              str(r.get('oe_numbers', '')), str(r.get('category', '')), str(r.get('tnved', '')),
              str(r.get('applicability', '')), source))
+        # история цен (п.6): только реальные изменения цены/себестоимости
+        eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old[0] if old else 0)
+        eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old[1] if old else 0)
+        if eff_price > 0 and (not old or abs(old[0] - eff_price) > 1e-9 or abs(old[1] - eff_cost) > 1e-9):
+            conn.execute('INSERT INTO price_history(article,brand,price,cost,stock,source,ts) VALUES(?,?,?,?,?,?,datetime("now"))',
+                         (art, brand, eff_price, eff_cost, num(r.get('stock')), source))
         n += 1
     if rebuild_fts:
         conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
@@ -666,6 +680,53 @@ def parse_file_bytes(conn, filename, data):
     log_api(conn, 'parseFile', str(filename), 'ok', f'строк {len(table)}')
     return {'parse_id': sid, 'headers': headers, 'total': len(table)}
 
+# ---------------- история цен и снапшоты (п.6 аудита, v12.9.112) ----------------
+def price_changes(conn, days=30, limit=200):
+    """Изменения цен за период: LAG по истории даёт предыдущую цену SKU."""
+    days = max(1, min(3650, int(num(days) or 30)))
+    rows = conn.execute('''SELECT article,brand,price,cost,ts,source,prev_price FROM (
+            SELECT *, LAG(price) OVER (PARTITION BY article,brand ORDER BY ts,rowid) prev_price
+            FROM price_history)
+        WHERE ts >= datetime("now", ?) AND prev_price IS NOT NULL AND ABS(price-prev_price) > 1e-9
+        ORDER BY ts DESC LIMIT ?''', (f'-{days} days', int(limit))).fetchall()
+    agg = conn.execute('''SELECT COUNT(DISTINCT article || '|' || brand) sku,
+            SUM(price > prev_price) rises, SUM(price < prev_price) falls FROM (
+            SELECT *, LAG(price) OVER (PARTITION BY article,brand ORDER BY ts,rowid) prev_price
+            FROM price_history)
+        WHERE ts >= datetime("now", ?) AND prev_price IS NOT NULL AND ABS(price-prev_price) > 1e-9''',
+        (f'-{days} days',)).fetchone()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['delta_pct'] = rnd((d['price'] - d['prev_price']) / d['prev_price'] * 100, 2) if d['prev_price'] else 0
+        out.append(d)
+    return {'days': days, 'changed_sku': agg[0] or 0, 'rises': agg[1] or 0, 'falls': agg[2] or 0, 'rows': out}
+
+def make_snapshot(conn, note=''):
+    total = conn.execute('SELECT COUNT(*) FROM products').fetchone()[0]
+    cur = conn.execute('INSERT INTO snapshots(created,note,total) VALUES(datetime("now"),?,?)', (str(note)[:200], total))
+    sid = cur.lastrowid
+    conn.execute('INSERT INTO snapshot_rows(snapshot_id,article,brand,price,cost,stock) '
+                 'SELECT ?,article,brand,price,cost,stock FROM products', (sid,))
+    conn.commit()
+    log_api(conn, 'snapshot', str(sid), 'ok', f'{total} SKU')
+    return {'snapshot_id': sid, 'total': total}
+
+def snapshot_diff(conn, id1, id2):
+    q = lambda sql, args: conn.execute(sql, args).fetchall()
+    added = q('SELECT a.article,a.brand,a.price FROM snapshot_rows a LEFT JOIN snapshot_rows b '
+              'ON b.snapshot_id=? AND b.article=a.article AND b.brand=a.brand WHERE a.snapshot_id=? AND b.article IS NULL',
+              (id1, id2))
+    removed = q('SELECT a.article,a.brand,a.price FROM snapshot_rows a LEFT JOIN snapshot_rows b '
+                'ON b.snapshot_id=? AND b.article=a.article AND b.brand=a.brand WHERE a.snapshot_id=? AND b.article IS NULL',
+                (id2, id1))
+    changed = q('SELECT a.article,a.brand,b.price old_price,a.price new_price FROM snapshot_rows a '
+                'JOIN snapshot_rows b ON b.snapshot_id=? AND b.article=a.article AND b.brand=a.brand '
+                'WHERE a.snapshot_id=? AND ABS(a.price-b.price) > 1e-9 ORDER BY ABS(a.price-b.price) DESC LIMIT 500',
+                (id1, id2))
+    return {'from': id1, 'to': id2, 'added': [dict(r) for r in added], 'removed': [dict(r) for r in removed],
+            'price_changed': [dict(r) for r in changed]}
+
 # ---------------- очередь отправки на площадки ----------------
 def enqueue(conn, kind, marketplace, items):
     n = 0
@@ -915,6 +976,17 @@ class Handler(BaseHTTPRequestHandler):
         conn = db()
         if self.path == '/report/summary': return self._send(200, {'ok': True, **summary_report(conn)})
         if self.path == '/report/dashboard': return self._send(200, {'ok': True, **dashboard_report(conn)})
+        if self.path.startswith('/report/price-changes'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            return self._send(200, {'ok': True, **price_changes(conn, (qs.get('days') or ['30'])[0])})
+        if self.path.startswith('/snapshots/diff'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            return self._send(200, {'ok': True, **snapshot_diff(conn, int(num((qs.get('from') or ['0'])[0])), int(num((qs.get('to') or ['0'])[0])))})
+        if self.path == '/snapshots':
+            rows = conn.execute('SELECT id,created,note,total FROM snapshots ORDER BY id DESC LIMIT 50').fetchall()
+            return self._send(200, {'ok': True, 'rows': [dict(r) for r in rows]})
         if self.path.startswith('/parse/rows'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -1006,6 +1078,8 @@ class Handler(BaseHTTPRequestHandler):
                 rows = conn.execute('SELECT article,brand,total,profit,margin,roi,break_even,target FROM eco_results ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
                 total = conn.execute('SELECT COUNT(*) c FROM eco_results').fetchone()['c']
                 return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
+            if self.path == '/snapshots':
+                return self._send(200, {'ok': True, **make_snapshot(conn, body.get('note', ''))})
             if self.path == '/outbox':
                 n = enqueue(conn, body.get('kind', ''), body.get('marketplace', ''), body.get('items') or [])
                 return self._send(200, {'ok': True, 'queued': n})
