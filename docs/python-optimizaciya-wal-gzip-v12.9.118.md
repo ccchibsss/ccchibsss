@@ -34,6 +34,7 @@
 - Инкрементальный пересчёт в приложении (только изменённые SKU) —
   самый большой ожидаемый выигрыш интерфейса.
 - Расчёт в Web Worker, отложенная загрузка SheetJS.
-- CI на GitHub Actions для авто-прогона тестов.
+- ~~CI на GitHub Actions~~ — сделано в том же PR (.github/workflows/tests.yml):
+  движок (py_compile + unittest) и приложение (node tests) на push и PR.
 - EXPLAIN QUERY PLAN по дашборду на базе 124 тыс. перед добавлением
   индексов «на всякий случай».
