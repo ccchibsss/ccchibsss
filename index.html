@@ -13576,7 +13576,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.117-client+pyengine-ozon3';
+const APP_VERSION = '12.9.119-client+pyengine-incr';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26605,7 +26605,8 @@ const PyEngine = {
       }
       const st = this._settingsSnapshot();
       const rec = await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: st }) });
-      if (prog) prog('применение результата: ' + fmt(rec.recalculated || 0) + ' SKU посчитано на движке');
+      if (prog) prog('применение результата: ' + fmt(rec.recalculated || 0) + ' SKU посчитано на движке' +
+        (rec.skipped ? ', ' + fmt(rec.skipped) + ' без изменений (инкрементальный пересчёт)' : ''));
       let applied = 0;
       const byKey = new Map();
       for (let off = 0; ; off += CH) {

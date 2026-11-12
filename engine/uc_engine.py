@@ -29,7 +29,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.118-pyengine-14'
+VERSION = '12.9.119-pyengine-15'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -190,6 +190,7 @@ CREATE INDEX IF NOT EXISTS ix_oe_links_article ON oe_links(article, brand);
 CREATE TABLE IF NOT EXISTS eco_results(
   article TEXT NOT NULL, brand TEXT DEFAULT '', total REAL, profit REAL, margin REAL,
   roi REAL, break_even REAL, target REAL, computed_at TEXT DEFAULT '',
+  inputs_hash TEXT DEFAULT '',
   PRIMARY KEY(article, brand));
 CREATE TABLE IF NOT EXISTS api_log(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, action TEXT,
   endpoint TEXT, status TEXT, detail TEXT);
@@ -209,6 +210,9 @@ def db():
     except Exception: pass
     conn.executescript(SCHEMA)
     # миграция баз до v12.9.110: обогащаемые текстовые поля каталога
+    ecols = {r[1] for r in conn.execute('PRAGMA table_info(eco_results)')}
+    if 'inputs_hash' not in ecols:
+        conn.execute("ALTER TABLE eco_results ADD COLUMN inputs_hash TEXT DEFAULT ''")
     dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
     for col in ('warranty', 'country'):
         if col not in dcols:
@@ -459,22 +463,46 @@ def _calc_all(rows, st):
     except Exception:
         return seq(), False
 
-def recalc_catalog(conn, st):
-    """Экономика по ВСЕМ SKU каталога SQLite. Результат — в eco_results,
-       наружу отдаётся постранично: браузеру не нужно держать расчёт у себя."""
+_ECO_FIELDS = ('price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume')
+
+def _eco_hash(row, st):
+    import hashlib
+    payload = [row.get(k) for k in _ECO_FIELDS]
+    raw = json.dumps([payload, st], sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+def recalc_catalog(conn, st, force=False):
+    """Инкрементальный пересчёт (v12.9.119): строка пересчитывается только
+       если изменились её расчётные входы или настройки экономики (хэш в
+       eco_results.inputs_hash). force=True — полный пересчёт как раньше.
+       Итоги ответа считаются по всей таблице результатов, семантика та же."""
     rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume FROM products').fetchall()]
-    conn.execute('DELETE FROM eco_results')
-    results, parallel = _calc_all(rows, st)  # порядок результатов = порядку строк и в Pool.map, и в seq
-    conn.executemany('INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at) VALUES(?,?,?,?,?,?,?,?,datetime("now"))',
-                     [(res['article'], row['brand'], res['total'], res['profit'], res['margin'],
-                       res['roi'], res['break_even'], res['target']) for row, res in zip(rows, results)])
-    n = len(results)
-    profitable = sum(1 for res in results if res['profit'] > 0)
-    total_profit = sum(res['profit'] for res in results)
+    old = {(r['article'], r['brand']): r['inputs_hash'] for r in
+           conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
+    todo, hashes = [], {}
+    for row in rows:
+        h = _eco_hash(row, st)
+        hashes[(row['article'], row['brand'])] = h
+        if force or old.get((row['article'], row['brand'])) != h: todo.append(row)
+    results, parallel = _calc_all(todo, st)
+    conn.executemany('''INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at,inputs_hash)
+        VALUES(?,?,?,?,?,?,?,?,datetime("now"),?)
+        ON CONFLICT(article,brand) DO UPDATE SET total=excluded.total, profit=excluded.profit,
+          margin=excluded.margin, roi=excluded.roi, break_even=excluded.break_even,
+          target=excluded.target, computed_at=excluded.computed_at, inputs_hash=excluded.inputs_hash''',
+        [(res['article'], row['brand'], res['total'], res['profit'], res['margin'],
+          res['roi'], res['break_even'], res['target'], hashes[(row['article'], row['brand'])])
+         for row, res in zip(todo, results)])
+    alive = set(hashes)
+    for key in old:
+        if key not in alive: conn.execute('DELETE FROM eco_results WHERE article=? AND brand=?', key)
     conn.commit()
-    log_api(conn, 'recalcCatalog', 'sqlite', 'ok', f'{n} SKU')
-    return {'recalculated': n, 'profitable': profitable,
-            'avg_profit': rnd(total_profit / n, 2) if n else 0, 'parallel': parallel}
+    agg = conn.execute('SELECT COUNT(*) n, SUM(CASE WHEN profit>0 THEN 1 ELSE 0 END) prof, AVG(profit) avgp FROM eco_results').fetchone()
+    n = agg['n'] or 0
+    log_api(conn, 'recalcCatalog', 'sqlite', 'ok', f'{len(todo)} из {len(rows)} SKU')
+    return {'recalculated': len(todo), 'skipped': len(rows) - len(todo), 'total_sku': len(rows),
+            'profitable': agg['prof'] or 0,
+            'avg_profit': rnd(agg['avgp'] or 0, 2) if n else 0, 'parallel': parallel}
 
 # ---------------- импорт файла целиком + обогащение OE (v12.9.105) ----------------
 def import_file_bytes(conn, filename, data):
@@ -1431,7 +1459,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/catalog/enrich-full':
                 return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand')})
             if self.path == '/catalog/recalc':
-                return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {})})
+                return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {}, force=bool(body.get('force')))})
             if self.path.startswith('/catalog/results'):
                 from urllib.parse import urlparse, parse_qs
                 qs = parse_qs(urlparse(self.path).query)
