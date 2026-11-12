@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.123-client+libcheck-fix';
+const APP_VERSION = '12.9.125-client+lib-recovery';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -46815,9 +46815,26 @@ const OzonDeadlineGuard = {
 };
 
 /* ================================ 28. СТАРТ ============================== */
+/* v12.9.125: самовосстановление встроенных библиотек. Если script-блок
+   библиотеки по любой причине не исполнился при разборе страницы (был
+   реальный случай: код SheetJS виден текстом, window.XLSX нет, старт мёртв),
+   выполняем текст блока вручную и прячем блок, чтобы мусор не маячил. */
+function recoverEmbeddedLibs() {
+  const marks = [['XLSX', 'xlsx.js (C)'], ['Dexie', 'Dexie']];
+  for (const [name, mark] of marks) {
+    if (window[name]) continue;
+    try {
+      const el = [...document.scripts].find(x => (x.textContent || '').includes(mark) && (x.textContent || '').length > 50000);
+      if (!el) continue;
+      (0, eval)(el.textContent);
+      if (window[name]) { try { el.style.display = 'none'; } catch (e) { } console.info('[UC] библиотека ' + name + ' восстановлена вручную'); }
+    } catch (e) { console.warn('[UC] recover ' + name + ':', e && e.message); }
+  }
+}
 window.addEventListener('DOMContentLoaded', () => {
-  // ШАГ 0: проверка CDN-библиотек — без них показываем понятный баннер вместо каскада ошибок
+  // ШАГ 0: проверка встроенных библиотек; сначала пробуем самовосстановление
   try {
+    recoverEmbeddedLibs();
     const need = [['Dexie', window.Dexie], ['SheetJS (XLSX)', window.XLSX]];
     const missing = need.filter(x => !x[1]).map(x => x[0]);
     const optMissing = ['Chart', 'fflate'].filter(k => !window[k === 'Chart' ? 'Chart' : 'fflate']);
