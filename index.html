@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.127-client+lib-diag2';
+const APP_VERSION = '12.9.129-client+filemode-launch';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26559,11 +26559,29 @@ const PyEngine = {
       } finally { clearTimeout(to); }
     } catch (e) { return 'down'; }
   },
+  _fileModeWatch() {
+    /* v12.9.129: страница открыта файлом (file://) — сам браузер процесс
+       запустить не может, но даём одну ссылку unitcontrol:// (движок
+       регистрирует протокол при первом запуске) и сами ловим момент,
+       когда движок поднимется: сразу уходим на его адрес с авто-токеном. */
+    if (location.protocol !== 'file:' || this._fileWatchOn) return;
+    this._fileWatchOn = true;
+    const box = document.createElement('div');
+    box.style.cssText = 'position:fixed;z-index:210;left:50%;bottom:14px;transform:translateX(-50%);background:#12233a;border:1px solid #2b5ea7;color:#cfe6ff;border-radius:11px;padding:10px 14px;font-size:12.5px;max-width:680px;box-shadow:0 8px 30px rgba(0,0,0,.45)';
+    box.innerHTML = '<b>Локальный движок не запущен.</b> Приложение работает на встроенном расчёте. ' +
+      'Для полного режима: <a href="unitcontrol://start" style="color:#7cc4ff;font-weight:700">Запустить движок</a> ' +
+      '(если ссылка не сработала — движок ещё ни разу не запускался: один раз запустите UNIT CONTROL.exe или start_app.bat, дальше ссылка будет работать). Жду запуска — страница сама переключится.';
+    document.body.appendChild(box);
+    const iv = setInterval(async () => {
+      if (await this.health()) { clearInterval(iv); location.href = 'http://127.0.0.1:8765/'; }
+    }, 2000);
+  },
   async refreshStatus() {
     const el = $('#pyEngineStatus'); if (!el) return;
     if (!await this.health()) {
       el.textContent = 'Python: не запущен (встроенный расчёт)';
       el.style.color = 'var(--mut)';
+      this._fileModeWatch();
       return false;
     }
     const v = await this.verifyAuth();

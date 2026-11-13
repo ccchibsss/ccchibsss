@@ -495,6 +495,11 @@ class TestExternalXlsx(unittest.TestCase):
         self.assertIn(b'xlsx.js', E._XLSX_JS)
         self.assertEqual(E._extract_xlsx('<html>без либы</html>'), '<html>без либы</html>')
 
+class TestProtocol(unittest.TestCase):
+    def test_register_protocol_graceful(self):
+        # на не-Windows и без реестра — тихий False, без исключений
+        self.assertIn(E.register_protocol(), (True, False))
+
 class TestImportEnrich(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib
