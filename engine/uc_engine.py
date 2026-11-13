@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.151-pyengine-36'
+VERSION = '12.9.153-pyengine-38'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -394,6 +394,10 @@ def db():
             conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
     if 'eff_price' not in cols:
         conn.execute("ALTER TABLE products ADD COLUMN eff_price REAL DEFAULT 0")
+    if 'visible' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN visible TEXT DEFAULT '1'")
+    if 'excluded' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN excluded TEXT DEFAULT '0'")
     dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
     for col, typ, dflt in (('barcode', 'TEXT', "''"), ('image_url', 'TEXT', "''"), ('multiplicity', 'REAL', '0')):
         if col not in dcols:
@@ -757,6 +761,12 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         if 'eff_price' in r:
             conn.execute('UPDATE products SET eff_price=? WHERE article=? AND brand=?',
                          (num(r.get('eff_price')), art, brand))
+        if 'visible' in r:
+            conn.execute('UPDATE products SET visible=? WHERE article=? AND brand=?',
+                         ('0' if str(r.get('visible')).lower() in ('0', 'false', 'нет') else '1', art, brand))
+        if 'excluded' in r:
+            conn.execute('UPDATE products SET excluded=? WHERE article=? AND brand=?',
+                         ('1' if str(r.get('excluded')).lower() in ('1', 'true', 'да') else '0', art, brand))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
@@ -869,7 +879,8 @@ def recalc_catalog(conn, st, force=False):
        если изменились её расчётные входы или настройки экономики (хэш в
        eco_results.inputs_hash). force=True — полный пересчёт как раньше.
        Итоги ответа считаются по всей таблице результатов, семантика та же."""
-    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost,excluded FROM products').fetchall()]
+    rows = [r for r in rows if str(r.get('excluded', '0')).lower() not in ('1', 'true', 'да')]  # как пайплайн браузера
     old = {(r['article'], r['brand']): r['inputs_hash'] for r in
            conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
     todo, hashes = [], {}
@@ -905,17 +916,25 @@ def import_file_bytes(conn, filename, data, enrich_only=False):
     name = os.path.basename(str(filename or 'file'))
     files = files_from_zip(data) if name.lower().endswith('.zip') else [(name, data)]
     ensure_free_space(sum(len(b) for _, b in files))  # v12.9.144: отказ до записи, а не в середине
-    total = 0; skipped = 0
-    existing = None
+    total = 0; skipped = 0; oe_matched = 0
+    existing = None; oe_to_key = {}
     if enrich_only:
         existing = {_norm_pair(r[0], r[1]) for r in conn.execute('SELECT article,brand FROM products')}
+        for _a, _b, _oe in conn.execute('SELECT article,brand,oe_numbers FROM products'):
+            for _c in _oe_codes(_oe): oe_to_key.setdefault(_c, set()).add((_a, _b))
     try:
         for fname, blob in files:
             rows = rows_from_xlsx_bytes(blob) if fname.lower().endswith('.xlsx') else rows_from_csv_bytes(blob)
             if existing is not None:
                 kept = []
                 for r in rows:
-                    if _norm_pair(r.get('article', ''), r.get('brand', '')) in existing: kept.append(r)
+                    if _norm_pair(r.get('article', ''), r.get('brand', '')) in existing: kept.append(r); continue
+                    # как findByOe браузера: уникальный OE -> та же карточка прайса
+                    _keys = set()
+                    for _c in _oe_codes(r.get('oe_numbers', '')): _keys |= oe_to_key.get(_c, set())
+                    if len(_keys) == 1:
+                        _ka, _kb = next(iter(_keys))
+                        r = dict(r); r['article'], r['brand'] = _ka, _kb; oe_matched += 1; kept.append(r)
                     elif str(r.get('article', '')).strip(): skipped += 1
                 rows = kept
             total += import_rows(conn, rows, f'file:{name}', rebuild_fts=False)
@@ -926,7 +945,7 @@ def import_file_bytes(conn, filename, data, enrich_only=False):
         except Exception: pass
         raise
     log_api(conn, 'importFile', name, 'ok', f'строк {total}, вне прайса пропущено {skipped}')
-    return {'file': name, 'imported': total, 'skipped_outside_price': skipped, 'enrich_only': bool(enrich_only)}
+    return {'file': name, 'imported': total, 'skipped_outside_price': skipped, 'enrich_only': bool(enrich_only), 'oe_matched': oe_matched}
 
 def _norm_key_part(v):
     """Как normArticle в приложении: верхний регистр, только буквы/цифры."""
@@ -946,7 +965,7 @@ def enrich_oe(conn):
     """Обогащение по OE-графу в SQL: транзитивные группы (union-find по oe_links),
        заполняются только пустые поля; артикулы группы дописываются в аналоги."""
     conn.execute('DELETE FROM oe_links')
-    prods = conn.execute('SELECT article,brand,name,weight,length,width,height,oe_numbers,analog_list FROM products').fetchall()
+    prods = conn.execute('SELECT article,brand,name,applicability,weight,length,width,height,oe_numbers,analog_list FROM products').fetchall()
     by_key = {(r['article'], r['brand']): dict(r) for r in prods}
     oe_to_keys = {}
     for r in prods:
@@ -967,7 +986,7 @@ def enrich_oe(conn):
         for k in keys[1:]: union(keys[0], k)
     groups = {}
     for k in by_key: groups.setdefault(find(k), []).append(k)
-    filled = {'name': 0, 'dims': 0, 'analog_list': 0}
+    filled = {'name': 0, 'applicability': 0, 'dims': 0, 'analog_list': 0}
     multi_groups = 0
     for members in groups.values():
         if len(members) < 2: continue
@@ -981,6 +1000,9 @@ def enrich_oe(conn):
             updates = {}
             if not str(r['name'] or '').strip() and best_name:
                 updates['name'] = best_name; filled['name'] += 1
+            _apps = [x['applicability'] for x in rows if str(x['applicability'] or '').strip()]
+            if not str(r['applicability'] or '').strip() and _apps:
+                updates['applicability'] = max(set(_apps), key=_apps.count); filled['applicability'] += 1
             if complete and not all(v > 0 for v in dims_of(r)):
                 same_art = [d for d in complete if d['article'] == r['article']]
                 donor = same_art[0] if same_art else complete[0]
@@ -1716,6 +1738,9 @@ def _ozon_rows_data(conn, keys=None, discount_pct=0, vat='Не облагает�
     out, yellow = [], set()
     for r in rows:
         d = dict(r)
+        # v12.9.153: скрытые SKU (visible=false в приложении) в выгрузку Ozon не идут
+        if str(d.get('visible', '1')).lower() in ('0', '0.0', 'false', 'нет'): continue
+        if str(d.get('excluded', '0')).lower() in ('1', 'true', 'да'): continue
         if keys is not None and (d['article'], d['brand']) not in keys: continue
         row, std_cols = ozon_row_meta(d, len(out) + 1, vat=vat, discount_pct=discount_pct,
                                       pairs=pairs, chz_codes=chz_codes)

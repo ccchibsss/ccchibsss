@@ -954,3 +954,50 @@ class TestEnrichParity151(unittest.TestCase):
         u = E.wb_unit(1000, 0, st)
         # платный вес из объёма: 2.5л*1000/5000=0.5кг -> СЦ 5р; логистика 67*1.7=113.9; tax 60
         self.assertAlmostEqual(u['total'], 178.9, delta=0.011)
+
+class TestOeMatch152(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_enrich_import_oe_unique(self):
+        E.import_file_bytes(self.conn, 'price.csv', 'Артикул;Бренд;Цена;OE номера\nF100;BOSCH;700;OE777\n'.encode('utf-8'))
+        res = E.import_file_bytes(self.conn, 'cross.csv',
+            'Артикул;Бренд;Название;OE номера\nX999;MAHLE;Фильтр масляный;OE777\n'.encode('utf-8'), enrich_only=True)
+        self.assertEqual(res['oe_matched'], 1)
+        rows = self.conn.execute('SELECT article,name FROM products').fetchall()
+        self.assertEqual(len(rows), 1)  # карточка одна — прайсовая
+        self.assertEqual(rows[0]['article'], 'F100')
+        self.assertEqual(rows[0]['name'], 'Фильтр масляный')
+    def test_enrich_oe_applicability(self):
+        E.import_rows(self.conn, [{'article': 'A1', 'brand': 'B', 'oe_numbers': 'OE5'},
+                                  {'article': 'A2', 'brand': 'B', 'oe_numbers': 'OE5', 'applicability': 'VW Golf'}], 't')
+        res = E.enrich_oe(self.conn)
+        self.assertEqual(res['filled']['applicability'], 1)
+
+class TestVisible153(unittest.TestCase):
+    def test_hidden_sku_not_exported(self):
+        import tempfile, pathlib
+        tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(tmp); E.DB_PATH = pathlib.Path(tmp) / 't.db'
+        conn = E.db()
+        E.import_rows(conn, [{'article': 'V1', 'brand': 'B', 'name': 'Видимый', 'price': 100, 'visible': 1},
+                             {'article': 'V2', 'brand': 'B', 'name': 'Скрытый', 'price': 100, 'visible': 0}], 't')
+        rows, _y = E._ozon_rows_data(conn)
+        arts = [r[1] for r in rows]
+        self.assertEqual(arts, ['V1'])
+
+class TestExcluded153(unittest.TestCase):
+    def test_excluded_not_calculated_not_exported(self):
+        import tempfile, pathlib
+        tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(tmp); E.DB_PATH = pathlib.Path(tmp) / 't.db'
+        conn = E.db()
+        E.import_rows(conn, [{'article': 'E1', 'brand': 'B', 'price': 1000, 'cost': 500, 'sales': 10, 'excluded': 1},
+                             {'article': 'E2', 'brand': 'B', 'price': 1000, 'cost': 500, 'sales': 10}], 't')
+        E.recalc_catalog(conn, {'commission_pct': 14, 'tax_regime': 'usn_income_6', 'tax_pct': 6})
+        arts = [r['article'] for r in conn.execute('SELECT article FROM eco_results')]
+        self.assertEqual(arts, ['E2'])
+        rows, _y = E._ozon_rows_data(conn)
+        self.assertEqual([r[1] for r in rows], ['E2'])
