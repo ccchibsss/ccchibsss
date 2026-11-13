@@ -846,3 +846,27 @@ class TestHeaderMapping146(unittest.TestCase):
     def test_supplier_file_still_maps(self):
         mp = E.map_header(['Бренд', 'Каталожный номер', 'Описание', 'Остаток', 'Кратность отгрузки', 'Валюта', 'Цена', 'Штрихкод', 'ТН ВЭД'])
         self.assertEqual(mp['article'], 1); self.assertEqual(mp['price'], 6); self.assertEqual(mp['tnved'], 8)
+
+class TestRecheck147(unittest.TestCase):
+    def test_parse_xlsx_without_openpyxl(self):
+        import tempfile, pathlib
+        tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(tmp); E.DB_PATH = pathlib.Path(tmp) / 't.db'
+        conn = E.db()
+        data = E._xlsx_from_rows(['Артикул', 'Цена'], [['X1', '100']], 'Лист')
+        res = E.parse_file_bytes(conn, 'p.xlsx', data)
+        self.assertEqual(res['total'], 1)
+        self.assertEqual(res['headers'], ['Артикул', 'Цена'])
+    def test_short_csv_rows_skipped(self):
+        rows = E.rows_from_csv_bytes('Артикул;Бренд;Цена\nF1;B;10\nF2\n;B;5\n'.encode('utf-8'))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]['article'], 'F2')
+
+class TestUnits147(unittest.TestCase):
+    def test_mm_grams_and_triple(self):
+        rows = E.rows_from_csv_bytes('Артикул;Длина, мм;Вес, г;Габариты\nF1;230;850;\nF2;;;230x170x80\n'.encode('utf-8'))
+        self.assertEqual(len(rows), 2)
+        self.assertAlmostEqual(E.num(rows[0]['length']), 23)
+        self.assertAlmostEqual(E.num(rows[0]['weight']), 0.85)
+        self.assertAlmostEqual(E.num(rows[1]['length']), 230)
+        self.assertAlmostEqual(E.num(rows[1]['height']), 80)
