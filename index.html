@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.132-client+sql-calc';
+const APP_VERSION = '12.9.134-client+audit-fixes';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26686,15 +26686,11 @@ const PyEngine = {
   async recalcAndApply(prog) {
       if (!S.rows.length) return { applied: 0, recalculated: 0 };
       const CH = 5000;
-      const payloadOf = p => ({ article: p.article, brand: p.brand || '', name: p.name || '', price: num(p.price), cost: num(p.cost),
-        stock: num(p.stock), sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width),
-        height: num(p.height), volume: num(p.volume), oe_numbers: p.oe_numbers || '' });
-      for (let i = 0; i < S.rows.length; i += CH) {
-        const chunk = S.rows.slice(i, i + CH);
-        await this._fetch('/import/rows', { method: 'POST', timeout: 120000,
-          body: JSON.stringify({ rows: chunk.map(payloadOf), source: 'app-catalog', final: i + CH >= S.rows.length }) });
-        if (prog) prog('отправка в SQLite: ' + fmt(Math.min(i + CH, S.rows.length)) + ' из ' + fmt(S.rows.length));
-      }
+      /* A6 (аудит v12.9.133): единая полная синхронизация (~30 полей, как у
+         экспортов), а не узкий набор — иначе движок считал по устаревшим
+         атрибутам Ozon/категориям. */
+      await this._syncCatalog('app-recalc');
+      if (prog) prog('каталог синхронизирован в SQLite: ' + fmt(S.rows.length) + ' SKU');
       const st = this._settingsSnapshot();
       const rec = await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: st }) });
       if (prog) prog('применение результата: ' + fmt(rec.recalculated || 0) + ' SKU посчитано на движке' +

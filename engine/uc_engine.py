@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.131-pyengine-21'
+VERSION = '12.9.134-pyengine-22'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -244,12 +244,43 @@ def log_api(conn, action, endpoint, status, detail=''):
 def get_settings(conn):
     return {r['key']: r['value'] for r in conn.execute('SELECT key,value FROM settings')}
 
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    # A3 (аудит v12.9.133): на Windows секреты хранятся зашифрованными DPAPI
+    # (привязка к учётной записи пользователя); на прочих ОС — как есть.
+    if os.name != 'nt': return data
+    import ctypes, base64 as _b64
+    class BLOB(ctypes.Structure):
+        _fields_ = [('cbData', ctypes.c_ulong), ('pbData', ctypes.POINTER(ctypes.c_char))]
+    if protect:
+        raw = data
+    else:
+        try: raw = _b64.b64decode(data)
+        except Exception: return data  # старый открытый формат — читаем как есть
+    buf = ctypes.create_string_buffer(raw, len(raw))
+    blob_in, blob_out = BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), BLOB()
+    fn = (ctypes.windll.crypt32.CryptProtectData if protect
+          else ctypes.windll.crypt32.CryptUnprotectData)
+    if not fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
+        return data if not protect else (_b64.b64encode(data))
+    out = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    import base64 as _b64
+    return _b64.b64encode(out) if protect else out
+
+def save_secret(key, value):
+    cur = {}
+    if SECRETS_PATH.exists():
+        try: cur = json.loads(_dpapi(SECRETS_PATH.read_bytes(), False).decode('utf-8'))
+        except Exception: cur = {}
+    cur[key] = value
+    SECRETS_PATH.write_bytes(_dpapi(json.dumps(cur, ensure_ascii=False).encode('utf-8'), True))
+
 def secrets():
     env = {k: os.environ.get(k) for k in
            ('UC_OZON_CLIENT_ID', 'UC_OZON_API_KEY', 'UC_WB_TOKEN', 'UC_MAIL_PASSWORD', 'UC_YM_TOKEN')}
     file_secrets = {}
     if SECRETS_PATH.exists():
-        try: file_secrets = json.loads(SECRETS_PATH.read_text(encoding='utf-8'))
+        try: file_secrets = json.loads(_dpapi(SECRETS_PATH.read_bytes(), False).decode('utf-8'))
         except Exception: file_secrets = {}
     merged = dict(file_secrets)
     for k, v in env.items():
@@ -325,14 +356,15 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         if not art: continue
         brand = str(r.get('brand', '')).strip()
         old = conn.execute('SELECT price,cost FROM products WHERE article=? AND brand=?', (art, brand)).fetchone()
-        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,oe_numbers,analog_list,category,tnved,applicability,barcode,image_url,extra_photos,ozon_sku,ozon_type,ozon_category,model,hazard_class,color,material,country,warranty,diameter,package_contents,rich_content,description,mark_required,group_articles,cross_numbers,multiplicity,net_weight,old_price,source,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
+        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability,barcode,image_url,extra_photos,ozon_sku,ozon_type,ozon_category,model,hazard_class,color,material,country,warranty,diameter,package_contents,rich_content,description,mark_required,group_articles,cross_numbers,multiplicity,net_weight,old_price,source,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
               name=COALESCE(NULLIF(excluded.name,''),products.name),
               price=CASE WHEN excluded.price>0 THEN excluded.price ELSE products.price END,
               cost=CASE WHEN excluded.cost>0 THEN excluded.cost ELSE products.cost END,
               stock=excluded.stock, sales=excluded.sales, weight=excluded.weight, length=excluded.length,
               width=excluded.width, height=excluded.height,
+              volume=CASE WHEN excluded.volume>0 THEN excluded.volume ELSE products.volume END,
               oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE products.oe_numbers END,
               analog_list=CASE WHEN excluded.analog_list<>'' THEN excluded.analog_list ELSE products.analog_list END,
               category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE products.category END,
@@ -363,7 +395,7 @@ def import_rows(conn, rows, source, rebuild_fts=True):
               source=excluded.source, updated_at=datetime("now")''',
             (art, str(r.get('brand', '')).strip(), str(r.get('name', '')),
              num(r.get('price')), num(r.get('cost')), num(r.get('stock')), num(r.get('sales')), num(r.get('weight')),
-             num(r.get('length')), num(r.get('width')), num(r.get('height')),
+             num(r.get('length')), num(r.get('width')), num(r.get('height')), num(r.get('volume')),
              str(r.get('oe_numbers', '')), str(r.get('analog_list', '')), str(r.get('category', '')), str(r.get('tnved', '')),
              str(r.get('applicability', '')),
              str(r.get('barcode', '')), str(r.get('image_url', '')), str(r.get('extra_photos', '')),
@@ -1306,26 +1338,47 @@ def _extract_xlsx(html):
     _XLSX_JS = js.encode('utf-8')
     return html[:start] + '<script src="/lib/xlsx.js"></script>' + html[end + len('</script>'):]
 
+_APP_HTML_CACHE = {'key': None, 'body': None}
 def render_app_html():
     """Приложение с авто-токеном: страница отдана самим движком с его же адреса,
        поэтому токен можно вшить в HTML — пользователю не нужно ничего вставлять.
        Чужой сайт прочитать эту страницу не может (нет CORS-заголовка на /)."""
     app_file = _app_html_path()
     if app_file is None: return None
+    try: key = (str(app_file), app_file.stat().st_mtime_ns, app_file.stat().st_size)
+    except OSError: key = None
+    if key and _APP_HTML_CACHE['key'] == key: return _APP_HTML_CACHE['body']
     html = app_file.read_text(encoding='utf-8')
     html = _extract_xlsx(html)
     inject = '<script>window.__UC_PY_TOKEN__=' + json.dumps(get_token()) + ';</script>'
     if '</head>' in html: html = html.replace('</head>', inject + '</head>', 1)
     else: html = inject + html
-    return html.encode('utf-8')
+    body = html.encode('utf-8')
+    if key: _APP_HTML_CACHE.update(key=key, body=body)
+    return body
 
+_TOKEN_CACHE = None
 def get_token():
+    global _TOKEN_CACHE
+    if _TOKEN_CACHE: return _TOKEN_CACHE
     if not TOKEN_PATH.exists():
         TOKEN_PATH.write_text(os.urandom(18).hex(), encoding='utf-8')
-    return TOKEN_PATH.read_text(encoding='utf-8').strip()
+    _TOKEN_CACHE = TOKEN_PATH.read_text(encoding='utf-8').strip()
+    return _TOKEN_CACHE
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    def _host_ok(self):
+        # A1 (аудит v12.9.133): без проверки Host вредоносный сайт через
+        # DNS-rebinding читает страницу с вшитым токеном. Принимаем только
+        # локальные имена; порт не сверяем — движок может быть на другом.
+        h = (self.headers.get('Host', '') or '').strip().lower()
+        host = h.rsplit(':', 1)[0] if ':' in h else h
+        return host in ('127.0.0.1', 'localhost', '[::1]', '::1')
+    def _deny_bad_host(self):
+        if self._host_ok(): return False
+        self._send(403, {'ok': False, 'error': 'Host не разрешён'})
+        return True
     def _send_bytes(self, code, body, content_type, filename):
         # gzip только для текстовых типов: CSV/JSON/XML сжимаются кратно;
         # XLSX уже zip — повторное сжатие бесполезно.
@@ -1354,15 +1407,21 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in extra.items(): self.send_header(k, v)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers(); self.wfile.write(body)
-    def do_OPTIONS(self): self._send(200, {'ok': True})
+    def do_OPTIONS(self):
+        if self._deny_bad_host(): return
+        self._send(200, {'ok': True})
     def _auth(self):
-        return self.headers.get('X-UC-Token', '') == get_token()
+        import hmac as _hmac
+        return _hmac.compare_digest(self.headers.get('X-UC-Token', ''), get_token())
     def _body(self):
         ln = int(self.headers.get('Content-Length', 0) or 0)
+        if ln > 50 * 1024 * 1024:  # A5: потолок JSON-тела
+            raise ValueError('тело запроса больше 50 МБ')
         raw = self.rfile.read(ln) if ln else b'{}'
         try: return json.loads(raw.decode('utf-8') or '{}')
         except Exception: return {}
     def do_GET(self):
+        if self._deny_bad_host(): return
         if self.path in ('/', '/index.html', '/app'):
             # одно окно: приложение отдаёт сам движок с того же адреса
             body = render_app_html()
@@ -1486,12 +1545,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {'ok': True, 'rows': [dict(r) for r in rows]})
         return self._send(404, {'ok': False, 'error': 'not found'})
     def do_POST(self):
+        if self._deny_bad_host(): return
         if not self._auth(): return self._send(401, {'ok': False, 'error': 'X-UC-Token'})
         if self.path == '/import/file':
             # бинарное тело НЕЛЬЗЯ читать через _body() (JSON): читаем один раз здесь
             from urllib.parse import unquote
             fname = unquote(self.headers.get('X-Filename', 'file.csv'))
             ln = int(self.headers.get('Content-Length', 0) or 0)
+            if ln > 200 * 1024 * 1024:  # A5: потолок файла загрузки
+                return self._send(413, {'ok': False, 'error': 'файл больше 200 МБ'})
             data = self.rfile.read(ln) if ln else b''
             try:
                 return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data)})
@@ -1501,12 +1563,17 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import unquote
             fname = unquote(self.headers.get('X-Filename', 'file.csv'))
             ln = int(self.headers.get('Content-Length', 0) or 0)
+            if ln > 200 * 1024 * 1024:  # A5: потолок файла загрузки
+                return self._send(413, {'ok': False, 'error': 'файл больше 200 МБ'})
             data = self.rfile.read(ln) if ln else b''
             try:
                 return self._send(200, {'ok': True, **parse_file_bytes(db(), fname, data)})
             except Exception as e:
                 return self._send(500, {'ok': False, 'error': str(e)[:300]})
-        body = self._body()
+        try:
+            body = self._body()
+        except ValueError as e:
+            return self._send(413, {'ok': False, 'error': str(e)})
         conn = db()
         try:
             if self.path == '/calc/batch':
@@ -1574,6 +1641,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/backup':
                 return self._send(200, {'ok': True, **make_backup()})
             if self.path == '/settings':
+                for sk, sv in (body.get('secrets') or {}).items():
+                    save_secret(str(sk), str(sv))  # A3: на Windows уйдёт в DPAPI
                 for k, v in (body.get('settings') or {}).items():
                     conn.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                                  (str(k), str(v)))
