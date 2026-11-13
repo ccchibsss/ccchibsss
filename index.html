@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.136-client+audit2-fixes';
+const APP_VERSION = '12.9.137-client+secrets-engine';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26620,6 +26620,7 @@ const PyEngine = {
     }, 2000);
   },
   async refreshStatus() {
+    if (!this._secretsTried) { this._secretsTried = true; this.loadSecrets(); }
     const el = $('#pyEngineStatus'); if (!el) return;
     if (!await this.health()) {
       el.textContent = 'Python: не запущен (встроенный расчёт)';
@@ -26660,6 +26661,44 @@ const PyEngine = {
       tax_osno_share: num(cfg.taxOsnoEligibleSharePct || 0),
       target_margin: num(cfg.tgtMargin == null ? 20 : cfg.tgtMargin)
     };
+  },
+  /* B6: перенос секретов площадок в движок (DPAPI) и подгрузка в память. */
+  async migrateSecrets(silent) {
+    try {
+      if (!await this.health() || await this.verifyAuth() !== 'ok') return false;
+      const sec = {};
+      for (const k of SECRET_SETTING_KEYS) {
+        const v = S.settings && S.settings[k];
+        if (v) sec['UC_SET_' + k] = String(v);
+      }
+      const st = await this._fetch('/secrets/status').catch(() => null);
+      const have = new Set(((st && st.keys) || []).map(x => x.replace('UC_SET_', '')));
+      const payload = {};
+      for (const k of SECRET_SETTING_KEYS) {
+        if (S.settings && S.settings[k] && !have.has(k)) payload['UC_SET_' + k] = String(S.settings[k]);
+        else if (have.has(k) && !(S.settings && S.settings[k])) payload['UC_SET_' + k] = '';  // очищено в форме — стереть и в движке
+      }
+      if (Object.keys(payload).length) {
+        await this._fetch('/settings', { method: 'POST', timeout: 60000, body: JSON.stringify({ secrets: payload }) });
+      }
+      if (Object.keys(sec).length || have.size) {
+        lsSet('uc.secretsInEngine', '1');
+        if (typeof UI2 !== 'undefined') await UI2.saveSettings();  // пересохранить без секретов
+        if (!silent) Toast.ok('Секреты площадок перенесены в движок',
+          'Токены WB/ЯМ/Мегамаркета/Avito и ключ сервера теперь хранятся в движке (на Windows — под DPAPI), ' +
+          'а в браузере остаются только в памяти этой вкладки. При выключенном движке введите токен заново или включите движок.');
+        return true;
+      }
+    } catch (e) { console.warn('[UC] migrateSecrets:', e); }
+    return false;
+  },
+  async loadSecrets() {
+    try {
+      if (lsGet('uc.secretsInEngine') !== '1') return;
+      if (!await this.health()) return;
+      const j = await this._fetch('/secrets/values').catch(() => null);
+      if (j && j.values) for (const [k, v] of Object.entries(j.values)) if (SECRET_SETTING_KEYS.includes(k)) S.settings[k] = v;
+    } catch (e) { console.warn('[UC] loadSecrets:', e); }
   },
   async checkEconomics() {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Запустите engine/run_engine.bat (или UC-движок.exe) и задайте токен кнопкой «Токен Python». Приложение продолжает считать встроенным расчётом.'); this.refreshStatus(); return; }
@@ -36897,6 +36936,7 @@ const Api = {
     s.businessId = s.ymBusinessId || s.businessId;
     s.mmMerchantId = getV('#mmMerchantId');
     s.mmAuthToken = getV('#mmAuthToken');
+    setTimeout(() => { try { PyEngine.migrateSecrets(true); } catch (e) { } }, 300);
     s.avitoClientId = getV('#avitoClientId');
     s.avitoClientSecret = getV('#avitoClientSecret');
     await metaSet('settings', s);
@@ -37195,9 +37235,18 @@ renderHistory() {
     });
   }
 };
+/* B6 (аудит №2): секретные поля настроек площадок. После миграции в движок
+   (secrets.json под DPAPI) на диск браузера они не пишутся — только в память. */
+const SECRET_SETTING_KEYS = ['wbApiToken', 'mmAuthToken', 'avitoClientSecret', 'ymApiKeyInput', 'apiKey', 'serverToken', 'secret', 'manualToken'];
 const UI2 = { saveSettings: async () => {
     /* v10.4: режим «секрет только в памяти» — secret/manualToken не пишем на диск. */
-    const toSave = S.settings.secretMemoryOnly ? Object.assign({}, S.settings, { secret: '', manualToken: '' }) : S.settings;
+    let toSave = S.settings.secretMemoryOnly ? Object.assign({}, S.settings, { secret: '', manualToken: '' }) : S.settings;
+    try {
+      if (lsGet('uc.secretsInEngine') === '1') {
+        toSave = Object.assign({}, toSave);
+        for (const k of SECRET_SETTING_KEYS) toSave[k] = '';
+      }
+    } catch (e) { }
     await metaSet('settings', toSave); lsSet('uc.settings', JSON.stringify(toSave)); } };
 /* v10.4: батчер перерисовок — схлопывает каскады Table.paint()+Dash.render()+UE.render() в один кадр. */
 const Render = {

@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.136-pyengine-23'
+VERSION = '12.9.137-pyengine-24'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -283,7 +283,8 @@ def save_secret(key, value):
     if SECRETS_PATH.exists():
         try: cur = json.loads(_dpapi(SECRETS_PATH.read_bytes(), False).decode('utf-8'))
         except Exception: cur = {}
-    cur[key] = value
+    if value: cur[key] = value
+    else: cur.pop(key, None)  # пустое значение = удалить секрет
     SECRETS_PATH.write_bytes(_dpapi(json.dumps(cur, ensure_ascii=False).encode('utf-8'), True))
 
 def secrets():
@@ -1507,6 +1508,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {'ok': True, **info})
         if not self._auth(): return self._send(401, {'ok': False, 'error': 'X-UC-Token'})
         conn = db()
+        if self.path == '/secrets/status':
+            return self._send(200, {'ok': True, 'keys': sorted(k for k in secrets() if k.startswith('UC_SET_'))})
+        if self.path == '/secrets/values':
+            # B6: значения отдаются только авторизованному локальному клиенту и
+            # только в память вкладки — на диск браузера они больше не пишутся.
+            vals = {k[len('UC_SET_'):]: v for k, v in secrets().items() if k.startswith('UC_SET_') and v}
+            return self._send(200, {'ok': True, 'values': vals})
         if self.path == '/report/summary': return self._send(200, {'ok': True, **summary_report(conn)})
         if self.path == '/report/dashboard': return self._send(200, {'ok': True, **dashboard_report(conn)})
         if self.path.startswith('/analogs/suggestions'):
