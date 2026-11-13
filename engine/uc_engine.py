@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.140-pyengine-26'
+VERSION = '12.9.141-pyengine-27'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -380,14 +380,81 @@ def rows_from_csv_bytes(data):
         out.append(item)
     return out
 
+def _xlsx_sheet_rows(data):
+    """v12.9.141: чтение XLSX чистым stdlib (zip + XML) — движок собирается в
+       exe без openpyxl, а импорт XLSX падал с «openpyxl не установлен».
+       Понимает sharedStrings, inlineStr, числа и строки; первый лист книги."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+    NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+    RNS = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        names = set(z.namelist())
+        shared = []
+        if 'xl/sharedStrings.xml' in names:
+            root = ET.fromstring(z.read('xl/sharedStrings.xml'))
+            for si in root.findall(NS + 'si'):
+                shared.append(''.join(t.text or '' for t in si.iter(NS + 't')))
+        # целевой лист: первый из workbook.xml по rels, иначе sheet1
+        sheet_path = 'xl/worksheets/sheet1.xml'
+        try:
+            wbroot = ET.fromstring(z.read('xl/workbook.xml'))
+            rels = ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))
+            relmap = {r.get('Id'): r.get('Target') for r in rels}
+            first = wbroot.find(NS + 'sheets/' + NS + 'sheet')
+            if first is not None:
+                tgt = relmap.get(first.get(RNS + 'id'), '')
+                if tgt:
+                    sheet_path = 'xl/' + tgt.lstrip('/') if not tgt.startswith('xl/') else tgt
+        except Exception: pass
+        if sheet_path not in names:
+            cand = sorted(n for n in names if n.startswith('xl/worksheets/sheet'))
+            if not cand: return []
+            sheet_path = cand[0]
+        root = ET.fromstring(z.read(sheet_path))
+    def col_idx(ref):
+        n = 0
+        for ch in ref:
+            if ch.isalpha(): n = n * 26 + (ord(ch.upper()) - 64)
+            else: break
+        return n - 1
+    rows = []
+    for row_el in root.iter(NS + 'row'):
+        cells = {}
+        maxc = -1
+        for c in row_el.findall(NS + 'c'):
+            idx = col_idx(c.get('r', 'A1'))
+            t = c.get('t')
+            v = c.find(NS + 'v')
+            val = None
+            if t == 'inlineStr':
+                is_el = c.find(NS + 'is')
+                val = ''.join(x.text or '' for x in is_el.iter(NS + 't')) if is_el is not None else ''
+            elif v is not None and v.text is not None:
+                if t == 's':
+                    try: val = shared[int(v.text)]
+                    except Exception: val = ''
+                elif t in ('str', 'e'):
+                    val = v.text
+                else:
+                    try:
+                        fv = float(v.text)
+                        val = int(fv) if fv == int(fv) and '.' not in v.text else fv
+                    except Exception: val = v.text
+            if val is not None:
+                cells[idx] = val; maxc = max(maxc, idx)
+        if maxc >= 0:
+            rows.append([cells.get(i, '') for i in range(maxc + 1)])
+    return rows
+
 def rows_from_xlsx_bytes(data):
     try:
         import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
     except ImportError:
-        raise RuntimeError('openpyxl не установлен: pip install openpyxl (или присылайте CSV)')
-    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
+        rows = _xlsx_sheet_rows(data)
     if not rows: return []
     mp = map_header(rows[0])
     if 'article' not in mp: return []
