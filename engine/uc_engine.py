@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.141-pyengine-27'
+VERSION = '12.9.142-pyengine-28'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -570,6 +570,9 @@ def import_rows(conn, rows, source, rebuild_fts=True):
     if rebuild_fts:
         conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
     conn.commit()
+    if rebuild_fts:  # финальный чанк: сжимаем WAL, иначе файл журнала растёт без bound
+        try: conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        except Exception: pass
     return n
 
 # ---------------- почта (IMAP) ----------------
@@ -1532,6 +1535,17 @@ class Handler(BaseHTTPRequestHandler):
         h = (self.headers.get('Host', '') or '').strip().lower()
         host = h.rsplit(':', 1)[0] if ':' in h else h
         return host in ('127.0.0.1', 'localhost', '[::1]', '::1')
+    def _send_disk_full(self):
+        # «database or disk is full» пользователю ни о чём не говорит — объясняем
+        import shutil as _sh
+        try: free_mb = round(_sh.disk_usage(str(DATA)).free / 1048576)
+        except Exception: free_mb = None
+        try: db_mb = round(DB_PATH.stat().st_size / 1048576, 1) if DB_PATH.exists() else 0
+        except Exception: db_mb = 0
+        return self._send(507, {'ok': False, 'error':
+            'Не хватает места на диске для базы движка (свободно ' + str(free_mb) + ' МБ, база каталога ' + str(db_mb) +
+            ' МБ в папке engine_data рядом с движком). Освободите место на этом диске (минимум 1–2 ГБ: Очистка диска, Корзина), '
+            'перезапустите движок и повторите. Каталог в приложении при этом не пострадал.'})
     def _deny_bad_host(self):
         if self._host_ok(): return False
         self._send(403, {'ok': False, 'error': 'Host не разрешён'})
@@ -1612,6 +1626,12 @@ class Handler(BaseHTTPRequestHandler):
             info = {'engine_version': VERSION, 'frozen': bool(FROZEN)}
             ap = _app_html_path()
             info['app_path'] = str(ap) if ap else None
+            try:
+                import shutil as _sh
+                info['disk_free_mb'] = round(_sh.disk_usage(str(DATA)).free / 1048576)
+            except Exception: pass
+            try: info['db_size_mb'] = round(DB_PATH.stat().st_size / 1048576, 1) if DB_PATH.exists() else 0
+            except Exception: pass
             if ap:
                 raw = ap.read_bytes()
                 info['app_size'] = len(raw)
@@ -1813,6 +1833,8 @@ class Handler(BaseHTTPRequestHandler):
                 conn.commit()
                 return self._send(200, {'ok': True})
         except Exception as e:
+            if 'disk is full' in str(e) or 'database or disk' in str(e):
+                return self._send_disk_full()
             return self._send(500, {'ok': False, 'error': str(e)[:300]})
         return self._send(404, {'ok': False, 'error': 'not found'})
 

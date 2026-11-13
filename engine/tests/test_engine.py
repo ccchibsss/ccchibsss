@@ -643,6 +643,22 @@ class TestXlsxStdlib141(unittest.TestCase):
         out = E.rows_from_xlsx_bytes(E._xlsx_from_rows(['Артикул', 'Бренд', 'Цена'], [['F100', 'BOSCH', 700]], 'Лист'))
         self.assertEqual(out[0]['article'], 'F100')
 
+class TestDiskFull142(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        E.TOKEN_PATH = pathlib.Path(self.tmp) / 'token.txt'; E._TOKEN_CACHE = None
+        self.conn = E.db()
+    def test_diag_has_disk_fields(self):
+        h = E.Handler.__new__(E.Handler)
+        sent = {}
+        h._send = lambda code, obj: sent.update(code=code, obj=obj)
+        # эмулируем _send_disk_full без сокета
+        E.Handler._send_disk_full(h)
+        self.assertEqual(sent['code'], 507)
+        self.assertIn('Не хватает места', sent['obj']['error'])
+
 class TestProtocol(unittest.TestCase):
     def test_register_protocol_graceful(self):
         # на не-Windows и без реестра — тихий False, без исключений
