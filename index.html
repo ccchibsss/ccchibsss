@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.149-client+wb-promo';
+const APP_VERSION = '12.9.151-client+enrich-parity';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26850,7 +26850,7 @@ const PyEngine = {
         continue;
       }
       let ch = false;
-      for (const f of ['name', 'oe_numbers', 'analog_list', 'category', 'tnved', 'applicability', 'warranty', 'country', 'group_articles', 'cross_numbers', 'barcode']) {
+      for (const f of ['name', 'oe_numbers', 'analog_list', 'category', 'tnved', 'applicability', 'warranty', 'country', 'group_articles', 'cross_numbers', 'barcode', 'image_url']) {
         if (!String(p[f] || '').trim() && String(r[f] || '').trim()) { p[f] = r[f]; ch = true; }
       }
       for (const f of ['weight', 'length', 'width', 'height', 'volume']) {
@@ -27101,6 +27101,7 @@ const PyEngine = {
             category: pt.category || '', tnved: pt.tnved || '', applicability: pt.applicability || '',
             warranty: pt.warranty || '', country: pt.country || '',
             weight: num(pt.weight), length: num(pt.length), width: num(pt.width), height: num(pt.height),
+            barcode: pt.barcode || '', image_url: pt.image_url || pt.image || '', multiplicity: num(pt.multiplicity || 0),
             oe_numbers: [...oeSet].join(' / ') });
         }
         for (let i = 0; i < donors.length; i += 5000) {
@@ -27109,7 +27110,8 @@ const PyEngine = {
         }
       }
       const res = await this._fetch('/catalog/enrich-full', { method: 'POST', timeout: 600000,
-        body: JSON.stringify({ cat_mode: (S.settings && S.settings.enrichCatMode) || 'artbrand' }) });
+        body: JSON.stringify({ cat_mode: (S.settings && S.settings.enrichCatMode) || 'artbrand',
+          enrich_mode: (typeof HVC !== 'undefined' && HVC.enrichMode) ? HVC.enrichMode() : 'auto' }) });
       const products = await this._pullProducts();
       const m = this._mergeProducts(products, true);
       bumpVersion();

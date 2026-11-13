@@ -921,3 +921,36 @@ class TestOzonExportParity150(unittest.TestCase):
         row, _std = E.ozon_row_meta({'article': 'A1', 'brand': 'B', 'name': 'N', 'price': 100,
             'weight': 0.5, 'length': 10, 'width': 8, 'height': 5, 'tnved': '123'}, 1)
         self.assertIn('10 цифр', row[44])
+
+class TestEnrichParity151(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_placeholder_category_and_donor_fields(self):
+        E.import_rows(self.conn, [{'article': 'P1', 'brand': 'B', 'category': 'Разное', 'oe_numbers': 'OE1'}], 't')
+        E.import_donors(self.conn, [{'article': 'P1', 'brand': 'B', 'category': 'Фильтры масляные',
+                                     'barcode': '460001', 'image_url': 'https://x/1.jpg', 'multiplicity': 4}], 'd')
+        res = E.enrich_full(self.conn)
+        r = self.conn.execute("SELECT category,barcode,image_url,multiplicity FROM products WHERE article='P1'").fetchone()
+        self.assertEqual(r['category'], 'Фильтры масляные')  # заглушка не блокирует обогащение
+        self.assertEqual(r['barcode'], '460001'); self.assertEqual(r['multiplicity'], 4)
+        self.assertEqual(res['filled']['barcode'], 1)
+    def test_dims_artbrand_mode_no_oe_donor(self):
+        E.import_rows(self.conn, [{'article': 'P1', 'brand': 'B', 'oe_numbers': 'OE2'},
+                                  {'article': 'P2', 'brand': 'B', 'oe_numbers': 'OE2',
+                                   'weight': 1, 'length': 10, 'width': 8, 'height': 5}], 't')
+        E.enrich_full(self.conn, enrich_mode='artbrand')
+        w = self.conn.execute("SELECT weight FROM products WHERE article='P1'").fetchone()['weight']
+        self.assertEqual(w, 0)  # в режиме артикул+бренд OE-донор габариты не даёт
+        E.enrich_full(self.conn, enrich_mode='oe')
+        w = self.conn.execute("SELECT weight FROM products WHERE article='P1'").fetchone()['weight']
+        self.assertEqual(w, 1)
+    def test_wb_billable_from_volume(self):
+        st = {'tax_regime': 'usn_income_6', 'tax_pct': 6, 'pack': 0, 'transit': 0,
+              'wb': {'fulfillment': 'FBS', 'commission_pct': 0, 'acquiring_pct': 0, 'sc_per_kg': 10, 'vol_divisor': 5000},
+              '_volume': 2.5, '_weight': 0, '_dims': (0, 0, 0)}
+        u = E.wb_unit(1000, 0, st)
+        # платный вес из объёма: 2.5л*1000/5000=0.5кг -> СЦ 5р; total=5, tax 60
+        self.assertAlmostEqual(u['total'], 65, delta=0.011)

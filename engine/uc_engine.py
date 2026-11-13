@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.150-pyengine-35'
+VERSION = '12.9.151-pyengine-36'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -207,7 +207,8 @@ def wb_unit(price, cost, st):
     logistics = rnd(rnd(direct_base * coeff) + (num(wb.get('acceptance')) if scheme == 'FBO' else 0.0))
     storage = wb_storage_month(v, num(wb.get('storage_per_l', 0.15)), num(wb.get('storage_coeff', 1)), num(wb.get('storage_days', 30))) if scheme == 'FBO' else 0.0
     div = num(wb.get('vol_divisor')) or 5000
-    billable = max(num(st.get('_weight', 0)), (dims[0] * dims[1] * dims[2] / div) if all(d > 0 for d in dims) else 0.0)
+    _vol_kg = (dims[0] * dims[1] * dims[2] / div) if all(d > 0 for d in dims) else (v * 1000 / div if v > 0 else 0.0)
+    billable = max(num(st.get('_weight', 0)), _vol_kg)
     sc_delivery = rnd(num(wb.get('sc_per_kg', 12)) * billable) if scheme == 'FBS' else 0.0
     rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
     failed_manual = num(wb.get('failed_manual'))
@@ -393,6 +394,10 @@ def db():
             conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
     if 'eff_price' not in cols:
         conn.execute("ALTER TABLE products ADD COLUMN eff_price REAL DEFAULT 0")
+    dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
+    for col, typ, dflt in (('barcode', 'TEXT', "''"), ('image_url', 'TEXT', "''"), ('multiplicity', 'REAL', '0')):
+        if col not in dcols:
+            conn.execute(f"ALTER TABLE donors ADD COLUMN {col} {typ} DEFAULT {dflt}")
     # B5: retention — история цен год, лог API 90 дней
     try:
         conn.execute("DELETE FROM price_history WHERE ts < datetime('now','-365 days')")
@@ -1009,7 +1014,7 @@ def import_donors(conn, rows, source):
         art = str(r.get('article', '')).strip()
         if not art: continue
         conn.execute('''INSERT INTO donors(article,brand,source,name,category,tnved,applicability,warranty,country,
-            weight,length,width,height,oe_numbers) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            weight,length,width,height,oe_numbers,barcode,image_url,multiplicity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(article,brand,source) DO UPDATE SET
               name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE donors.name END,
               category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE donors.category END,
@@ -1021,11 +1026,15 @@ def import_donors(conn, rows, source):
               length=CASE WHEN excluded.length>0 THEN excluded.length ELSE donors.length END,
               width=CASE WHEN excluded.width>0 THEN excluded.width ELSE donors.width END,
               height=CASE WHEN excluded.height>0 THEN excluded.height ELSE donors.height END,
-              oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END''',
+              oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END,
+              barcode=CASE WHEN excluded.barcode<>'' THEN excluded.barcode ELSE donors.barcode END,
+              image_url=CASE WHEN excluded.image_url<>'' THEN excluded.image_url ELSE donors.image_url END,
+              multiplicity=CASE WHEN excluded.multiplicity>0 THEN excluded.multiplicity ELSE donors.multiplicity END''',
             (art, str(r.get('brand', '')).strip(), source, str(r.get('name', '')), str(r.get('category', '')),
              str(r.get('tnved', '')), str(r.get('applicability', '')), str(r.get('warranty', '')), str(r.get('country', '')),
              num(r.get('weight')), num(r.get('length')),
-             num(r.get('width')), num(r.get('height')), str(r.get('oe_numbers', ''))))
+             num(r.get('width')), num(r.get('height')), str(r.get('oe_numbers', '')),
+             str(r.get('barcode', '')), str(r.get('image_url', '')), num(r.get('multiplicity'))))
         n += 1
     conn.commit()
     return n
@@ -1033,7 +1042,7 @@ def import_donors(conn, rows, source):
 def _dims_of(r):
     return (num(r['length']), num(r['width']), num(r['height']), num(r['weight']))
 
-def enrich_full(conn, cat_mode='artbrand'):
+def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto'):
     """Полное обогащение по правилам приложения (HVC):
        - доноры: та же пара Артикул+Бренд (реестр donors) и транзитивная OE-группа;
        - категория/ТН ВЭД: по умолчанию только Артикул+Бренд (cat_mode='artbrand');
@@ -1043,9 +1052,9 @@ def enrich_full(conn, cat_mode='artbrand'):
          совместимость с уже заполненными обязательна, заполняются только пустые;
        - аналоги: артикулы OE-группы (как enrich_oe). Заполненные поля не трогаем."""
     prods = [dict(r) for r in conn.execute(
-        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list,group_articles FROM products')]
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list,group_articles,barcode,image_url,multiplicity FROM products')]
     donors = [dict(r) for r in conn.execute(
-        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers FROM donors')]
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,barcode,image_url,multiplicity FROM donors')]
     # v12.9.145: ключи — как в браузере (normArticle): «F 100» и «F-100» одна пара.
     donors_by_key = {}
     for d in donors: donors_by_key.setdefault(_norm_pair(d['article'], d['brand']), []).append(d)
@@ -1074,7 +1083,7 @@ def enrich_full(conn, cat_mode='artbrand'):
         for other in lst[1:]: union(lst[0], other)
     groups = {}
     for n in nodes: groups.setdefault(find(n), []).append(n)
-    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0, 'group_articles': 0}
+    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0, 'group_articles': 0, 'barcode': 0, 'image_url': 0, 'multiplicity': 0}
     conflicts = {'category': 0, 'tnved': 0}
     def unanimous(values):
         vals = [str(v).strip() for v in values if str(v or '').strip()]
@@ -1100,11 +1109,16 @@ def enrich_full(conn, cat_mode='artbrand'):
                     [d['applicability'] for d in group_donors] + [g['applicability'] for g in group_prods])
                 if v: updates['applicability'] = v; filled['applicability'] += 1
             for field in ('category', 'tnved'):
-                if str(p[field] or '').strip(): continue
-                v, conf = unanimous([d[field] for d in pair])
+                _placeholders = {'без категории', 'разное', 'прочее', 'не определено'}
+                _cur = str(p[field] or '').strip()
+                if _cur and not (field == 'category' and _cur.lower() in _placeholders): continue
+                _vals = [d[field] for d in pair if not (field == 'category' and str(d[field] or '').strip().lower() in _placeholders)]
+                v, conf = unanimous(_vals)
                 if conf: conflicts[field] += 1
                 if not v and cat_mode in ('oe', 'auto'):
-                    v, conf2 = unanimous([d[field] for d in group_donors] + [g[field] for g in group_prods if g is not p])
+                    _pool = [d[field] for d in group_donors] + [g[field] for g in group_prods if g is not p]
+                    if field == 'category': _pool = [x for x in _pool if str(x or '').strip().lower() not in _placeholders]
+                    v, conf2 = unanimous(_pool)
                     if conf2: conflicts[field] += 1
                 if v: updates[field] = v; filled[field] += 1
             # гарантия/страна: только точная пара справочника, единогласно (как ozonSourceAttributes)
@@ -1115,18 +1129,32 @@ def enrich_full(conn, cat_mode='artbrand'):
             cur = _dims_of(p)
             if not all(v > 0 for v in cur):
                 cands = []
-                for d in pair + group_donors + group_prods:
+                _oe_pool = (group_donors + group_prods) if enrich_mode in ('oe', 'auto') else []
+                for d in pair + _oe_pool:
                     t = _dims_of(d)
                     if all(v > 0 for v in t): cands.append(t)
-                # та же пара — приоритет; далее меньший объём комплекта
+                # та же пара — приоритет; далее меньший комплект мерой браузера:
+                # (объём л, наибольшая сторона, вес, сумма сторон)
                 pair_cands = [_dims_of(d) for d in pair if all(v > 0 for v in _dims_of(d))]
-                pool = pair_cands + sorted(cands, key=lambda t: t[0] * t[1] * t[2])
+                _measure = lambda t: (round(t[0] * t[1] * t[2] / 1000, 6), max(t[0], t[1], t[2]), t[3], t[0] + t[1] + t[2])
+                pool = pair_cands + sorted(cands, key=_measure)
                 for t in pool:
                     if all(not (c > 0) or c == tv for c, tv in zip(cur, t)):  # совместимость с заполненным
                         for i, f in enumerate(('length', 'width', 'height', 'weight')):
                             if not cur[i] > 0: updates[f] = t[i]
                         filled['dims'] += 1
                         break
+            # штрихкод/фото/кратность — только та же пара донора (как HVC.enrichOne)
+            if pair:
+                if not str(p.get('barcode') or '').strip():
+                    _bc = next((str(d['barcode']).strip() for d in pair if str(d.get('barcode') or '').strip()), '')
+                    if _bc: updates['barcode'] = _bc; filled['barcode'] = filled.get('barcode', 0) + 1
+                if not str(p.get('image_url') or '').strip():
+                    _im = next((str(d['image_url']).strip() for d in pair if str(d.get('image_url') or '').strip()), '')
+                    if _im: updates['image_url'] = _im; filled['image_url'] = filled.get('image_url', 0) + 1
+                if not num(p.get('multiplicity')) > 0:
+                    _mu = next((num(d['multiplicity']) for d in pair if num(d.get('multiplicity')) > 0), 0)
+                    if _mu > 0: updates['multiplicity'] = _mu; filled['multiplicity'] = filled.get('multiplicity', 0) + 1
             others = sorted({g['article'] for g in group_prods if g['article'] != p['article']})
             if others:
                 cur_set = {x.strip() for x in str(p['analog_list'] or '').split(',') if x.strip()}
@@ -2019,7 +2047,7 @@ class Handler(BaseHTTPRequestHandler):
                 n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
                 return self._send(200, {'ok': True, 'imported': n})
             if self.path == '/catalog/enrich-full':
-                return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand')})
+                return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand', body.get('enrich_mode') or 'auto')})
             if self.path == '/catalog/recalc':
                 return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {}, force=bool(body.get('force')))})
             if self.path.startswith('/catalog/results'):
