@@ -514,6 +514,38 @@ class TestSqlExportSelection(unittest.TestCase):
         x = E.export_ozon_xlsx_bytes(self.conn, keys={('A1', 'BOSCH')})
         self.assertTrue(x.startswith(b'PK'))
 
+class TestAuditFixes133(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        E.TOKEN_PATH = pathlib.Path(self.tmp) / 'token.txt'; E._TOKEN_CACHE = None
+        E.SECRETS_PATH = pathlib.Path(self.tmp) / 'secrets.json'
+        self.conn = E.db()
+    def test_volume_preserved(self):  # A2
+        E.import_rows(self.conn, [{'article': 'V1', 'brand': 'B', 'price': 100, 'volume': 2.5}], 't')
+        self.assertEqual(self.conn.execute("SELECT volume FROM products WHERE article='V1'").fetchone()[0], 2.5)
+        E.import_rows(self.conn, [{'article': 'V1', 'brand': 'B', 'price': 100}], 't')  # без объёма — не затирать
+        self.assertEqual(self.conn.execute("SELECT volume FROM products WHERE article='V1'").fetchone()[0], 2.5)
+    def test_host_check_and_token(self):  # A1 + A7
+        import threading, http.client
+        from http.server import ThreadingHTTPServer
+        srv = ThreadingHTTPServer(('127.0.0.1', 0), E.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            c = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+            c.request('GET', '/health', headers={'Host': 'evil.example.com'})
+            self.assertEqual(c.getresponse().status, 403)
+            c = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+            c.request('GET', '/health')
+            self.assertEqual(c.getresponse().status, 200)
+        finally:
+            srv.shutdown()
+    def test_secret_roundtrip_passthrough(self):  # A3 (на не-Windows — passthrough)
+        E.save_secret('UC_MAIL_PASSWORD', 'pw123')
+        self.assertEqual(E.secrets().get('UC_MAIL_PASSWORD'), 'pw123')
+
 class TestProtocol(unittest.TestCase):
     def test_register_protocol_graceful(self):
         # на не-Windows и без реестра — тихий False, без исключений
