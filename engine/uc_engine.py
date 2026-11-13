@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.146-pyengine-31'
+VERSION = '12.9.148-pyengine-33'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -65,6 +65,8 @@ def num(v):
         s = s.replace('.', '', 1).replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
     elif ',' in s:
         s = s.replace(',', '.') if s.count(',') == 1 else s.replace(',', '')
+    elif s.count('.') > 1:
+        s = s.replace('.', '')  # 12.345.678 — тысячные, как num() браузера
     try: return float(s)
     except ValueError: return 0.0
 
@@ -463,6 +465,39 @@ def map_header(header):
         out[field] = i; used_cols.add(i); used_fields.add(field)
     return out
 
+def _apply_units(item, mp, headers):
+    """v12.9.147: единицы как в браузерном импорте (parseDimensionCm и вес):
+       длина/ширина/высота в базе — сантиметры, вес — килограммы, объём — литры.
+       Движок раньше писал число как есть: «Длина, мм» давала 10-кратную ошибку.
+       Сводную ячейку габаритов («230x170x80») разбираем в Д/Ш/В, если пусты."""
+    def hdr(f):
+        i = mp.get(f)
+        return str(headers[i]).lower() if i is not None and i < len(headers) else ''
+    for f in ('length', 'width', 'height'):
+        if f in item and num(item[f]) > 0:
+            h = hdr(f)
+            if 'мм' in h or 'mm' in h: item[f] = num(item[f]) / 10
+    for f in ('weight', 'net_weight'):
+        if f in item and num(item[f]) > 0:
+            h = hdr(f)
+            if 'грамм' in h or ', г' in h or '(г' in h or ' g' in h or h.rstrip().endswith('г'): item[f] = num(item[f]) / 1000
+    if 'volume' in item and num(item['volume']) > 0:
+        h = hdr('volume')
+        if 'см3' in h or 'см³' in h or 'cm3' in h: item['volume'] = num(item['volume']) / 1000
+        elif 'м3' in h or 'м³' in h or 'm3' in h: item['volume'] = num(item['volume']) * 1000
+    ds = str(item.get('dimensions_str') or '').strip()
+    if ds and not all(num(item.get(f)) > 0 for f in ('length', 'width', 'height')):
+        parts = [x for x in re.split(r'[*x×х/|;]', ds.replace(',', '.')) if str(x).strip()]
+        nums = []
+        for x in parts[:3]:
+            m = re.search(r'\d+(?:\.\d+)?', str(x))
+            if m: nums.append(float(m.group(0)))
+        if len(nums) == 3 and all(n > 0 for n in nums):
+            k = 0.1 if ('мм' in hdr('dimensions_str') or 'mm' in hdr('dimensions_str')) else 1
+            for f, v in zip(('length', 'width', 'height'), nums):
+                if not num(item.get(f)) > 0: item[f] = v * k
+    return item
+
 def rows_from_csv_bytes(data):
     text = data.decode('utf-8-sig', errors='replace')
     if '\ufffd' in text[:400]:
@@ -479,11 +514,11 @@ def rows_from_csv_bytes(data):
     if 'article' not in mp: return []
     out = []
     for r in rows[1:]:
-        if not r or not str(r[mp['article']]).strip(): continue
+        if not r or mp['article'] >= len(r) or not str(r[mp['article']]).strip(): continue
         item = {}
         for f, i in mp.items():
             item[f] = r[i] if i < len(r) else ''
-        out.append(item)
+        out.append(_apply_units(item, mp, rows[0]))
     return out
 
 def _xlsx_sheet_rows(data):
@@ -566,8 +601,8 @@ def rows_from_xlsx_bytes(data):
     if 'article' not in mp: return []
     out = []
     for r in rows[1:]:
-        if not r or r[mp['article']] in (None, ''): continue
-        out.append({f: (r[i] if i < len(r) and r[i] is not None else '') for f, i in mp.items()})
+        if not r or mp['article'] >= len(r) or r[mp['article']] in (None, ''): continue
+        out.append(_apply_units({f: (r[i] if i < len(r) and r[i] is not None else '') for f, i in mp.items()}, mp, rows[0]))
     return out
 
 def files_from_zip(data):
@@ -931,7 +966,10 @@ def import_donors(conn, rows, source):
               applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE donors.applicability END,
               warranty=CASE WHEN excluded.warranty<>'' THEN excluded.warranty ELSE donors.warranty END,
               country=CASE WHEN excluded.country<>'' THEN excluded.country ELSE donors.country END,
-              weight=excluded.weight, length=excluded.length, width=excluded.width, height=excluded.height,
+              weight=CASE WHEN excluded.weight>0 THEN excluded.weight ELSE donors.weight END,
+              length=CASE WHEN excluded.length>0 THEN excluded.length ELSE donors.length END,
+              width=CASE WHEN excluded.width>0 THEN excluded.width ELSE donors.width END,
+              height=CASE WHEN excluded.height>0 THEN excluded.height ELSE donors.height END,
               oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END''',
             (art, str(r.get('brand', '')).strip(), source, str(r.get('name', '')), str(r.get('category', '')),
              str(r.get('tnved', '')), str(r.get('applicability', '')), str(r.get('warranty', '')), str(r.get('country', '')),
@@ -1066,12 +1104,13 @@ def _raw_table(filename, data):
         if not files: raise RuntimeError('в ZIP нет CSV/XLSX')
         name, data = files[0]
     if name.lower().endswith('.xlsx'):
+        # v12.9.147: как импорт каталога — openpyxl если есть, иначе stdlib
         try:
             import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+            table = [list(r) for r in wb.active.iter_rows(values_only=True)]
         except ImportError:
-            raise RuntimeError('XLSX на движке требует openpyxl; пришлите CSV или поставьте openpyxl')
-        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        table = [list(r) for r in wb.active.iter_rows(values_only=True)]
+            table = [list(r) for r in _xlsx_sheet_rows(data)]
     else:
         text = data.decode('utf-8-sig', errors='replace')
         if '\ufffd' in text[:400]:
