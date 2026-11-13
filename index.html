@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.152-client+oe-match';
+const APP_VERSION = '12.9.153-client+visible-sync';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26922,6 +26922,8 @@ const PyEngine = {
       multiplicity: num(p.multiplicity || p.pack || p.qty_in_pack || 0), net_weight: num(p.net_weight || 0),
       old_price: num(p.old_price ?? p.oldPrice ?? p.priceOld ?? p.listPrice ?? 0),
       eff_price: (p.promo && num(p.promoPrice) > 0) ? num(p.promoPrice) : num(p.price),
+      visible: p.visible === false ? 0 : 1,
+      excluded: p.excluded ? 1 : 0,
       /* v12.9.140: поля обогащения — в SQLite движка, как в браузерном импорте */
       original_article: p.originalArticle || '', category_type: p.category_type || '', category_src: p.category_src || '',
       ozon_description_category_id: p.ozon_description_category_id || '', ozon_type_id: p.ozon_type_id || '',

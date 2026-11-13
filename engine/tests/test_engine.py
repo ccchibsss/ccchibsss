@@ -975,3 +975,29 @@ class TestOeMatch152(unittest.TestCase):
                                   {'article': 'A2', 'brand': 'B', 'oe_numbers': 'OE5', 'applicability': 'VW Golf'}], 't')
         res = E.enrich_oe(self.conn)
         self.assertEqual(res['filled']['applicability'], 1)
+
+class TestVisible153(unittest.TestCase):
+    def test_hidden_sku_not_exported(self):
+        import tempfile, pathlib
+        tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(tmp); E.DB_PATH = pathlib.Path(tmp) / 't.db'
+        conn = E.db()
+        E.import_rows(conn, [{'article': 'V1', 'brand': 'B', 'name': 'Видимый', 'price': 100, 'visible': 1},
+                             {'article': 'V2', 'brand': 'B', 'name': 'Скрытый', 'price': 100, 'visible': 0}], 't')
+        rows, _y = E._ozon_rows_data(conn)
+        arts = [r[1] for r in rows]
+        self.assertEqual(arts, ['V1'])
+
+class TestExcluded153(unittest.TestCase):
+    def test_excluded_not_calculated_not_exported(self):
+        import tempfile, pathlib
+        tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(tmp); E.DB_PATH = pathlib.Path(tmp) / 't.db'
+        conn = E.db()
+        E.import_rows(conn, [{'article': 'E1', 'brand': 'B', 'price': 1000, 'cost': 500, 'sales': 10, 'excluded': 1},
+                             {'article': 'E2', 'brand': 'B', 'price': 1000, 'cost': 500, 'sales': 10}], 't')
+        E.recalc_catalog(conn, {'commission_pct': 14, 'tax_regime': 'usn_income_6', 'tax_pct': 6})
+        arts = [r['article'] for r in conn.execute('SELECT article FROM eco_results')]
+        self.assertEqual(arts, ['E2'])
+        rows, _y = E._ozon_rows_data(conn)
+        self.assertEqual([r[1] for r in rows], ['E2'])

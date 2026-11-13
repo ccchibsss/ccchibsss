@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.152-pyengine-37'
+VERSION = '12.9.153-pyengine-38'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -394,6 +394,10 @@ def db():
             conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
     if 'eff_price' not in cols:
         conn.execute("ALTER TABLE products ADD COLUMN eff_price REAL DEFAULT 0")
+    if 'visible' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN visible TEXT DEFAULT '1'")
+    if 'excluded' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN excluded TEXT DEFAULT '0'")
     dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
     for col, typ, dflt in (('barcode', 'TEXT', "''"), ('image_url', 'TEXT', "''"), ('multiplicity', 'REAL', '0')):
         if col not in dcols:
@@ -757,6 +761,12 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         if 'eff_price' in r:
             conn.execute('UPDATE products SET eff_price=? WHERE article=? AND brand=?',
                          (num(r.get('eff_price')), art, brand))
+        if 'visible' in r:
+            conn.execute('UPDATE products SET visible=? WHERE article=? AND brand=?',
+                         ('0' if str(r.get('visible')).lower() in ('0', 'false', 'нет') else '1', art, brand))
+        if 'excluded' in r:
+            conn.execute('UPDATE products SET excluded=? WHERE article=? AND brand=?',
+                         ('1' if str(r.get('excluded')).lower() in ('1', 'true', 'да') else '0', art, brand))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
@@ -869,7 +879,8 @@ def recalc_catalog(conn, st, force=False):
        если изменились её расчётные входы или настройки экономики (хэш в
        eco_results.inputs_hash). force=True — полный пересчёт как раньше.
        Итоги ответа считаются по всей таблице результатов, семантика та же."""
-    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost,excluded FROM products').fetchall()]
+    rows = [r for r in rows if str(r.get('excluded', '0')).lower() not in ('1', 'true', 'да')]  # как пайплайн браузера
     old = {(r['article'], r['brand']): r['inputs_hash'] for r in
            conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
     todo, hashes = [], {}
@@ -1727,6 +1738,9 @@ def _ozon_rows_data(conn, keys=None, discount_pct=0, vat='Не облагает�
     out, yellow = [], set()
     for r in rows:
         d = dict(r)
+        # v12.9.153: скрытые SKU (visible=false в приложении) в выгрузку Ozon не идут
+        if str(d.get('visible', '1')).lower() in ('0', '0.0', 'false', 'нет'): continue
+        if str(d.get('excluded', '0')).lower() in ('1', 'true', 'да'): continue
         if keys is not None and (d['article'], d['brand']) not in keys: continue
         row, std_cols = ozon_row_meta(d, len(out) + 1, vat=vat, discount_pct=discount_pct,
                                       pairs=pairs, chz_codes=chz_codes)
