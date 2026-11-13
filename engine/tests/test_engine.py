@@ -907,7 +907,7 @@ class TestOzonExportParity150(unittest.TestCase):
     def test_row_fields(self):
         row, _std = E.ozon_row_meta({'article': 'A1', 'brand': 'BOSCH', 'original_article': 'ORIG-9',
             'name': 'Фильтр', 'price': 1000, 'weight': 0.5, 'length': 10, 'width': 8, 'height': 5,
-            'tnved': '8421230000', 'image_url': 'https://x/y.jpg', 'description': 'д' * 7000}, 1)
+            'tnved': '8421230000', 'ozon_type': 'Фильтр масляный', 'image_url': 'https://x/y.jpg', 'description': 'д' * 7000}, 1)
         self.assertEqual(row[20], 'ORIG-9')          # Партномер — оригинальный артикул
         self.assertEqual(len(row[30]), 6000)          # Аннотация обрезана по лимиту Ozon
         self.assertEqual(row[44], '')                 # ошибок нет
