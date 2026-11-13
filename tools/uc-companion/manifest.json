@@ -3,20 +3,42 @@
   "name": "UNIT CONTROL — отправка цен и остатков",
   "version": "1.0.0",
   "description": "Передаёт цены и остатки из UNIT CONTROL в API площадок прямо из браузера, без Python-движка и без сервера: расширение не связано CORS-ограничениями страницы.",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://api-seller.ozon.ru/*",
     "https://*.wildberries.ru/*",
     "https://api.partner.market.yandex.ru/*"
   ],
-  "background": { "service_worker": "background.js" },
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
-      "matches": ["http://127.0.0.1/*", "http://localhost/*"],
-      "js": ["content.js"],
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start"
     }
   ],
   "options_page": "options.html",
-  "action": { "default_title": "UNIT CONTROL: ключи площадок — в настройках расширения" }
+  "action": {
+    "default_title": "UNIT CONTROL: ключи площадок — в настройках расширения",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "minimum_chrome_version": "102"
 }
