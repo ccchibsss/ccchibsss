@@ -784,3 +784,65 @@ class TestSqlParity145(unittest.TestCase):
                                   {'article': 'G2', 'brand': 'B', 'oe_numbers': 'OEG'}], 't')
         res = E.enrich_full(self.conn)
         self.assertEqual(res['filled']['group_articles'], 2)
+
+
+class TestBrowserParity146(unittest.TestCase):
+    ST = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10,
+          'pack': 18, 'transit': 30, 'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20,
+          'ozon': {'fulfillment': 'FBS', 'logistics_manual': 100, 'processing': 0,
+                   'last_mile': 25, 'handover_mode': 'sc', 'handover_fee': 10,
+                   'units_per_shipment': 1, 'nonstd_enabled': True, 'nonstd_pct': 3, 'nonstd_cap': 280}}
+    def test_browser_formula_hand_calc(self):
+        # price 1000, cost 500: comm 140, transfer 15, logistics 100, last_mile 25,
+        # handover 10, pack 18, transit 30, no_buy 0 -> parts 838, tax 6% = 60, total 898
+        r = E.calc_row({'article': 'A', 'brand': 'B', 'price': 1000, 'cost': 500, 'sales': 10}, dict(self.ST))
+        self.assertAlmostEqual(r['total'], 898, delta=0.011)
+        self.assertAlmostEqual(r['profit'], 102, delta=0.011)
+        self.assertEqual(r['brand'], 'B')
+    def test_no_buy_and_nonstd(self):
+        st = dict(self.ST); st['no_buy_pct'] = 0
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10,
+                        'no_buy_pct': 10, 'weight': 30}, st)
+        # failed=2*100+25=225; returns=225*10/90=25; nonstd=min(30,280)=30
+        # parts=500+140+15+100+25+10+18+30+25+30=893; tax 60; total 953
+        self.assertAlmostEqual(r['total'], 953, delta=0.011)
+    def test_old_path_kept_without_ozon(self):
+        st = {k: v for k, v in self.ST.items() if k != 'ozon'}
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        self.assertGreater(r['total'], 0)
+
+class TestParityRecheck146(unittest.TestCase):
+    ST = TestBrowserParity146.ST
+    def test_default_and_category_no_buy(self):
+        st = dict(self.ST); st['no_buy_pct'] = 8
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        # failed=225, returns=225*8/92=19.565..; parts=838+19.57=857.57, tax 60 -> 917.57
+        self.assertAlmostEqual(r['total'], 917.57, delta=0.02)
+        st2 = dict(st); st2['no_buy_by_category'] = {'Обувь': 20}
+        r2 = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10, 'category': 'Обувь'}, st2)
+        self.assertGreater(r2['total'], r['total'])
+    def test_fixed_monthly_divided_by_sales(self):
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10, 'fixed_cost': 100}, dict(self.ST))
+        # фикс 100/мес при 10 продажах = 10/ед: parts 838+10=848, tax 60, total 908
+        self.assertAlmostEqual(r['total'], 908, delta=0.011)
+    def test_solver_no_buy_100(self):
+        st = dict(self.ST); st['no_buy_pct'] = 100
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        self.assertEqual((r['break_even'], r['target']), (0, 0))
+
+class TestHeaderMapping146(unittest.TestCase):
+    def test_one_column_one_field(self):
+        mp = E.map_header(['Код ТН ВЭД', 'Артикул', 'Бренд'])
+        self.assertEqual(mp['article'], 1); self.assertEqual(mp['tnved'], 0)
+        mp2 = E.map_header(['Артикул', 'Зачёркнутая цена', 'Цена'])
+        self.assertEqual(mp2['old_price'], 1); self.assertEqual(mp2['price'], 2)
+        mp3 = E.map_header(['Артикул', 'Весогабариты', 'Вес, кг'])
+        self.assertEqual(mp3['dimensions_str'], 1); self.assertEqual(mp3['weight'], 2)
+    def test_browser_fields_recognized(self):
+        mp = E.map_header(['Артикул', 'Логистика Ozon, ₽/ед', 'Вес нетто, кг', 'Ozon realFBS доставка, ₽/ед'])
+        self.assertEqual(mp.get('ozon_logistics'), 1)
+        self.assertEqual(mp.get('net_weight'), 2)
+        self.assertEqual(mp.get('ozon_realfbs_delivery'), 3)
+    def test_supplier_file_still_maps(self):
+        mp = E.map_header(['Бренд', 'Каталожный номер', 'Описание', 'Остаток', 'Кратность отгрузки', 'Валюта', 'Цена', 'Штрихкод', 'ТН ВЭД'])
+        self.assertEqual(mp['article'], 1); self.assertEqual(mp['price'], 6); self.assertEqual(mp['tnved'], 8)

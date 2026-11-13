@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.145-client+sql-parity';
+const APP_VERSION = '12.9.146-client+browser-parity';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26668,7 +26668,28 @@ const PyEngine = {
       tax_regime: cfg.taxRegime || 'usn_income_6', tax_pct: num(cfg.taxPct == null ? 6 : cfg.taxPct),
       tax_osno_share: num(cfg.taxOsnoEligibleSharePct || 0),
       multiplicity_enabled: cfg.useMultiplicity !== false,
-      target_margin: num(cfg.tgtMargin == null ? 20 : cfg.tgtMargin)
+      target_margin: num(cfg.tgtMargin == null ? 20 : cfg.tgtMargin),
+      /* v12.9.146: невыкуп как в браузере: по категории, иначе общий fbsUnred (8%) */
+      no_buy_pct: num(cfg.fbsUnred == null ? 8 : cfg.fbsUnred),
+      no_buy_by_category: cfg.noBuyByCategory || {},
+      fixed_monthly_per_sku: (typeof S !== 'undefined' && S.tariffs ? num(S.tariffs.fixed) : 0) / Math.max(1, (S.rows || []).length),
+      /* v12.9.146: полная браузерная модель Ozon для движка (evaluateOzon) */
+      ozon: (() => { let scheme = 'FBS'; try { scheme = ozonActiveScheme(cfg); } catch (e) { }
+        const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
+        return { fulfillment: scheme, ship_discount_pp: g('ozonShipDiscountPp', 0), boost_pct: g('ozonBoostPct', 0),
+          cofin_pct: g('ozonCofinPct', 0), logistics_manual: g('ozonLogisticsManual', 0),
+          processing: g('ozonProcessingManual', 0), fbo_processing: g('ozonFboProcessingManual', 0),
+          last_mile: g('ozonLastMileFixed', 25), storage_per_l: g('ozonStoragePerLDayManual', 0),
+          storage_days: g('ozonStorageDaysPerUnit', 30), return_handling: g('ozonReturnHandlingManual', 0),
+          return_storage: g('ozonReturnStorageRub', 0), late_ship_pct: g('ozonLateShipPct', 0),
+          handover_mode: String(cfg.ozonHandover || 'sc'), handover_fee: g('ozonHandoverFee', 10),
+          pvz_pct: g('ozonPvzPct', 2), pvz_cap: g('ozonPvzCapRub', 45), courier_trip: g('ozonCourierTripRub', 546),
+          courier_order: g('ozonCourierPerOrder', 4.13), courier_liter: g('ozonCourierPerLiter', 1.1),
+          courier_orders: g('ozonCourierOrdersPerTrip', 1), units_per_shipment: g('ozonFbsUnitsPerShipment', 1),
+          realfbs_return: g('ozonRealFbsReturnFeeManual', 0), failed_manual: g('ozonFailedCostManual', 0),
+          realfbs_service: g('ozonRealFbsServiceFeeRub', 20), realfbs_units: g('ozonRealFbsUnitsPerShipment', 1),
+          nonstd_enabled: String(cfg.ozonNonStdEnabled == null ? '1' : cfg.ozonNonStdEnabled) !== '0',
+          nonstd_pct: g('ozonNonStdPct', 3), nonstd_cap: g('ozonNonStdCapRub', 280) }; })()
     };
   },
   /* B6: перенос секретов площадок в движок (DPAPI) и подгрузка в память. */
@@ -26714,13 +26735,18 @@ const PyEngine = {
     const rows = (typeof currentViewRows === 'function' ? currentViewRows() : S.rows).slice(0, 5000);
     if (!rows.length) { Toast.warn('Нет строк', 'Текущий фильтр пуст — нечего проверять.'); return; }
     await withProgress('Python: независимый пересчёт', fmt(rows.length) + ' строк вторым контуром', async () => {
-      const payload = rows.map(p => ({ article: p.article, price: num(p.effPrice || p.price), cost: num(p.cost),
-        sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width), height: num(p.height), volume: num(p.volume) }));
+      const payload = rows.map(p => ({ article: p.article, brand: p.brand || '', price: num(p.effPrice || p.price), cost: num(p.cost),
+        sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width), height: num(p.height), volume: num(p.volume),
+        multiplicity: num(p.multiplicity || p.pack || 0), ozon_commission: num(p.ozon_commission || 0),
+        ozon_logistics: num(p.ozon_logistics || 0), ozon_realfbs_delivery: num(p.ozon_realfbs_delivery || 0),
+        ozon_failed_cost: num(p.ozon_failed_cost || 0), no_buy_pct: num(p.noBuyPct || p.no_buy_pct || 0), fixed_cost: num(p.fixed || 0), category: p.category || '' }));
       const j = await this._fetch('/calc/batch', { method: 'POST', body: JSON.stringify({ settings: this._settingsSnapshot(), rows: payload }), timeout: 120000 });
-      const byArt = new Map((j.results || []).map(r => [r.article, r]));
+      /* v12.9.146: сопоставление строго по нормализованной паре артикул+бренд,
+         иначе одинаковый артикул разных брендов сверялся не с той строкой */
+      const byArt = new Map((j.results || []).map(r => [normArticle(r.article) + '|' + normArticle(r.brand || ''), r]));
       let checked = 0, maxDiff = 0, worst = '';
       for (const p of rows) {
-        const r = byArt.get(p.article); if (!r) continue;
+        const r = byArt.get(normArticle(p.article) + '|' + normArticle(p.brand || '')); if (!r) continue;
         checked++;
         const d = Math.abs(num(r.profit) - num(p.netProfit));
         if (d > maxDiff) { maxDiff = d; worst = p.article; }
@@ -26798,13 +26824,18 @@ const PyEngine = {
           S.rows.push({ article: r.article, brand: r.brand || '', name: r.name || '', price: num(r.price), cost: num(r.cost),
             stock: num(r.stock), sales: num(r.sales), weight: num(r.weight), length: num(r.length), width: num(r.width),
             height: num(r.height), volume: num(r.volume), oe_numbers: r.oe_numbers || '', analog_list: r.analog_list || '',
-            category: r.category || '', tnved: r.tnved || '', applicability: r.applicability || '' });
+            category: r.category || '', tnved: r.tnved || '', applicability: r.applicability || '',
+            /* v12.9.146 (проверка №3): новая строка из движка — со всеми полями, что он вернул */
+            barcode: r.barcode || '', warranty: r.warranty || '', country: r.country || '',
+            group_articles: r.group_articles || '', cross_numbers: r.cross_numbers || '',
+            category_type: r.category_type || '', ozon_category: r.ozon_category || '', ozon_type: r.ozon_type || '',
+            description: r.description || '' });
           added++;
         }
         continue;
       }
       let ch = false;
-      for (const f of ['name', 'oe_numbers', 'analog_list', 'category', 'tnved', 'applicability', 'warranty', 'country', 'group_articles']) {
+      for (const f of ['name', 'oe_numbers', 'analog_list', 'category', 'tnved', 'applicability', 'warranty', 'country', 'group_articles', 'cross_numbers', 'barcode']) {
         if (!String(p[f] || '').trim() && String(r[f] || '').trim()) { p[f] = r[f]; ch = true; }
       }
       for (const f of ['weight', 'length', 'width', 'height', 'volume']) {
