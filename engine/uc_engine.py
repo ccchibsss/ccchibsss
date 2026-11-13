@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.148-pyengine-33'
+VERSION = '12.9.151-pyengine-36'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -191,15 +191,58 @@ def _ozon_browser_unit(price, cost, st):
     return {'total': total, 'commission': comm, 'transfer': transfer, 'tax': tax,
             'returns': rnd(returns + return_storage), 'storage': storage}
 
-def solve_prices(price, cost, st, target_margin=20.0, sales=1):
+def wb_unit(price, cost, st):
+    """v12.9.149: WB — формулой evaluateWb браузера: база логистики по объёму,
+       складской коэффициент (СГТ без него, база 1000–3000), хранение FBO
+       ступенчатое, доставка в СЦ по платному весу, невыкуп от полного расхода
+       случая (ПВЗ-период — по объёму), комиссия/эквайринг/реклама/софин."""
+    wb = st.get('wb') or {}
+    scheme = str(wb.get('fulfillment') or 'FBS').upper()
+    v = num(st.get('_volume', 0))
+    dims = st.get('_dims') or (0, 0, 0)
+    base = wb_base_logistics(v)
+    sgt = num(st.get('_weight', 0)) > 25 or max(dims) > 200 or sum(dims) > 280
+    coeff = 1.0 if sgt else num(wb.get('warehouse_coeff', 1.7))
+    direct_base = min(3000.0, max(1000.0, base)) if sgt else base
+    logistics = rnd(rnd(direct_base * coeff) + (num(wb.get('acceptance')) if scheme == 'FBO' else 0.0))
+    storage = wb_storage_month(v, num(wb.get('storage_per_l', 0.15)), num(wb.get('storage_coeff', 1)), num(wb.get('storage_days', 30))) if scheme == 'FBO' else 0.0
+    div = num(wb.get('vol_divisor')) or 5000
+    _vol_kg = (dims[0] * dims[1] * dims[2] / div) if all(d > 0 for d in dims) else (v * 1000 / div if v > 0 else 0.0)
+    billable = max(num(st.get('_weight', 0)), _vol_kg)
+    sc_delivery = rnd(num(wb.get('sc_per_kg', 12)) * billable) if scheme == 'FBS' else 0.0
+    rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
+    failed_manual = num(wb.get('failed_manual'))
+    if failed_manual > 0: failed_case = failed_manual
+    elif scheme == 'FBS':
+        import datetime as _dt
+        today = _dt.date.today()
+        in_pvz = _dt.date(2026, 8, 7) <= today <= _dt.date(2027, 1, 31)
+        failed_case = (rnd(25 if v <= 1 else 25 + (v - 1) * 4) if v > 0 else 0.0) if in_pvz else 0.0
+    else:
+        extra = num(wb.get('return_extra'))
+        failed_case = rnd(base * coeff + extra) if extra > 0 else base
+    returns = rnd(failed_case * rate / (100 - rate), 6) if rate < 100 else 0.0
+    comm = rnd(price * num(wb.get('commission_pct', 15)) / 100)
+    transfer = rnd(price * num(wb.get('acquiring_pct', 1.5)) / 100)
+    ads = rnd(price * num(wb.get('boost_pct')) / 100)
+    cofin = rnd(price * num(wb.get('cofin_pct')) / 100)
+    pack = num(st.get('pack', 18)); transit = num(st.get('transit', 30)) if scheme == 'FBS' else 0.0
+    fixed = num(st.get('fixed_per_unit', 0))
+    parts = [cost, comm, transfer, logistics, sc_delivery, pack, transit, returns, storage, ads, cofin, fixed]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    return {'total': rnd(sum(parts) + tax), 'commission': comm, 'transfer': transfer, 'tax': tax,
+            'returns': rnd(returns), 'storage': storage}
+
+def solve_prices(price, cost, st, target_margin=20.0, sales=1, unit=None):
     """Целочисленный решатель: первое целое с прибылью >= 0 и >= целевой маржи.
        Как в приложении: при продажах 0 безубыток не выдумывается (0)."""
     if not (num(sales) > 0):
         return {'break_even': 0, 'target': 0}
     if min(100.0, max(0.0, num(st.get('no_buy_pct', 0)))) >= 100:
         return {'break_even': 0, 'target': 0}  # как solveMarketplacePrices при returnRateInvalid
+    _unit = unit or ozon_unit
     def profit(p):
-        return rnd(p - ozon_unit(p, cost, st)['total'])
+        return rnd(p - _unit(p, cost, st)['total'])
     def ok(p, margin):
         return profit(p) - p * margin / 100 >= 0
     # аналитический старт для процентной части + локальная доводка
@@ -221,6 +264,7 @@ def solve_prices(price, cost, st, target_margin=20.0, sales=1):
 
 def calc_row(row, st):
     price, cost = num(row.get('price')), num(row.get('cost'))
+    if num(row.get('eff_price')) > 0: price = num(row.get('eff_price'))  # v12.9.149: промо-цена, как effPrice браузера
     # v12.9.145: паритет с браузером (calcMarketplacesEconomics/costWithMultiplicity):
     # себестоимость одного продаваемого SKU — с учётом кратности отгрузки,
     # а построчные тарифы SKU важнее общих настроек.
@@ -230,6 +274,7 @@ def calc_row(row, st):
     L, W, H = num(row.get('length')), num(row.get('width')), num(row.get('height'))
     vol = num(row.get('volume')) or (L * W * H / 1000 if L and W and H else 0.0)
     st2 = dict(st); st2['_volume'] = vol; st2['_weight'] = num(row.get('weight'))
+    st2['_dims'] = (num(row.get('length')), num(row.get('width')), num(row.get('height')))
     if num(row.get('ozon_commission')) > 0: st2['commission_pct'] = num(row.get('ozon_commission'))
     if num(row.get('no_buy_pct')) > 0: st2['no_buy_pct'] = num(row.get('no_buy_pct'))
     elif isinstance(st.get('no_buy_by_category'), dict) and str(row.get('category') or '') in st['no_buy_by_category']:
@@ -246,9 +291,11 @@ def calc_row(row, st):
         # заданный маршрут SKU заменяет усреднённую пару «последняя миля + сдача»
         st2['last_mile'] = num(row.get('ozon_logistics')) + num(row.get('ozon_realfbs_delivery'))
         st2['handover'] = 0
-    u = ozon_unit(price, cost, st2)
+    _is_wb = str(st.get('mp_scope') or '').upper() == 'WB'
+    _unit = wb_unit if _is_wb else ozon_unit
+    u = _unit(price, cost, st2)
     profit = rnd(price - u['total'])
-    solved = solve_prices(price, cost, st2, num(st.get('target_margin', 20)), row.get('sales', 1))
+    solved = solve_prices(price, cost, st2, num(st.get('target_margin', 20)), row.get('sales', 1), unit=_unit)
     return {'article': row.get('article', ''), 'brand': row.get('brand', ''), 'total': u['total'], 'profit': profit,
             'margin': rnd(profit / price * 100, 1) if price else 0.0,
             'roi': rnd(profit / cost * 100, 1) if cost else 0.0,
@@ -345,6 +392,12 @@ def db():
                 'min_stock', 'no_buy_pct', 'fixed_cost'):
         if col not in cols:
             conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
+    if 'eff_price' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN eff_price REAL DEFAULT 0")
+    dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
+    for col, typ, dflt in (('barcode', 'TEXT', "''"), ('image_url', 'TEXT', "''"), ('multiplicity', 'REAL', '0')):
+        if col not in dcols:
+            conn.execute(f"ALTER TABLE donors ADD COLUMN {col} {typ} DEFAULT {dflt}")
     # B5: retention — история цен год, лог API 90 дней
     try:
         conn.execute("DELETE FROM price_history WHERE ts < datetime('now','-365 days')")
@@ -701,6 +754,9 @@ def import_rows(conn, rows, source, rebuild_fts=True):
              num(r.get('old_price')),
              str(r.get('original_article', '')), str(r.get('category_type', '')), str(r.get('category_src', '')), str(r.get('ozon_description_category_id', '')), str(r.get('ozon_type_id', '')), str(r.get('mark_status', '')), str(r.get('mark_code', '')), str(r.get('dimensions_str', '')), str(r.get('currency', '')),
              eff('ozon_commission'), eff('ozon_logistics'), eff('ozon_realfbs_delivery'), eff('ozon_failed_cost'), eff('min_stock'), eff('no_buy_pct'), eff('fixed_cost'), source))
+        if 'eff_price' in r:
+            conn.execute('UPDATE products SET eff_price=? WHERE article=? AND brand=?',
+                         (num(r.get('eff_price')), art, brand))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
@@ -798,7 +854,7 @@ def _calc_all(rows, st):
     except Exception:
         return seq(), False
 
-_ECO_FIELDS = ('price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category',
+_ECO_FIELDS = ('price', 'eff_price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category',
                'multiplicity', 'ozon_commission', 'ozon_logistics', 'ozon_realfbs_delivery',
                'ozon_failed_cost', 'no_buy_pct', 'fixed_cost')
 
@@ -813,7 +869,7 @@ def recalc_catalog(conn, st, force=False):
        если изменились её расчётные входы или настройки экономики (хэш в
        eco_results.inputs_hash). force=True — полный пересчёт как раньше.
        Итоги ответа считаются по всей таблице результатов, семантика та же."""
-    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
     old = {(r['article'], r['brand']): r['inputs_hash'] for r in
            conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
     todo, hashes = [], {}
@@ -958,7 +1014,7 @@ def import_donors(conn, rows, source):
         art = str(r.get('article', '')).strip()
         if not art: continue
         conn.execute('''INSERT INTO donors(article,brand,source,name,category,tnved,applicability,warranty,country,
-            weight,length,width,height,oe_numbers) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            weight,length,width,height,oe_numbers,barcode,image_url,multiplicity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(article,brand,source) DO UPDATE SET
               name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE donors.name END,
               category=CASE WHEN excluded.category<>'' THEN excluded.category ELSE donors.category END,
@@ -970,11 +1026,15 @@ def import_donors(conn, rows, source):
               length=CASE WHEN excluded.length>0 THEN excluded.length ELSE donors.length END,
               width=CASE WHEN excluded.width>0 THEN excluded.width ELSE donors.width END,
               height=CASE WHEN excluded.height>0 THEN excluded.height ELSE donors.height END,
-              oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END''',
+              oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END,
+              barcode=CASE WHEN excluded.barcode<>'' THEN excluded.barcode ELSE donors.barcode END,
+              image_url=CASE WHEN excluded.image_url<>'' THEN excluded.image_url ELSE donors.image_url END,
+              multiplicity=CASE WHEN excluded.multiplicity>0 THEN excluded.multiplicity ELSE donors.multiplicity END''',
             (art, str(r.get('brand', '')).strip(), source, str(r.get('name', '')), str(r.get('category', '')),
              str(r.get('tnved', '')), str(r.get('applicability', '')), str(r.get('warranty', '')), str(r.get('country', '')),
              num(r.get('weight')), num(r.get('length')),
-             num(r.get('width')), num(r.get('height')), str(r.get('oe_numbers', ''))))
+             num(r.get('width')), num(r.get('height')), str(r.get('oe_numbers', '')),
+             str(r.get('barcode', '')), str(r.get('image_url', '')), num(r.get('multiplicity'))))
         n += 1
     conn.commit()
     return n
@@ -982,7 +1042,7 @@ def import_donors(conn, rows, source):
 def _dims_of(r):
     return (num(r['length']), num(r['width']), num(r['height']), num(r['weight']))
 
-def enrich_full(conn, cat_mode='artbrand'):
+def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto'):
     """Полное обогащение по правилам приложения (HVC):
        - доноры: та же пара Артикул+Бренд (реестр donors) и транзитивная OE-группа;
        - категория/ТН ВЭД: по умолчанию только Артикул+Бренд (cat_mode='artbrand');
@@ -992,9 +1052,9 @@ def enrich_full(conn, cat_mode='artbrand'):
          совместимость с уже заполненными обязательна, заполняются только пустые;
        - аналоги: артикулы OE-группы (как enrich_oe). Заполненные поля не трогаем."""
     prods = [dict(r) for r in conn.execute(
-        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list,group_articles FROM products')]
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list,group_articles,barcode,image_url,multiplicity FROM products')]
     donors = [dict(r) for r in conn.execute(
-        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers FROM donors')]
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,barcode,image_url,multiplicity FROM donors')]
     # v12.9.145: ключи — как в браузере (normArticle): «F 100» и «F-100» одна пара.
     donors_by_key = {}
     for d in donors: donors_by_key.setdefault(_norm_pair(d['article'], d['brand']), []).append(d)
@@ -1023,7 +1083,7 @@ def enrich_full(conn, cat_mode='artbrand'):
         for other in lst[1:]: union(lst[0], other)
     groups = {}
     for n in nodes: groups.setdefault(find(n), []).append(n)
-    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0, 'group_articles': 0}
+    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0, 'group_articles': 0, 'barcode': 0, 'image_url': 0, 'multiplicity': 0}
     conflicts = {'category': 0, 'tnved': 0}
     def unanimous(values):
         vals = [str(v).strip() for v in values if str(v or '').strip()]
@@ -1049,11 +1109,16 @@ def enrich_full(conn, cat_mode='artbrand'):
                     [d['applicability'] for d in group_donors] + [g['applicability'] for g in group_prods])
                 if v: updates['applicability'] = v; filled['applicability'] += 1
             for field in ('category', 'tnved'):
-                if str(p[field] or '').strip(): continue
-                v, conf = unanimous([d[field] for d in pair])
+                _placeholders = {'без категории', 'разное', 'прочее', 'не определено'}
+                _cur = str(p[field] or '').strip()
+                if _cur and not (field == 'category' and _cur.lower() in _placeholders): continue
+                _vals = [d[field] for d in pair if not (field == 'category' and str(d[field] or '').strip().lower() in _placeholders)]
+                v, conf = unanimous(_vals)
                 if conf: conflicts[field] += 1
                 if not v and cat_mode in ('oe', 'auto'):
-                    v, conf2 = unanimous([d[field] for d in group_donors] + [g[field] for g in group_prods if g is not p])
+                    _pool = [d[field] for d in group_donors] + [g[field] for g in group_prods if g is not p]
+                    if field == 'category': _pool = [x for x in _pool if str(x or '').strip().lower() not in _placeholders]
+                    v, conf2 = unanimous(_pool)
                     if conf2: conflicts[field] += 1
                 if v: updates[field] = v; filled[field] += 1
             # гарантия/страна: только точная пара справочника, единогласно (как ozonSourceAttributes)
@@ -1064,18 +1129,32 @@ def enrich_full(conn, cat_mode='artbrand'):
             cur = _dims_of(p)
             if not all(v > 0 for v in cur):
                 cands = []
-                for d in pair + group_donors + group_prods:
+                _oe_pool = (group_donors + group_prods) if enrich_mode in ('oe', 'auto') else []
+                for d in pair + _oe_pool:
                     t = _dims_of(d)
                     if all(v > 0 for v in t): cands.append(t)
-                # та же пара — приоритет; далее меньший объём комплекта
+                # та же пара — приоритет; далее меньший комплект мерой браузера:
+                # (объём л, наибольшая сторона, вес, сумма сторон)
                 pair_cands = [_dims_of(d) for d in pair if all(v > 0 for v in _dims_of(d))]
-                pool = pair_cands + sorted(cands, key=lambda t: t[0] * t[1] * t[2])
+                _measure = lambda t: (round(t[0] * t[1] * t[2] / 1000, 6), max(t[0], t[1], t[2]), t[3], t[0] + t[1] + t[2])
+                pool = pair_cands + sorted(cands, key=_measure)
                 for t in pool:
                     if all(not (c > 0) or c == tv for c, tv in zip(cur, t)):  # совместимость с заполненным
                         for i, f in enumerate(('length', 'width', 'height', 'weight')):
                             if not cur[i] > 0: updates[f] = t[i]
                         filled['dims'] += 1
                         break
+            # штрихкод/фото/кратность — только та же пара донора (как HVC.enrichOne)
+            if pair:
+                if not str(p.get('barcode') or '').strip():
+                    _bc = next((str(d['barcode']).strip() for d in pair if str(d.get('barcode') or '').strip()), '')
+                    if _bc: updates['barcode'] = _bc; filled['barcode'] = filled.get('barcode', 0) + 1
+                if not str(p.get('image_url') or '').strip():
+                    _im = next((str(d['image_url']).strip() for d in pair if str(d.get('image_url') or '').strip()), '')
+                    if _im: updates['image_url'] = _im; filled['image_url'] = filled.get('image_url', 0) + 1
+                if not num(p.get('multiplicity')) > 0:
+                    _mu = next((num(d['multiplicity']) for d in pair if num(d.get('multiplicity')) > 0), 0)
+                    if _mu > 0: updates['multiplicity'] = _mu; filled['multiplicity'] = filled.get('multiplicity', 0) + 1
             others = sorted({g['article'] for g in group_prods if g['article'] != p['article']})
             if others:
                 cur_set = {x.strip() for x in str(p['analog_list'] or '').split(',') if x.strip()}
@@ -1598,7 +1677,7 @@ def ozon_row_meta(p, idx, vat='Не облагается', discount_pct=0, vehic
                       if c != art and c != oem)
     bnorm = _norm_article(brand).lower()
     hashtags = ('#автозапчасти #запчасти' + (' #' + bnorm if bnorm else '')).strip()
-    annotation = str(p.get('description', '')).strip() or f'{name}. Артикул детали: {art}. Производитель: {brand}.'
+    annotation = (str(p.get('description', '')).strip() or f'{name}. Артикул детали: {art}. Производитель: {brand}.')[:6000]
     model = str(p.get('group_articles') or p.get('model') or art)
     errors, notes = [], []
     if not brand: errors.append('не заполнен бренд')
@@ -1606,20 +1685,24 @@ def ozon_row_meta(p, idx, vat='Не облагается', discount_pct=0, vehic
     if pair_bad: errors.append('пара «категория/тип» не найдена в справочнике Ozon')
     if std_fields: notes.append('СТАНДАРТ (не измерено): ОВХ из справочника — ' + ', '.join(std_fields))
     if chz_hit: notes.append('ЧЗ по списку ТН ВЭД')
-    if not str(p.get('tnved', '')).strip(): errors.append('не заполнен ТН ВЭД')
+    if not name: errors.append('не заполнено название товара')
+    _tnv = str(p.get('tnved', '')).strip()
+    if not _tnv: notes.append('нет кода ТН ВЭД (Ozon требует для автозапчастей)')
+    elif len(re.sub(r'\D', '', _tnv)) != 10: errors.append('ТН ВЭД должен быть 10 цифр')
     if not grams(p.get('weight')) or not all(isinstance(d, int) for d in (width_mm, height_mm, length_mm)):
         errors.append('не заполнены ОВХ (вес/габариты)')
-    if not str(p.get('image_url', '')).strip(): errors.append('нет ссылки на главное фото')
+    if not str(p.get('image_url', '')).strip(): notes.append('нет ссылки на главное фото — товар загрузится, но не выйдет в продажу, пока фото не добавят')
     if not str(p.get('barcode', '')).strip(): notes.append('нет штрихкода — Ozon не сможет принять поставку без него')
     if not price_out: errors.append('не заполнена цена')
     row = [idx, art, name, price_out, old_out, vat, '', '', '', str(p.get('ozon_sku', '')),
             str(p.get('barcode', '')), str(p.get('tnved', '')), grams(p.get('weight')), width_mm, height_mm, length_mm,
-            str(p.get('image_url', '')), str(p.get('extra_photos', '')), '', brand, art,
+            str(p.get('image_url', '')), str(p.get('extra_photos', '')), '', brand,
+            str(p.get('original_article', '')).strip() or art,
             ozon_type, model, mark,
             max(1, int(round(num(p.get('multiplicity')) or 1))),
             (round(num(p.get('net_weight')) * 1000, 6) if num(p.get('net_weight')) > 0 else ''),
             str(p.get('hazard_class', '')), '', '', hashtags, annotation,
-            str(p.get('rich_content', '')), str(p.get('group_articles', '')), oem, cross, '1',
+            str(p.get('rich_content', ''))[:32767], str(p.get('group_articles', '')), oem, cross, '1',
             str(p.get('diameter', '')), str(p.get('material', '')), vehicle_type, str(p.get('color', '')),
             str(p.get('warranty', '')), str(p.get('country', '')),
             str(p.get('package_contents', '')).strip() or f'{name} - 1 шт., упаковка', '1',
@@ -1964,7 +2047,7 @@ class Handler(BaseHTTPRequestHandler):
                 n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
                 return self._send(200, {'ok': True, 'imported': n})
             if self.path == '/catalog/enrich-full':
-                return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand')})
+                return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand', body.get('enrich_mode') or 'auto')})
             if self.path == '/catalog/recalc':
                 return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {}, force=bool(body.get('force')))})
             if self.path.startswith('/catalog/results'):

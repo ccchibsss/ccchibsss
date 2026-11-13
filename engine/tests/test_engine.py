@@ -884,3 +884,73 @@ class TestRecheck148(unittest.TestCase):
         E.import_donors(conn, [{'article': 'D1', 'brand': 'B', 'name': 'Имя'}], 's1')
         r = conn.execute("SELECT weight,length,name FROM donors WHERE article='D1'").fetchone()
         self.assertEqual(r['weight'], 1.5); self.assertEqual(r['length'], 10); self.assertEqual(r['name'], 'Имя')
+
+class TestWbPromo149(unittest.TestCase):
+    ST = {'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20, 'pack': 18, 'transit': 30,
+          'mp_scope': 'WB', 'wb': {'fulfillment': 'FBS', 'commission_pct': 15, 'acquiring_pct': 1.5,
+                                   'warehouse_coeff': 1.7, 'sc_per_kg': 12, 'vol_divisor': 5000}}
+    def test_wb_hand_calc(self):
+        # price 1000 cost 500, объём 0.5л -> база 29, логистика 29*1.7=49.3; вес 1кг платный 1 -> СЦ 12
+        # comm 150, transfer 15, pack 18, transit 30, невыкуп 0 (вне ПВЗ-периода или manual 0 -> FBS: зависит от даты)
+        r = E.calc_row({'article': 'W', 'brand': 'B', 'price': 1000, 'cost': 500, 'sales': 10,
+                        'weight': 1, 'length': 10, 'width': 10, 'height': 5}, dict(self.ST))
+        self.assertAlmostEqual(r['commission'], 150, delta=0.011)
+        self.assertGreater(r['total'], 700)
+    def test_promo_price_used(self):
+        st = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10, 'pack': 18,
+              'transit': 30, 'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20}
+        a = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        b = E.calc_row({'article': 'A', 'price': 1000, 'eff_price': 800, 'cost': 500, 'sales': 10}, st)
+        self.assertLess(b['profit'], a['profit'])  # промо-цена ниже — прибыль меньше
+
+class TestOzonExportParity150(unittest.TestCase):
+    def test_row_fields(self):
+        row, _std = E.ozon_row_meta({'article': 'A1', 'brand': 'BOSCH', 'original_article': 'ORIG-9',
+            'name': 'Фильтр', 'price': 1000, 'weight': 0.5, 'length': 10, 'width': 8, 'height': 5,
+            'tnved': '8421230000', 'ozon_type': 'Фильтр масляный', 'image_url': 'https://x/y.jpg', 'description': 'д' * 7000}, 1)
+        self.assertEqual(row[20], 'ORIG-9')          # Партномер — оригинальный артикул
+        self.assertEqual(len(row[30]), 6000)          # Аннотация обрезана по лимиту Ozon
+        self.assertEqual(row[44], '')                 # ошибок нет
+    def test_tnved_and_photo_are_notes(self):
+        row, _std = E.ozon_row_meta({'article': 'A1', 'brand': 'B', 'name': 'N', 'price': 100,
+            'weight': 0.5, 'length': 10, 'width': 8, 'height': 5}, 1)
+        self.assertIn('ТН ВЭД', row[45])              # недочёт, не ошибка
+        self.assertIn('фото', row[45])
+        self.assertNotIn('ТН ВЭД', row[44])
+    def test_tnved_format_error(self):
+        row, _std = E.ozon_row_meta({'article': 'A1', 'brand': 'B', 'name': 'N', 'price': 100,
+            'weight': 0.5, 'length': 10, 'width': 8, 'height': 5, 'tnved': '123'}, 1)
+        self.assertIn('10 цифр', row[44])
+
+class TestEnrichParity151(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_placeholder_category_and_donor_fields(self):
+        E.import_rows(self.conn, [{'article': 'P1', 'brand': 'B', 'category': 'Разное', 'oe_numbers': 'OE1'}], 't')
+        E.import_donors(self.conn, [{'article': 'P1', 'brand': 'B', 'category': 'Фильтры масляные',
+                                     'barcode': '460001', 'image_url': 'https://x/1.jpg', 'multiplicity': 4}], 'd')
+        res = E.enrich_full(self.conn)
+        r = self.conn.execute("SELECT category,barcode,image_url,multiplicity FROM products WHERE article='P1'").fetchone()
+        self.assertEqual(r['category'], 'Фильтры масляные')  # заглушка не блокирует обогащение
+        self.assertEqual(r['barcode'], '460001'); self.assertEqual(r['multiplicity'], 4)
+        self.assertEqual(res['filled']['barcode'], 1)
+    def test_dims_artbrand_mode_no_oe_donor(self):
+        E.import_rows(self.conn, [{'article': 'P1', 'brand': 'B', 'oe_numbers': 'OE2'},
+                                  {'article': 'P2', 'brand': 'B', 'oe_numbers': 'OE2',
+                                   'weight': 1, 'length': 10, 'width': 8, 'height': 5}], 't')
+        E.enrich_full(self.conn, enrich_mode='artbrand')
+        w = self.conn.execute("SELECT weight FROM products WHERE article='P1'").fetchone()['weight']
+        self.assertEqual(w, 0)  # в режиме артикул+бренд OE-донор габариты не даёт
+        E.enrich_full(self.conn, enrich_mode='oe')
+        w = self.conn.execute("SELECT weight FROM products WHERE article='P1'").fetchone()['weight']
+        self.assertEqual(w, 1)
+    def test_wb_billable_from_volume(self):
+        st = {'tax_regime': 'usn_income_6', 'tax_pct': 6, 'pack': 0, 'transit': 0,
+              'wb': {'fulfillment': 'FBS', 'commission_pct': 0, 'acquiring_pct': 0, 'sc_per_kg': 10, 'vol_divisor': 5000},
+              '_volume': 2.5, '_weight': 0, '_dims': (0, 0, 0)}
+        u = E.wb_unit(1000, 0, st)
+        # платный вес из объёма: 2.5л*1000/5000=0.5кг -> СЦ 5р; логистика 67*1.7=113.9; tax 60
+        self.assertAlmostEqual(u['total'], 178.9, delta=0.011)
