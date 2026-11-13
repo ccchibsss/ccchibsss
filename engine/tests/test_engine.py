@@ -884,3 +884,21 @@ class TestRecheck148(unittest.TestCase):
         E.import_donors(conn, [{'article': 'D1', 'brand': 'B', 'name': 'Имя'}], 's1')
         r = conn.execute("SELECT weight,length,name FROM donors WHERE article='D1'").fetchone()
         self.assertEqual(r['weight'], 1.5); self.assertEqual(r['length'], 10); self.assertEqual(r['name'], 'Имя')
+
+class TestWbPromo149(unittest.TestCase):
+    ST = {'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20, 'pack': 18, 'transit': 30,
+          'mp_scope': 'WB', 'wb': {'fulfillment': 'FBS', 'commission_pct': 15, 'acquiring_pct': 1.5,
+                                   'warehouse_coeff': 1.7, 'sc_per_kg': 12, 'vol_divisor': 5000}}
+    def test_wb_hand_calc(self):
+        # price 1000 cost 500, объём 0.5л -> база 29, логистика 29*1.7=49.3; вес 1кг платный 1 -> СЦ 12
+        # comm 150, transfer 15, pack 18, transit 30, невыкуп 0 (вне ПВЗ-периода или manual 0 -> FBS: зависит от даты)
+        r = E.calc_row({'article': 'W', 'brand': 'B', 'price': 1000, 'cost': 500, 'sales': 10,
+                        'weight': 1, 'length': 10, 'width': 10, 'height': 5}, dict(self.ST))
+        self.assertAlmostEqual(r['commission'], 150, delta=0.011)
+        self.assertGreater(r['total'], 700)
+    def test_promo_price_used(self):
+        st = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10, 'pack': 18,
+              'transit': 30, 'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20}
+        a = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        b = E.calc_row({'article': 'A', 'price': 1000, 'eff_price': 800, 'cost': 500, 'sales': 10}, st)
+        self.assertLess(b['profit'], a['profit'])  # промо-цена ниже — прибыль меньше

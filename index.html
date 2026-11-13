@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.146-client+browser-parity';
+const APP_VERSION = '12.9.149-client+wb-promo';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26673,6 +26673,15 @@ const PyEngine = {
       no_buy_pct: num(cfg.fbsUnred == null ? 8 : cfg.fbsUnred),
       no_buy_by_category: cfg.noBuyByCategory || {},
       fixed_monthly_per_sku: (typeof S !== 'undefined' && S.tariffs ? num(S.tariffs.fixed) : 0) / Math.max(1, (S.rows || []).length),
+      /* v12.9.149: площадка сценария и WB-модель для движка */
+      mp_scope: String(cfg.activeMarketplace || 'OZON').toUpperCase(),
+      wb: (() => { let scheme = 'FBS'; try { scheme = commonFulfillment(cfg); } catch (e) { }
+        const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
+        return { fulfillment: scheme, commission_pct: g('wbCommissionPct', 15), acquiring_pct: g('wbAcquiringPct', 1.5),
+          boost_pct: g('wbBoostPct', 0), cofin_pct: g('wbCofinPct', 0), warehouse_coeff: g('wbWarehouseCoeff', 1.7),
+          acceptance: g('wbAcceptanceFee', 0), storage_per_l: g('wbStoragePerLDay', 0.15), storage_coeff: g('wbStorageCoeff', 1),
+          storage_days: g('wbStorageDaysPerUnit', 30), return_extra: g('wbReturnExtraFixed', 0),
+          failed_manual: g('wbFailedCostManual', 0), sc_per_kg: g('fbsScKg', 12), vol_divisor: g('volDivisor', 5000) }; })(),
       /* v12.9.146: полная браузерная модель Ozon для движка (evaluateOzon) */
       ozon: (() => { let scheme = 'FBS'; try { scheme = ozonActiveScheme(cfg); } catch (e) { }
         const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
@@ -26765,6 +26774,11 @@ const PyEngine = {
      «Пересчёт на движке», и отложенным полным расчётом ensureEconomics(). */
   async recalcAndApply(prog) {
       if (!S.rows.length) return { applied: 0, recalculated: 0 };
+      /* v12.9.149: движок считает Ozon и WB. Для ЯМ/ММ/Avito он раньше молча
+         подставлял ozon-цифры в netProfit — теперь честный отказ, и вызывающий
+         код досчитывает браузерным пайплайном. */
+      const _scope = String((S.settings && S.settings.activeMarketplace) || 'OZON').toUpperCase();
+      if (!['OZON', 'WB', 'ALL'].includes(_scope)) return { applied: 0, recalculated: 0, unsupported: _scope };
       const CH = 5000;
       /* A6 (аудит v12.9.133): единая полная синхронизация (~30 полей, как у
          экспортов), а не узкий набор — иначе движок считал по устаревшим
@@ -26799,6 +26813,7 @@ const PyEngine = {
     if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала загрузите прайс.'); return; }
     await withProgress('Python: пересчёт каталога', 'строки → SQLite → экономика на движке', async (prog) => {
       const { applied, ...rec } = await this.recalcAndApply(prog);
+      if (rec.unsupported) { Toast.warn('Движок не считает эту площадку', 'Сценарий ' + esc(rec.unsupported) + ': движок умеет Ozon и WB. Приложение посчитает встроенным расчётом — цифры будут браузерными.'); return; }
       Toast.ok('Каталог пересчитан на Python-движке',
         'применено к ' + fmt(applied) + ' SKU из ' + fmt(S.rows.length) +
         ' · прибыльных по движку: ' + fmt(rec.profitable || 0) +
@@ -26905,6 +26920,7 @@ const PyEngine = {
       group_articles: p.group_articles || '', cross_numbers: p.cross_numbers || '',
       multiplicity: num(p.multiplicity || p.pack || p.qty_in_pack || 0), net_weight: num(p.net_weight || 0),
       old_price: num(p.old_price ?? p.oldPrice ?? p.priceOld ?? p.listPrice ?? 0),
+      eff_price: (p.promo && num(p.promoPrice) > 0) ? num(p.promoPrice) : num(p.price),
       /* v12.9.140: поля обогащения — в SQLite движка, как в браузерном импорте */
       original_article: p.originalArticle || '', category_type: p.category_type || '', category_src: p.category_src || '',
       ozon_description_category_id: p.ozon_description_category_id || '', ozon_type_id: p.ozon_type_id || '',

@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.148-pyengine-33'
+VERSION = '12.9.149-pyengine-34'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -191,15 +191,57 @@ def _ozon_browser_unit(price, cost, st):
     return {'total': total, 'commission': comm, 'transfer': transfer, 'tax': tax,
             'returns': rnd(returns + return_storage), 'storage': storage}
 
-def solve_prices(price, cost, st, target_margin=20.0, sales=1):
+def wb_unit(price, cost, st):
+    """v12.9.149: WB — формулой evaluateWb браузера: база логистики по объёму,
+       складской коэффициент (СГТ без него, база 1000–3000), хранение FBO
+       ступенчатое, доставка в СЦ по платному весу, невыкуп от полного расхода
+       случая (ПВЗ-период — по объёму), комиссия/эквайринг/реклама/софин."""
+    wb = st.get('wb') or {}
+    scheme = str(wb.get('fulfillment') or 'FBS').upper()
+    v = num(st.get('_volume', 0))
+    dims = st.get('_dims') or (0, 0, 0)
+    base = wb_base_logistics(v)
+    sgt = num(st.get('_weight', 0)) > 25 or max(dims) > 200 or sum(dims) > 280
+    coeff = 1.0 if sgt else num(wb.get('warehouse_coeff', 1.7))
+    direct_base = min(3000.0, max(1000.0, base)) if sgt else base
+    logistics = rnd(rnd(direct_base * coeff) + (num(wb.get('acceptance')) if scheme == 'FBO' else 0.0))
+    storage = wb_storage_month(v, num(wb.get('storage_per_l', 0.15)), num(wb.get('storage_coeff', 1)), num(wb.get('storage_days', 30))) if scheme == 'FBO' else 0.0
+    div = num(wb.get('vol_divisor')) or 5000
+    billable = max(num(st.get('_weight', 0)), (dims[0] * dims[1] * dims[2] / div) if all(d > 0 for d in dims) else 0.0)
+    sc_delivery = rnd(num(wb.get('sc_per_kg', 12)) * billable) if scheme == 'FBS' else 0.0
+    rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
+    failed_manual = num(wb.get('failed_manual'))
+    if failed_manual > 0: failed_case = failed_manual
+    elif scheme == 'FBS':
+        import datetime as _dt
+        today = _dt.date.today()
+        in_pvz = _dt.date(2026, 8, 7) <= today <= _dt.date(2027, 1, 31)
+        failed_case = (rnd(25 if v <= 1 else 25 + (v - 1) * 4) if v > 0 else 0.0) if in_pvz else 0.0
+    else:
+        extra = num(wb.get('return_extra'))
+        failed_case = rnd(base * coeff + extra) if extra > 0 else base
+    returns = rnd(failed_case * rate / (100 - rate), 6) if rate < 100 else 0.0
+    comm = rnd(price * num(wb.get('commission_pct', 15)) / 100)
+    transfer = rnd(price * num(wb.get('acquiring_pct', 1.5)) / 100)
+    ads = rnd(price * num(wb.get('boost_pct')) / 100)
+    cofin = rnd(price * num(wb.get('cofin_pct')) / 100)
+    pack = num(st.get('pack', 18)); transit = num(st.get('transit', 30)) if scheme == 'FBS' else 0.0
+    fixed = num(st.get('fixed_per_unit', 0))
+    parts = [cost, comm, transfer, logistics, sc_delivery, pack, transit, returns, storage, ads, cofin, fixed]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    return {'total': rnd(sum(parts) + tax), 'commission': comm, 'transfer': transfer, 'tax': tax,
+            'returns': rnd(returns), 'storage': storage}
+
+def solve_prices(price, cost, st, target_margin=20.0, sales=1, unit=None):
     """Целочисленный решатель: первое целое с прибылью >= 0 и >= целевой маржи.
        Как в приложении: при продажах 0 безубыток не выдумывается (0)."""
     if not (num(sales) > 0):
         return {'break_even': 0, 'target': 0}
     if min(100.0, max(0.0, num(st.get('no_buy_pct', 0)))) >= 100:
         return {'break_even': 0, 'target': 0}  # как solveMarketplacePrices при returnRateInvalid
+    _unit = unit or ozon_unit
     def profit(p):
-        return rnd(p - ozon_unit(p, cost, st)['total'])
+        return rnd(p - _unit(p, cost, st)['total'])
     def ok(p, margin):
         return profit(p) - p * margin / 100 >= 0
     # аналитический старт для процентной части + локальная доводка
@@ -221,6 +263,7 @@ def solve_prices(price, cost, st, target_margin=20.0, sales=1):
 
 def calc_row(row, st):
     price, cost = num(row.get('price')), num(row.get('cost'))
+    if num(row.get('eff_price')) > 0: price = num(row.get('eff_price'))  # v12.9.149: промо-цена, как effPrice браузера
     # v12.9.145: паритет с браузером (calcMarketplacesEconomics/costWithMultiplicity):
     # себестоимость одного продаваемого SKU — с учётом кратности отгрузки,
     # а построчные тарифы SKU важнее общих настроек.
@@ -230,6 +273,7 @@ def calc_row(row, st):
     L, W, H = num(row.get('length')), num(row.get('width')), num(row.get('height'))
     vol = num(row.get('volume')) or (L * W * H / 1000 if L and W and H else 0.0)
     st2 = dict(st); st2['_volume'] = vol; st2['_weight'] = num(row.get('weight'))
+    st2['_dims'] = (num(row.get('length')), num(row.get('width')), num(row.get('height')))
     if num(row.get('ozon_commission')) > 0: st2['commission_pct'] = num(row.get('ozon_commission'))
     if num(row.get('no_buy_pct')) > 0: st2['no_buy_pct'] = num(row.get('no_buy_pct'))
     elif isinstance(st.get('no_buy_by_category'), dict) and str(row.get('category') or '') in st['no_buy_by_category']:
@@ -246,9 +290,11 @@ def calc_row(row, st):
         # заданный маршрут SKU заменяет усреднённую пару «последняя миля + сдача»
         st2['last_mile'] = num(row.get('ozon_logistics')) + num(row.get('ozon_realfbs_delivery'))
         st2['handover'] = 0
-    u = ozon_unit(price, cost, st2)
+    _is_wb = str(st.get('mp_scope') or '').upper() == 'WB'
+    _unit = wb_unit if _is_wb else ozon_unit
+    u = _unit(price, cost, st2)
     profit = rnd(price - u['total'])
-    solved = solve_prices(price, cost, st2, num(st.get('target_margin', 20)), row.get('sales', 1))
+    solved = solve_prices(price, cost, st2, num(st.get('target_margin', 20)), row.get('sales', 1), unit=_unit)
     return {'article': row.get('article', ''), 'brand': row.get('brand', ''), 'total': u['total'], 'profit': profit,
             'margin': rnd(profit / price * 100, 1) if price else 0.0,
             'roi': rnd(profit / cost * 100, 1) if cost else 0.0,
@@ -345,6 +391,8 @@ def db():
                 'min_stock', 'no_buy_pct', 'fixed_cost'):
         if col not in cols:
             conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
+    if 'eff_price' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN eff_price REAL DEFAULT 0")
     # B5: retention — история цен год, лог API 90 дней
     try:
         conn.execute("DELETE FROM price_history WHERE ts < datetime('now','-365 days')")
@@ -701,6 +749,9 @@ def import_rows(conn, rows, source, rebuild_fts=True):
              num(r.get('old_price')),
              str(r.get('original_article', '')), str(r.get('category_type', '')), str(r.get('category_src', '')), str(r.get('ozon_description_category_id', '')), str(r.get('ozon_type_id', '')), str(r.get('mark_status', '')), str(r.get('mark_code', '')), str(r.get('dimensions_str', '')), str(r.get('currency', '')),
              eff('ozon_commission'), eff('ozon_logistics'), eff('ozon_realfbs_delivery'), eff('ozon_failed_cost'), eff('min_stock'), eff('no_buy_pct'), eff('fixed_cost'), source))
+        if 'eff_price' in r:
+            conn.execute('UPDATE products SET eff_price=? WHERE article=? AND brand=?',
+                         (num(r.get('eff_price')), art, brand))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
@@ -798,7 +849,7 @@ def _calc_all(rows, st):
     except Exception:
         return seq(), False
 
-_ECO_FIELDS = ('price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category',
+_ECO_FIELDS = ('price', 'eff_price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category',
                'multiplicity', 'ozon_commission', 'ozon_logistics', 'ozon_realfbs_delivery',
                'ozon_failed_cost', 'no_buy_pct', 'fixed_cost')
 
@@ -813,7 +864,7 @@ def recalc_catalog(conn, st, force=False):
        если изменились её расчётные входы или настройки экономики (хэш в
        eco_results.inputs_hash). force=True — полный пересчёт как раньше.
        Итоги ответа считаются по всей таблице результатов, семантика та же."""
-    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
     old = {(r['article'], r['brand']): r['inputs_hash'] for r in
            conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
     todo, hashes = [], {}
