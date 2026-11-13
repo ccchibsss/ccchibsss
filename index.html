@@ -9101,7 +9101,7 @@ try {
       <div style="display:flex;gap:6px;align-items:center;height:28px"><div class="sw on" id="impOe"></div><span class="hint">объединять группы по OE (транзитивно)</span></div>
       <label style="display:flex;gap:6px;align-items:center;max-width:270px" title="Не скрывает из-за цены/остатка во время импорта; явная видимость, политики и общее автоскрытие после запуска продолжают действовать"><input id="impKeepVisibility" type="checkbox" style="width:auto"><span class="hint">Не скрывать автоматически при импорте</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:360px" title="Источник — тот же артикул и бренд или схожий OE-номер. Из допустимых полных записей выбирается меньший комплект вес + три стороны, проверенный по лимитам категории. Старые значения сохраняются; товар остаётся в карантине до проверки."><input id="impAnomOeAuto" type="checkbox" style="width:auto"><span class="hint">Автосверка аномальных ОВХ по OE · с проверкой</span></label>
-      <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Первый файл — прайс: при пустом каталоге он создаёт SKU. Дальше, пока переключатель включён, любой новый файл (весогабариты, OE-кроссы, категории, цены, остатки) только обогащает SKU текущего прайса; строк вне прайса не добавляет. Выключите, чтобы файл мог создавать новые SKU."><input id="impEnrichOnly" type="checkbox" style="width:auto"><span class="hint">Только обогащение по текущему прайсу, новых SKU не создавать</span></label>
+      <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Первый файл — прайс: при пустом каталоге он создаёт SKU. Дальше, пока переключатель включён, любой новый файл (весогабариты, OE-кроссы, категории, цены, остатки) только обогащает SKU текущего прайса; строк вне прайса не добавляет. Выключите, чтобы файл мог создавать новые SKU."><input id="impEnrichOnly" type="checkbox" style="width:auto"><span class="hint">Только обогащение по текущему прайсу, новых SKU не создавать. Первый файл всегда прайс: он создаёт SKU, все следующие файлы только обогащают его</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Импорт загружает и обогащает каталог, но НЕ считает юнит-экономику: каталог после импорта занимает заметно меньше памяти, а импорт проходит быстрее. Экономика посчитается автоматически при первом экспорте или входе в «Данные», дашборд и расчётные разделы."><input id="impLightMode" type="checkbox" style="width:auto"><span class="hint">Лёгкий импорт: экономику считать при экспорте, а не при загрузке</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Файлы, загружаемые после источника (весогабариты, OE-кроссы, названия), сразу расходятся по уже загруженному каталогу: строки, связанные тем же артикулом или общим OE-номером, получают недостающие поля и стандартные весогабариты. Пустые поля заполняются, существующие значения не меняются."><input id="impEnrichRelated" type="checkbox" style="width:auto"><span class="hint">Обогащать связанные строки каталога из этого файла</span></label>
       <div style="display:flex;gap:10px;align-items:center;height:28px;flex-wrap:wrap">
@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.140-client+enrich-fields-sql';
+const APP_VERSION = '12.9.143-client+price-first';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -27989,7 +27989,15 @@ const Import = {
       const eoEl = $('#impEnrichOnly');
       const enrichOnlyOn = eoEl ? !!eoEl.checked : (S.settings.importEnrichOnly !== false);
       S.settings.importEnrichOnly = enrichOnlyOn;
-      const enrichOnlyRef = enrichOnlyOn && S.rows.length > 0;
+      /* v12.9.143: обогащать надо только прайс — и это только первый файл.
+         Первый применённый файл сессии создаёт SKU (прайс); каждый следующий
+         файл — источник обогащения первого: обновляет его SKU и новых не
+         создаёт, даже если переключатель обогащения выключен. Каталог стал
+         пустым (очистка/замена) — следующий файл снова считается первым. */
+      if (!S.rows.length) Import._priceFileDone = false;
+      const isPriceFile = !Import._priceFileDone;
+      const enrichOnlyRef = (enrichOnlyOn || !isPriceFile) && S.rows.length > 0;
+      if (!isPriceFile && S.rows.length) Prog.msg('файл после первого: только обогащение прайса (первого файла) — новые SKU не создаются');
       /* v12.9.86: лёгкий импорт — пайплайн после загрузки не считает экономику;
          расчёт запускается лениво (ensureEconomics) при экспорте или входе в
          расчётные разделы. Каталог до первого расчёта живёт без расчётных
@@ -28382,6 +28390,7 @@ const Import = {
         await Exp._yield();
       }
       oeAcc.clear();
+      Import._priceFileDone = true;  // v12.9.143: первый файл применён — дальше только обогащение
       if (enrichOnlySkipped) {
         Prog.msg('обогащение только по текущему прайсу: ' + fmt(enrichOnlySkipped) + ' строк вне прайса пропущено, новых SKU не создавалось');
         console.info('[UC] обогащение по текущему прайсу: ' + fmt(enrichOnlySkipped) + ' строк вне прайса — новые SKU не создавались');
