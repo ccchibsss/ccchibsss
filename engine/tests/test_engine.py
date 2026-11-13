@@ -585,6 +585,40 @@ class TestSecretsB6(unittest.TestCase):
         E.save_secret('UC_SET_wbApiToken', '')
         self.assertNotIn('UC_SET_wbApiToken', E.secrets())
 
+class TestSupplierHeaders139(unittest.TestCase):
+    def test_moskow_supplier_csv(self):
+        # реальный формат поставщика: Бренд;Каталожный номер;Описание;Остаток;...;Цена;Штрихкод;ТН ВЭД (cp1251)
+        text = ('Бренд;Каталожный номер;Описание;Остаток;Кратность отгрузки;Валюта;Цена;Штрихкод;ТН ВЭД\r\n'
+                'METELLI;01-2497;Втулка клапана VOLVO;1;1;RUB;149.86;000403;8708999797\r\n'
+                'KYB;441040;Амортизатор AUDI;2;1;RUB;4434.5;000441;\r\n')
+        rows = E.rows_from_csv_bytes(text.encode('cp1251'))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['article'], '01-2497')
+        self.assertEqual(rows[0]['brand'], 'METELLI')
+        self.assertEqual(str(rows[0]['name']), 'Втулка клапана VOLVO')
+        self.assertEqual(str(rows[0]['barcode']), '000403')
+        self.assertEqual(float(str(rows[0]['price']).replace(',', '.')), 149.86)
+
+class TestEnrichFields140(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_browser_enrichment_columns(self):
+        text = ('Бренд;Каталожный номер;Описание;Себестоимость;Аналоги;Группа артикулов;Валюта;Мин. остаток;Объём;ID категории Ozon;Статус Честного знака;Невыкуп\r\n'
+                'BOSCH;F100;Фильтр;600;F200;GRP1;RUB;5;1.25;12345;Не требуется;12\r\n')
+        rows = E.rows_from_csv_bytes(text.encode('cp1251'))
+        self.assertEqual(len(rows), 1)
+        E.import_rows(self.conn, rows, 'test')
+        r = self.conn.execute("SELECT cost,analog_list,group_articles,currency,min_stock,volume,ozon_description_category_id,mark_status,no_buy_pct FROM products WHERE article='F100'").fetchone()
+        self.assertEqual(tuple(r), (600.0, 'F200', 'GRP1', 'RUB', 5.0, 1.25, '12345', 'Не требуется', 12.0))
+    def test_new_fields_not_clobbered_when_absent(self):
+        E.import_rows(self.conn, [{'article': 'A1', 'brand': 'B', 'currency': 'RUB', 'min_stock': 3}], 't')
+        E.import_rows(self.conn, [{'article': 'A1', 'brand': 'B', 'price': 10}], 't')
+        r = self.conn.execute("SELECT currency,min_stock FROM products WHERE article='A1'").fetchone()
+        self.assertEqual(tuple(r), ('RUB', 3.0))
+
 class TestProtocol(unittest.TestCase):
     def test_register_protocol_graceful(self):
         # на не-Windows и без реестра — тихий False, без исключений

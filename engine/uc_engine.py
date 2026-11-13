@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.137-pyengine-24'
+VERSION = '12.9.140-pyengine-26'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -238,6 +238,15 @@ def db():
     for col in ('multiplicity', 'net_weight', 'old_price'):
         if col not in cols:
             conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
+    # v12.9.140: поля обогащения браузера, которых не было в SQLite
+    for col in ('original_article', 'category_type', 'category_src', 'ozon_description_category_id',
+                'ozon_type_id', 'visible_reason', 'mark_status', 'mark_code', 'dimensions_str', 'currency'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT DEFAULT ''")
+    for col in ('ozon_commission', 'ozon_logistics', 'ozon_realfbs_delivery', 'ozon_failed_cost',
+                'min_stock', 'no_buy_pct', 'fixed_cost'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
     # B5: retention — история цен год, лог API 90 дней
     try:
         conn.execute("DELETE FROM price_history WHERE ts < datetime('now','-365 days')")
@@ -301,13 +310,32 @@ def secrets():
 
 # ---------------- импорт строк (CSV/XLSX/ZIP) ----------------
 ALIASES = {
-    'article': ('артикул', 'article', 'sku', 'код'), 'brand': ('бренд', 'brand', 'производитель'),
-    'name': ('название', 'name', 'наименование'), 'price': ('цена', 'price'),
+    'article': ('артикул', 'article', 'sku', 'код', 'каталожный номер', 'каталожный'),
+    'brand': ('бренд', 'brand', 'производитель'),
+    'name': ('название', 'name', 'наименование', 'описание'), 'price': ('цена', 'price'),
+    'barcode': ('штрихкод', 'barcode', 'ean'), 'multiplicity': ('кратность', 'multiplicity'),
     'cost': ('себестоимость', 'cost', 'закупка'), 'stock': ('остаток', 'stock', 'количество'),
     'oe_numbers': ('oe', 'oem', 'ое', 'номер oe'), 'weight': ('вес', 'weight'),
     'sales': ('продажи', 'sales'), 'category': ('категор', 'category'),
     'tnved': ('тн вэд', 'тнвэд', 'tnved', 'hs code'), 'applicability': ('применяем', 'applicab', 'совмест'),
-    'length': ('длина', 'length'), 'width': ('ширина', 'width'), 'height': ('высота', 'height')}
+    'length': ('длина', 'length'), 'width': ('ширина', 'width'), 'height': ('высота', 'height'),
+    # v12.9.140: поля обогащения браузерного импорта (STD/FIELD_ALIAS приложения)
+    'volume': ('объём', 'объем', 'volume'), 'analog_list': ('аналоги', 'analog', 'кроссы'),
+    'group_articles': ('группа артикулов', 'group'), 'cross_numbers': ('кросс-номера', 'кросс номера', 'cross'),
+    'original_article': ('ориг. артикул', 'оригинальный артикул', 'original'), 'category_type': ('вид категории', 'тип категории', 'подкатегория'),
+    'category_src': ('исходная категория', 'путь категории', 'breadcrumb'), 'currency': ('валюта', 'currency'),
+    'warranty': ('гарантия', 'warranty'), 'country': ('страна-изготовитель', 'страна', 'country'),
+    'image_url': ('ссылка на изображение', 'изображение', 'фото', 'image'), 'extra_photos': ('дополнительные фото', 'extra_photos'),
+    'ozon_sku': ('sku ozon', 'ozon sku', 'ozon_sku'), 'ozon_category': ('категория ozon', 'ozon_category'),
+    'ozon_type': ('тип ozon', 'ozon_type'), 'ozon_description_category_id': ('id категории ozon', 'description_category_id'),
+    'ozon_type_id': ('id типа ozon', 'type_id'), 'model': ('модель', 'model'), 'color': ('цвет', 'color'),
+    'material': ('материал', 'material'), 'description': ('аннотация', 'описание товара', 'description'),
+    'dimensions_str': ('весогабариты', 'габариты', 'dimensions'), 'mark_required': ('нужен честный знак', 'требуется сертификат', 'маркировка'),
+    'mark_status': ('статус честного знака', 'mark_status'), 'mark_code': ('код маркировки', 'mark_code'),
+    'min_stock': ('мин. остаток', 'минимальный остаток', 'min_stock', 'неснижаемый'),
+    'no_buy_pct': ('невыкуп', 'no_buy', 'возврат'), 'fixed_cost': ('фикс. расходы', 'fixed'),
+    'ozon_commission': ('вознаграждение ozon', 'комиссия ozon', 'ozon_commission'),
+    'old_price': ('зачёркнутая цена', 'зачеркнутая цена', 'старая цена', 'old_price')}
 def map_header(header):
     out = {}
     low = [str(h or '').strip().lower() for h in header]
@@ -394,9 +422,11 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         # Явно переданный 0 (ключ есть) — честное обновление.
         def eff(k):
             if k in r: return num(r.get(k))
-            return float(old[k]) if old is not None else 0.0
-        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability,barcode,image_url,extra_photos,ozon_sku,ozon_type,ozon_category,model,hazard_class,color,material,country,warranty,diameter,package_contents,rich_content,description,mark_required,group_articles,cross_numbers,multiplicity,net_weight,old_price,source,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
+            if old is None: return 0.0
+            try: return float(old[k])
+            except Exception: return 0.0
+        conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability,barcode,image_url,extra_photos,ozon_sku,ozon_type,ozon_category,model,hazard_class,color,material,country,warranty,diameter,package_contents,rich_content,description,mark_required,group_articles,cross_numbers,multiplicity,net_weight,old_price,original_article,category_type,category_src,ozon_description_category_id,ozon_type_id,mark_status,mark_code,dimensions_str,currency,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,min_stock,no_buy_pct,fixed_cost,source,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
               name=COALESCE(NULLIF(excluded.name,''),products.name),
               price=CASE WHEN excluded.price>0 THEN excluded.price ELSE products.price END,
@@ -431,6 +461,22 @@ def import_rows(conn, rows, source, rebuild_fts=True):
               multiplicity=CASE WHEN excluded.multiplicity>0 THEN excluded.multiplicity ELSE products.multiplicity END,
               net_weight=CASE WHEN excluded.net_weight>0 THEN excluded.net_weight ELSE products.net_weight END,
               old_price=CASE WHEN excluded.old_price>0 THEN excluded.old_price ELSE products.old_price END,
+              original_article=CASE WHEN excluded.original_article<>'' THEN excluded.original_article ELSE products.original_article END,
+              category_type=CASE WHEN excluded.category_type<>'' THEN excluded.category_type ELSE products.category_type END,
+              category_src=CASE WHEN excluded.category_src<>'' THEN excluded.category_src ELSE products.category_src END,
+              ozon_description_category_id=CASE WHEN excluded.ozon_description_category_id<>'' THEN excluded.ozon_description_category_id ELSE products.ozon_description_category_id END,
+              ozon_type_id=CASE WHEN excluded.ozon_type_id<>'' THEN excluded.ozon_type_id ELSE products.ozon_type_id END,
+              mark_status=CASE WHEN excluded.mark_status<>'' THEN excluded.mark_status ELSE products.mark_status END,
+              mark_code=CASE WHEN excluded.mark_code<>'' THEN excluded.mark_code ELSE products.mark_code END,
+              dimensions_str=CASE WHEN excluded.dimensions_str<>'' THEN excluded.dimensions_str ELSE products.dimensions_str END,
+              currency=CASE WHEN excluded.currency<>'' THEN excluded.currency ELSE products.currency END,
+              ozon_commission=CASE WHEN excluded.ozon_commission<>0 THEN excluded.ozon_commission ELSE products.ozon_commission END,
+              ozon_logistics=CASE WHEN excluded.ozon_logistics<>0 THEN excluded.ozon_logistics ELSE products.ozon_logistics END,
+              ozon_realfbs_delivery=CASE WHEN excluded.ozon_realfbs_delivery<>0 THEN excluded.ozon_realfbs_delivery ELSE products.ozon_realfbs_delivery END,
+              ozon_failed_cost=CASE WHEN excluded.ozon_failed_cost<>0 THEN excluded.ozon_failed_cost ELSE products.ozon_failed_cost END,
+              min_stock=CASE WHEN excluded.min_stock<>0 THEN excluded.min_stock ELSE products.min_stock END,
+              no_buy_pct=CASE WHEN excluded.no_buy_pct<>0 THEN excluded.no_buy_pct ELSE products.no_buy_pct END,
+              fixed_cost=CASE WHEN excluded.fixed_cost<>0 THEN excluded.fixed_cost ELSE products.fixed_cost END,
               source=excluded.source, updated_at=datetime("now")''',
             (art, str(r.get('brand', '')).strip(), str(r.get('name', '')),
              num(r.get('price')), num(r.get('cost')), eff('stock'), eff('sales'), eff('weight'),
@@ -444,7 +490,9 @@ def import_rows(conn, rows, source, rebuild_fts=True):
              str(r.get('diameter', '')), str(r.get('package_contents', '')), str(r.get('rich_content', '')),
              str(r.get('description', '')), str(r.get('mark_required', '')), str(r.get('group_articles', '')),
              str(r.get('cross_numbers', '')), num(r.get('multiplicity')), num(r.get('net_weight')),
-             num(r.get('old_price')), source))
+             num(r.get('old_price')),
+             str(r.get('original_article', '')), str(r.get('category_type', '')), str(r.get('category_src', '')), str(r.get('ozon_description_category_id', '')), str(r.get('ozon_type_id', '')), str(r.get('mark_status', '')), str(r.get('mark_code', '')), str(r.get('dimensions_str', '')), str(r.get('currency', '')),
+             eff('ozon_commission'), eff('ozon_logistics'), eff('ozon_realfbs_delivery'), eff('ozon_failed_cost'), eff('min_stock'), eff('no_buy_pct'), eff('fixed_cost'), source))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
