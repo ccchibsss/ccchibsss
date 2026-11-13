@@ -572,6 +572,19 @@ class TestAudit2Fixes135(unittest.TestCase):
     def test_db_reinit_same_path(self):  # B4: повторные db() не падают и схема готова
         c2 = E.db(); self.assertIsNotNone(c2.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='products'").fetchone())
 
+class TestSecretsB6(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        E.SECRETS_PATH = pathlib.Path(self.tmp) / 'secrets.json'
+        self.conn = E.db()
+    def test_save_and_delete_secret(self):
+        E.save_secret('UC_SET_wbApiToken', 'tok123')
+        self.assertEqual(E.secrets().get('UC_SET_wbApiToken'), 'tok123')
+        E.save_secret('UC_SET_wbApiToken', '')
+        self.assertNotIn('UC_SET_wbApiToken', E.secrets())
+
 class TestProtocol(unittest.TestCase):
     def test_register_protocol_graceful(self):
         # на не-Windows и без реестра — тихий False, без исключений
