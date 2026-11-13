@@ -784,3 +784,29 @@ class TestSqlParity145(unittest.TestCase):
                                   {'article': 'G2', 'brand': 'B', 'oe_numbers': 'OEG'}], 't')
         res = E.enrich_full(self.conn)
         self.assertEqual(res['filled']['group_articles'], 2)
+
+
+class TestBrowserParity146(unittest.TestCase):
+    ST = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10,
+          'pack': 18, 'transit': 30, 'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20,
+          'ozon': {'fulfillment': 'FBS', 'logistics_manual': 100, 'processing': 0,
+                   'last_mile': 25, 'handover_mode': 'sc', 'handover_fee': 10,
+                   'units_per_shipment': 1, 'nonstd_enabled': True, 'nonstd_pct': 3, 'nonstd_cap': 280}}
+    def test_browser_formula_hand_calc(self):
+        # price 1000, cost 500: comm 140, transfer 15, logistics 100, last_mile 25,
+        # handover 10, pack 18, transit 30, no_buy 0 -> parts 838, tax 6% = 60, total 898
+        r = E.calc_row({'article': 'A', 'brand': 'B', 'price': 1000, 'cost': 500, 'sales': 10}, dict(self.ST))
+        self.assertAlmostEqual(r['total'], 898, delta=0.011)
+        self.assertAlmostEqual(r['profit'], 102, delta=0.011)
+        self.assertEqual(r['brand'], 'B')
+    def test_no_buy_and_nonstd(self):
+        st = dict(self.ST); st['no_buy_pct'] = 0
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10,
+                        'no_buy_pct': 10, 'weight': 30}, st)
+        # failed=2*100+25=225; returns=225*10/90=25; nonstd=min(30,280)=30
+        # parts=500+140+15+100+25+10+18+30+25+30=893; tax 60; total 953
+        self.assertAlmostEqual(r['total'], 953, delta=0.011)
+    def test_old_path_kept_without_ozon(self):
+        st = {k: v for k, v in self.ST.items() if k != 'ozon'}
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        self.assertGreater(r['total'], 0)

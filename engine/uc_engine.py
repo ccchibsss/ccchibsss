@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.145-pyengine-30'
+VERSION = '12.9.146-pyengine-31'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -112,6 +112,8 @@ def wb_storage_month(volume, first_liter_day=0.15, coeff=1.0, days=30):
 
 # ---------------- экономика Ozon (паритет с приложением; эталон — золотые CSV) ----------------
 def ozon_unit(price, cost, st):
+    if isinstance(st.get('ozon'), dict):
+        return _ozon_browser_unit(price, cost, st)
     comm = rnd(price * num(st.get('commission_pct', 14)) / 100)
     transfer = rnd(price * num(st.get('transfer_pct', 1.5)) / 100)
     failed_case = num(st.get('failed_case', 0))
@@ -132,6 +134,59 @@ def ozon_unit(price, cost, st):
     total = rnd(sum(fixed_parts) + comm + transfer + tax)
     return {'total': total, 'commission': comm, 'transfer': transfer, 'tax': tax,
             'returns': rnd(returns), 'storage': storage}
+
+def _ozon_browser_unit(price, cost, st):
+    """v12.9.146: Ozon — той же формулой, что evaluateOzon в браузере
+       (calcMarketplacesEconomics): скидка за быструю отгрузку, ручной маршрут
+       + обработка, сдача по режиму, хранение FBO за литр, невыкуп от полного
+       расхода случая, нестандарт 3% с капом, поздняя отгрузка, хранение возврата.
+       Настройки приходят в st['ozon'] из _settingsSnapshot приложения."""
+    oz = st['ozon']
+    scheme = str(oz.get('fulfillment') or 'FBS').upper()
+    vol = num(st.get('_volume', 0))
+    liters = max(0.01, vol) if vol > 0 else 0.0
+    comm_base = num(st.get('commission_pct', 14))
+    ship_disc = num(oz.get('ship_discount_pp')) if scheme == 'FBS' else 0.0
+    comm = rnd(price * max(0.0, comm_base - ship_disc) / 100)
+    transfer = rnd(price * num(st.get('transfer_pct', 1.5)) / 100)
+    ads = rnd(price * num(oz.get('boost_pct')) / 100)
+    cofin = rnd(price * num(oz.get('cofin_pct')) / 100)
+    manual_log = num(st.get('_row_logistics', oz.get('logistics_manual')))
+    processing = 0.0 if scheme == 'REALFBS' else num(oz.get('fbo_processing') if scheme == 'FBO' else oz.get('processing'))
+    realfbs_del = num(st.get('_row_realfbs', 0))
+    logistics = realfbs_del if scheme == 'REALFBS' else rnd(manual_log + processing)
+    last_mile = 0.0 if scheme == 'REALFBS' else num(oz.get('last_mile', st.get('last_mile', 25)))
+    units = max(1.0, num(oz.get('units_per_shipment')) or 1)
+    handover = 0.0
+    if scheme == 'FBS':
+        mode = str(oz.get('handover_mode') or 'sc')
+        if mode == 'sc_self': handover = 0.0
+        elif mode == 'pvz_pct': handover = rnd(min(price * units * num(oz.get('pvz_pct')) / 100, num(oz.get('pvz_cap'))) / units)
+        elif mode == 'courier': handover = rnd((num(oz.get('courier_trip')) / max(1.0, num(oz.get('courier_orders')) or 1) + num(oz.get('courier_order'))) / units + num(oz.get('courier_liter')) * liters)
+        else: handover = rnd(num(oz.get('handover_fee', 10)) / units)
+    storage = rnd(liters * num(oz.get('storage_per_l')) * num(oz.get('storage_days', 30))) if scheme == 'FBO' else 0.0
+    rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
+    failed_override = num(st.get('failed_case')) > 0
+    failed_case = num(st.get('failed_case')) if failed_override else (
+        realfbs_del + num(oz.get('realfbs_return')) if scheme == 'REALFBS'
+        else 2 * manual_log + last_mile + num(oz.get('return_handling')))
+    returns = rnd(failed_case * rate / (100 - rate), 6) if rate < 100 else 0.0
+    return_storage = 0.0 if failed_override else (
+        rnd(num(oz.get('return_storage')) * rate / (100 - rate), 6) if scheme == 'FBS' and rate < 100 else 0.0)
+    nonstd = 0.0
+    if oz.get('nonstd_enabled', True) and scheme != 'REALFBS' and num(st.get('_weight', 0)) > 25:
+        nonstd = rnd(min(price * num(oz.get('nonstd_pct', 3)) / 100, num(oz.get('nonstd_cap', 280))))
+    late = rnd(price * num(oz.get('late_ship_pct')) / 100) if scheme == 'FBS' else 0.0
+    pack = num(st.get('pack', 18))
+    transit = num(st.get('transit', 30)) if scheme == 'FBS' else 0.0
+    fixed = num(st.get('fixed_per_unit', 0))
+    parts = [cost, comm, transfer, logistics, last_mile, handover, pack, transit,
+             returns, return_storage, storage, ads, cofin, nonstd, late, fixed]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'),
+                   num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    total = rnd(sum(parts) + tax)
+    return {'total': total, 'commission': comm, 'transfer': transfer, 'tax': tax,
+            'returns': rnd(returns + return_storage), 'storage': storage}
 
 def solve_prices(price, cost, st, target_margin=20.0, sales=1):
     """Целочисленный решатель: первое целое с прибылью >= 0 и >= целевой маржи.
@@ -169,11 +224,13 @@ def calc_row(row, st):
         if _mult > 1: cost = rnd(cost * _mult)
     L, W, H = num(row.get('length')), num(row.get('width')), num(row.get('height'))
     vol = num(row.get('volume')) or (L * W * H / 1000 if L and W and H else 0.0)
-    st2 = dict(st); st2['_volume'] = vol
+    st2 = dict(st); st2['_volume'] = vol; st2['_weight'] = num(row.get('weight'))
     if num(row.get('ozon_commission')) > 0: st2['commission_pct'] = num(row.get('ozon_commission'))
     if num(row.get('no_buy_pct')) > 0: st2['no_buy_pct'] = num(row.get('no_buy_pct'))
     if num(row.get('ozon_failed_cost')) > 0: st2['failed_case'] = num(row.get('ozon_failed_cost'))
     if num(row.get('fixed_cost')) > 0: st2['fixed_per_unit'] = num(row.get('fixed_cost'))
+    if num(row.get('ozon_logistics')) > 0: st2['_row_logistics'] = num(row.get('ozon_logistics'))
+    if num(row.get('ozon_realfbs_delivery')) > 0: st2['_row_realfbs'] = num(row.get('ozon_realfbs_delivery'))
     if num(row.get('ozon_logistics')) > 0 or num(row.get('ozon_realfbs_delivery')) > 0:
         # заданный маршрут SKU заменяет усреднённую пару «последняя миля + сдача»
         st2['last_mile'] = num(row.get('ozon_logistics')) + num(row.get('ozon_realfbs_delivery'))
@@ -181,7 +238,7 @@ def calc_row(row, st):
     u = ozon_unit(price, cost, st2)
     profit = rnd(price - u['total'])
     solved = solve_prices(price, cost, st2, num(st.get('target_margin', 20)), row.get('sales', 1))
-    return {'article': row.get('article', ''), 'total': u['total'], 'profit': profit,
+    return {'article': row.get('article', ''), 'brand': row.get('brand', ''), 'total': u['total'], 'profit': profit,
             'margin': rnd(profit / price * 100, 1) if price else 0.0,
             'roi': rnd(profit / cost * 100, 1) if cost else 0.0,
             'commission': u['commission'], 'tax': u['tax'], 'returns': u['returns'],
@@ -1784,7 +1841,7 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
-            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability,warranty,country,group_articles,cross_numbers,barcode,category_type,ozon_category,ozon_type,description FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
             total = conn.execute('SELECT COUNT(*) c FROM products').fetchone()['c']
             return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
         if self.path.startswith('/catalog/results'):
