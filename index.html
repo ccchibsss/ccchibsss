@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.129-client+filemode-launch';
+const APP_VERSION = '12.9.130-client+storage-guard';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -22576,7 +22576,27 @@ function persistNow(changedList) {
   _persistQueue = call.catch(() => {}).finally(() => { _persistPending--; });
   return call;
 }
+async function storageFreeInfo() {
+  try {
+    if (!navigator.storage || !navigator.storage.estimate) return null;
+    const e = await navigator.storage.estimate();
+    const quota = e.quota || 0, usage = e.usage || 0;
+    return quota ? { usage, quota, free: Math.max(0, quota - usage) } : null;
+  } catch (e) { return null; }
+}
+async function warnIfLowStorage(where) {
+  const info = await storageFreeInfo();
+  if (!info) return;
+  const mb = b => Math.round(b / 1048576);
+  if (info.free < 150 * 1048576) {
+    Toast.err('Мало места на диске для ' + where,
+      'Свободно около ' + mb(info.free) + ' МБ (квота браузера ' + mb(info.quota) + ' МБ, занято ' + mb(info.usage) + ' МБ). ' +
+      'Сохранение и экспорт могут идти очень долго или оборваться. Освободите место на системном диске (Очистка диска, Корзина), затем повторите.');
+    console.warn('[UC] мало места:', info);
+  }
+}
 async function _persistNowImpl(changedList) {
+  warnIfLowStorage('сохранения каталога');
   /* v12.9.19-mem: запись каталога — самый тяжёлый шаг по памяти (строка + копия
      для IndexedDB). Перед ним освобождаем кэши/копии, если heap уже высокий. */
   try { if (typeof MemGuard !== 'undefined') MemGuard.check('сохранение каталога'); } catch (e) { }
@@ -33876,6 +33896,7 @@ const OzonExport = {
   bind() {
     const bindBtn = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
     bindBtn('#btnExportOzon', async () => { // v12.9.121: движок встроен в существующую кнопку
+      warnIfLowStorage('экспорта');
       if (await PyEngine.health()) PyEngine.exportOzon(); else OzonExport.open();
     });
     bindBtn('#btnExportOzonTop', () => OzonExport.open());
