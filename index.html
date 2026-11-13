@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.144-client+disk-preflight';
+const APP_VERSION = '12.9.145-client+sql-parity';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26667,6 +26667,7 @@ const PyEngine = {
       handover: 10, pack: num(cfg.fbsPack == null ? 18 : cfg.fbsPack), transit: num(cfg.fbsPackTransit == null ? 30 : cfg.fbsPackTransit),
       tax_regime: cfg.taxRegime || 'usn_income_6', tax_pct: num(cfg.taxPct == null ? 6 : cfg.taxPct),
       tax_osno_share: num(cfg.taxOsnoEligibleSharePct || 0),
+      multiplicity_enabled: cfg.useMultiplicity !== false,
       target_margin: num(cfg.tgtMargin == null ? 20 : cfg.tgtMargin)
     };
   },
@@ -26803,7 +26804,7 @@ const PyEngine = {
         continue;
       }
       let ch = false;
-      for (const f of ['name', 'oe_numbers', 'analog_list', 'category', 'tnved', 'applicability']) {
+      for (const f of ['name', 'oe_numbers', 'analog_list', 'category', 'tnved', 'applicability', 'warranty', 'country', 'group_articles']) {
         if (!String(p[f] || '').trim() && String(r[f] || '').trim()) { p[f] = r[f]; ch = true; }
       }
       for (const f of ['weight', 'length', 'width', 'height', 'volume']) {
@@ -26831,16 +26832,26 @@ const PyEngine = {
       await withProgress('Python: импорт файла', f.name, async () => {
         const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 600000);
         try {
+          /* v12.9.145: и на движке обогащается только прайс — первый файл.
+             Первый файл сессии создаёт SKU; следующие только обновляют его
+             строки (движок получает X-Import-Mode: enrich и не вставляет
+             новые, браузер не добавляет их в таблицу). */
+          if (!S.rows.length && typeof Import !== 'undefined') Import._priceFileDone = false;
+          const isPriceFile = !(typeof Import !== 'undefined' && Import._priceFileDone);
+          if (!isPriceFile) await this._syncCatalog('app-import-enrich-ref');
           const r = await fetch(this.base() + '/import/file', { method: 'POST', signal: ctl.signal,
-            headers: { 'X-UC-Token': this.token(), 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream' }, body: f });
+            headers: { 'X-UC-Token': this.token(), 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream', 'X-Import-Mode': isPriceFile ? 'price' : 'enrich' }, body: f });
           const j = await r.json().catch(() => ({}));
           if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+          if (typeof Import !== 'undefined') Import._priceFileDone = true;
           const products = await this._pullProducts();
-          const m = this._mergeProducts(products, false);
+          const m = this._mergeProducts(products, !isPriceFile);
           bumpVersion();
           try { await runPipeline(true, { skipEconomics: true, persist: false }); } catch (e) { try { Table.paint(); } catch (e2) { } }
           Toast.ok('Файл импортирован на Python-движке',
-            f.name + ': строк в движок ' + fmt(j.imported || 0) + ' · в таблицу добавлено ' + fmt(m.added) + ', дополнено ' + fmt(m.touched) + '. Файл разбирал движок, не браузер.');
+            f.name + ': строк в движок ' + fmt(j.imported || 0) + ' · в таблицу добавлено ' + fmt(m.added) + ', дополнено ' + fmt(m.touched) +
+            (j.skipped_outside_price ? ' · вне прайса (первого файла) пропущено ' + fmt(j.skipped_outside_price) + ' — новые SKU не создаются' : '') +
+            '. Файл разбирал движок, не браузер.');
         } finally { clearTimeout(to); }
       });
     };

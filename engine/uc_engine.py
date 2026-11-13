@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.144-pyengine-29'
+VERSION = '12.9.145-pyengine-30'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -125,7 +125,7 @@ def ozon_unit(price, cost, st):
         if st.get('fulfillment') == 'FBO' else 0.0
     fixed_parts = [cost, num(st.get('last_mile', 25)), num(st.get('handover', 10)),
                    num(st.get('pack', 18)), num(st.get('transit', 30)), returns, storage,
-                   num(st.get('processing', 0))]
+                   num(st.get('processing', 0)), num(st.get('fixed_per_unit', 0))]
     tax = calc_tax(price, sum(fixed_parts) + comm + transfer,
                    st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)),
                    num(st.get('tax_osno_share', 0)))
@@ -161,9 +161,23 @@ def solve_prices(price, cost, st, target_margin=20.0, sales=1):
 
 def calc_row(row, st):
     price, cost = num(row.get('price')), num(row.get('cost'))
+    # v12.9.145: паритет с браузером (calcMarketplacesEconomics/costWithMultiplicity):
+    # себестоимость одного продаваемого SKU — с учётом кратности отгрузки,
+    # а построчные тарифы SKU важнее общих настроек.
+    if st.get('multiplicity_enabled', True):
+        _mult = num(row.get('multiplicity'))
+        if _mult > 1: cost = rnd(cost * _mult)
     L, W, H = num(row.get('length')), num(row.get('width')), num(row.get('height'))
     vol = num(row.get('volume')) or (L * W * H / 1000 if L and W and H else 0.0)
     st2 = dict(st); st2['_volume'] = vol
+    if num(row.get('ozon_commission')) > 0: st2['commission_pct'] = num(row.get('ozon_commission'))
+    if num(row.get('no_buy_pct')) > 0: st2['no_buy_pct'] = num(row.get('no_buy_pct'))
+    if num(row.get('ozon_failed_cost')) > 0: st2['failed_case'] = num(row.get('ozon_failed_cost'))
+    if num(row.get('fixed_cost')) > 0: st2['fixed_per_unit'] = num(row.get('fixed_cost'))
+    if num(row.get('ozon_logistics')) > 0 or num(row.get('ozon_realfbs_delivery')) > 0:
+        # заданный маршрут SKU заменяет усреднённую пару «последняя миля + сдача»
+        st2['last_mile'] = num(row.get('ozon_logistics')) + num(row.get('ozon_realfbs_delivery'))
+        st2['handover'] = 0
     u = ozon_unit(price, cost, st2)
     profit = rnd(price - u['total'])
     solved = solve_prices(price, cost, st2, num(st.get('target_margin', 20)), row.get('sales', 1))
@@ -673,7 +687,9 @@ def _calc_all(rows, st):
     except Exception:
         return seq(), False
 
-_ECO_FIELDS = ('price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume')
+_ECO_FIELDS = ('price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume',
+               'multiplicity', 'ozon_commission', 'ozon_logistics', 'ozon_realfbs_delivery',
+               'ozon_failed_cost', 'no_buy_pct', 'fixed_cost')
 
 def _eco_hash(row, st):
     import hashlib
@@ -686,7 +702,7 @@ def recalc_catalog(conn, st, force=False):
        если изменились её расчётные входы или настройки экономики (хэш в
        eco_results.inputs_hash). force=True — полный пересчёт как раньше.
        Итоги ответа считаются по всей таблице результатов, семантика та же."""
-    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume FROM products').fetchall()]
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
     old = {(r['article'], r['brand']): r['inputs_hash'] for r in
            conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
     todo, hashes = [], {}
@@ -715,15 +731,26 @@ def recalc_catalog(conn, st, force=False):
             'avg_profit': rnd(agg['avgp'] or 0, 2) if n else 0, 'parallel': parallel}
 
 # ---------------- импорт файла целиком + обогащение OE (v12.9.105) ----------------
-def import_file_bytes(conn, filename, data):
-    """Файл разбирает движок, а не браузер: CSV/XLSX/ZIP -> строки -> каталог."""
+def import_file_bytes(conn, filename, data, enrich_only=False):
+    """Файл разбирает движок, а не браузер: CSV/XLSX/ZIP -> строки -> каталог.
+       enrich_only (v12.9.145): файл не первый (не прайс) — только обогащение
+       уже существующих SKU, новые строки не вставляются."""
     name = os.path.basename(str(filename or 'file'))
     files = files_from_zip(data) if name.lower().endswith('.zip') else [(name, data)]
     ensure_free_space(sum(len(b) for _, b in files))  # v12.9.144: отказ до записи, а не в середине
-    total = 0
+    total = 0; skipped = 0
+    existing = None
+    if enrich_only:
+        existing = {_norm_pair(r[0], r[1]) for r in conn.execute('SELECT article,brand FROM products')}
     try:
         for fname, blob in files:
             rows = rows_from_xlsx_bytes(blob) if fname.lower().endswith('.xlsx') else rows_from_csv_bytes(blob)
+            if existing is not None:
+                kept = []
+                for r in rows:
+                    if _norm_pair(r.get('article', ''), r.get('brand', '')) in existing: kept.append(r)
+                    elif str(r.get('article', '')).strip(): skipped += 1
+                rows = kept
             total += import_rows(conn, rows, f'file:{name}', rebuild_fts=False)
         conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
         conn.commit()
@@ -731,8 +758,15 @@ def import_file_bytes(conn, filename, data):
         try: conn.rollback()  # не оставлять полуприменённый импорт
         except Exception: pass
         raise
-    log_api(conn, 'importFile', name, 'ok', f'строк {total}')
-    return {'file': name, 'imported': total}
+    log_api(conn, 'importFile', name, 'ok', f'строк {total}, вне прайса пропущено {skipped}')
+    return {'file': name, 'imported': total, 'skipped_outside_price': skipped, 'enrich_only': bool(enrich_only)}
+
+def _norm_key_part(v):
+    """Как normArticle в приложении: верхний регистр, только буквы/цифры."""
+    return re.sub(r'[^A-Z0-9А-ЯЁ]', '', str(v or '').upper())
+
+def _norm_pair(article, brand):
+    return _norm_key_part(article) + '|' + _norm_key_part(brand)
 
 def _oe_codes(raw):
     out = []
@@ -844,11 +878,19 @@ def enrich_full(conn, cat_mode='artbrand'):
          совместимость с уже заполненными обязательна, заполняются только пустые;
        - аналоги: артикулы OE-группы (как enrich_oe). Заполненные поля не трогаем."""
     prods = [dict(r) for r in conn.execute(
-        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list FROM products')]
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list,group_articles FROM products')]
     donors = [dict(r) for r in conn.execute(
         'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers FROM donors')]
+    # v12.9.145: ключи — как в браузере (normArticle): «F 100» и «F-100» одна пара.
     donors_by_key = {}
-    for d in donors: donors_by_key.setdefault((d['article'], d['brand']), []).append(d)
+    for d in donors: donors_by_key.setdefault(_norm_pair(d['article'], d['brand']), []).append(d)
+    # Карантин идентичностей (как HVC.identityUnsafe): один нормализованный ключ
+    # у разных буквальных пар артикул+бренд — такие SKU не обогащаем и их OE не
+    # даём связывать группы, иначе чужие данные протекут не в тот товар.
+    _lit_by_norm = {}
+    for r in prods: _lit_by_norm.setdefault(_norm_pair(r['article'], r['brand']), set()).add((r['article'], r['brand']))
+    unsafe_norms = {k for k, v in _lit_by_norm.items() if len(v) > 1}
+    quarantined = sum(1 for r in prods if _norm_pair(r['article'], r['brand']) in unsafe_norms)
     # OE-граф: продукты и доноры в одних группах (узел = ('p'|'d', article, brand, idx))
     nodes = [('p', i) for i in range(len(prods))] + [('d', i) for i in range(len(donors))]
     parent = {n: n for n in nodes}
@@ -861,12 +903,13 @@ def enrich_full(conn, cat_mode='artbrand'):
     oe_map = {}
     for kind, i in nodes:
         r = prods[i] if kind == 'p' else donors[i]
+        if kind == 'p' and _norm_pair(r['article'], r['brand']) in unsafe_norms: continue
         for oe in _oe_codes(r['oe_numbers']): oe_map.setdefault(oe, []).append((kind, i))
     for lst in oe_map.values():
         for other in lst[1:]: union(lst[0], other)
     groups = {}
     for n in nodes: groups.setdefault(find(n), []).append(n)
-    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0}
+    filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0, 'group_articles': 0}
     conflicts = {'category': 0, 'tnved': 0}
     def unanimous(values):
         vals = [str(v).strip() for v in values if str(v or '').strip()]
@@ -880,7 +923,8 @@ def enrich_full(conn, cat_mode='artbrand'):
         if not group_prods: continue
         group_donors = [donors[i] for kind, i in members if kind == 'd']
         for p in group_prods:
-            pair = donors_by_key.get((p['article'], p['brand']), [])
+            if _norm_pair(p['article'], p['brand']) in unsafe_norms: continue  # карантин
+            pair = donors_by_key.get(_norm_pair(p['article'], p['brand']), [])
             updates = {}
             if not str(p['name'] or '').strip():
                 v = frequent([d['name'] for d in pair]) or frequent(
@@ -924,13 +968,17 @@ def enrich_full(conn, cat_mode='artbrand'):
                 merged = sorted(cur_set | set(others))
                 if merged != sorted(cur_set):
                     updates['analog_list'] = ', '.join(merged); filled['analog_list'] += 1
+            if not str(p.get('group_articles') or '').strip():
+                grp = sorted({g['article'] for g in group_prods if str(g['article'] or '').strip()})
+                if len(grp) > 1:
+                    updates['group_articles'] = ' / '.join(grp); filled['group_articles'] += 1
             if updates:
                 sets = ', '.join(f'{k}=?' for k in updates)
                 conn.execute(f'UPDATE products SET {sets} WHERE article=? AND brand=?',
                              (*updates.values(), p['article'], p['brand']))
     conn.commit()
     log_api(conn, 'enrichFull', 'sqlite', 'ok', f'cat_mode={cat_mode}, заполнено {filled}, конфликты {conflicts}')
-    return {'cat_mode': cat_mode, 'filled': filled, 'conflicts': conflicts, 'donors': len(donors)}
+    return {'cat_mode': cat_mode, 'filled': filled, 'conflicts': conflicts, 'donors': len(donors), 'quarantined': quarantined}
 
 # ---------------- обобщённый разбор файлов (п.5 аудита, v12.9.111) ----------------
 def _raw_table(filename, data):
@@ -1762,7 +1810,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(413, {'ok': False, 'error': 'файл больше 200 МБ'})
             data = self.rfile.read(ln) if ln else b''
             try:
-                return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data)})
+                return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data, enrich_only=(self.headers.get('X-Import-Mode', '') == 'enrich'))})
             except Exception as e:
                 # v12.9.144: этот путь раньше возвращал сырой 'database or disk is full'
                 if isinstance(e, DiskFullError) or 'disk is full' in str(e) or 'database or disk' in str(e):
