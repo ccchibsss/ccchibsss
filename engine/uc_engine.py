@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.149-pyengine-34'
+VERSION = '12.9.150-pyengine-35'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -1649,7 +1649,7 @@ def ozon_row_meta(p, idx, vat='Не облагается', discount_pct=0, vehic
                       if c != art and c != oem)
     bnorm = _norm_article(brand).lower()
     hashtags = ('#автозапчасти #запчасти' + (' #' + bnorm if bnorm else '')).strip()
-    annotation = str(p.get('description', '')).strip() or f'{name}. Артикул детали: {art}. Производитель: {brand}.'
+    annotation = (str(p.get('description', '')).strip() or f'{name}. Артикул детали: {art}. Производитель: {brand}.')[:6000]
     model = str(p.get('group_articles') or p.get('model') or art)
     errors, notes = [], []
     if not brand: errors.append('не заполнен бренд')
@@ -1657,20 +1657,24 @@ def ozon_row_meta(p, idx, vat='Не облагается', discount_pct=0, vehic
     if pair_bad: errors.append('пара «категория/тип» не найдена в справочнике Ozon')
     if std_fields: notes.append('СТАНДАРТ (не измерено): ОВХ из справочника — ' + ', '.join(std_fields))
     if chz_hit: notes.append('ЧЗ по списку ТН ВЭД')
-    if not str(p.get('tnved', '')).strip(): errors.append('не заполнен ТН ВЭД')
+    if not name: errors.append('не заполнено название товара')
+    _tnv = str(p.get('tnved', '')).strip()
+    if not _tnv: notes.append('нет кода ТН ВЭД (Ozon требует для автозапчастей)')
+    elif len(re.sub(r'\D', '', _tnv)) != 10: errors.append('ТН ВЭД должен быть 10 цифр')
     if not grams(p.get('weight')) or not all(isinstance(d, int) for d in (width_mm, height_mm, length_mm)):
         errors.append('не заполнены ОВХ (вес/габариты)')
-    if not str(p.get('image_url', '')).strip(): errors.append('нет ссылки на главное фото')
+    if not str(p.get('image_url', '')).strip(): notes.append('нет ссылки на главное фото — товар загрузится, но не выйдет в продажу, пока фото не добавят')
     if not str(p.get('barcode', '')).strip(): notes.append('нет штрихкода — Ozon не сможет принять поставку без него')
     if not price_out: errors.append('не заполнена цена')
     row = [idx, art, name, price_out, old_out, vat, '', '', '', str(p.get('ozon_sku', '')),
             str(p.get('barcode', '')), str(p.get('tnved', '')), grams(p.get('weight')), width_mm, height_mm, length_mm,
-            str(p.get('image_url', '')), str(p.get('extra_photos', '')), '', brand, art,
+            str(p.get('image_url', '')), str(p.get('extra_photos', '')), '', brand,
+            str(p.get('original_article', '')).strip() or art,
             ozon_type, model, mark,
             max(1, int(round(num(p.get('multiplicity')) or 1))),
             (round(num(p.get('net_weight')) * 1000, 6) if num(p.get('net_weight')) > 0 else ''),
             str(p.get('hazard_class', '')), '', '', hashtags, annotation,
-            str(p.get('rich_content', '')), str(p.get('group_articles', '')), oem, cross, '1',
+            str(p.get('rich_content', ''))[:32767], str(p.get('group_articles', '')), oem, cross, '1',
             str(p.get('diameter', '')), str(p.get('material', '')), vehicle_type, str(p.get('color', '')),
             str(p.get('warranty', '')), str(p.get('country', '')),
             str(p.get('package_contents', '')).strip() or f'{name} - 1 шт., упаковка', '1',

@@ -902,3 +902,22 @@ class TestWbPromo149(unittest.TestCase):
         a = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
         b = E.calc_row({'article': 'A', 'price': 1000, 'eff_price': 800, 'cost': 500, 'sales': 10}, st)
         self.assertLess(b['profit'], a['profit'])  # промо-цена ниже — прибыль меньше
+
+class TestOzonExportParity150(unittest.TestCase):
+    def test_row_fields(self):
+        row, _std = E.ozon_row_meta({'article': 'A1', 'brand': 'BOSCH', 'original_article': 'ORIG-9',
+            'name': 'Фильтр', 'price': 1000, 'weight': 0.5, 'length': 10, 'width': 8, 'height': 5,
+            'tnved': '8421230000', 'image_url': 'https://x/y.jpg', 'description': 'д' * 7000}, 1)
+        self.assertEqual(row[20], 'ORIG-9')          # Партномер — оригинальный артикул
+        self.assertEqual(len(row[30]), 6000)          # Аннотация обрезана по лимиту Ozon
+        self.assertEqual(row[44], '')                 # ошибок нет
+    def test_tnved_and_photo_are_notes(self):
+        row, _std = E.ozon_row_meta({'article': 'A1', 'brand': 'B', 'name': 'N', 'price': 100,
+            'weight': 0.5, 'length': 10, 'width': 8, 'height': 5}, 1)
+        self.assertIn('ТН ВЭД', row[45])              # недочёт, не ошибка
+        self.assertIn('фото', row[45])
+        self.assertNotIn('ТН ВЭД', row[44])
+    def test_tnved_format_error(self):
+        row, _std = E.ozon_row_meta({'article': 'A1', 'brand': 'B', 'name': 'N', 'price': 100,
+            'weight': 0.5, 'length': 10, 'width': 8, 'height': 5, 'tnved': '123'}, 1)
+        self.assertIn('10 цифр', row[44])
