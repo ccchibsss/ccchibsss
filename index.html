@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.143-client+price-first';
+const APP_VERSION = '12.9.144-client+disk-preflight';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26819,6 +26819,15 @@ const PyEngine = {
     inp.onchange = async () => {
       const f = inp.files && inp.files[0]; if (!f) return;
       if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Импорт файла на движке недоступен — используйте обычный импорт приложения.'); return; }
+      /* v12.9.144: место проверяем до отправки файла, понятными словами */
+      try {
+        const dg = await (await fetch(this.base() + '/diag')).json();
+        const needMb = Math.max(250, Math.ceil((f.size || 0) / 1048576) * 4);
+        if (dg && dg.disk_free_mb != null && dg.disk_free_mb < needMb) {
+          Toast.warn('Не хватает места на диске', 'Свободно ' + fmt(dg.disk_free_mb) + ' МБ, для импорта нужно минимум ' + fmt(needMb) + ' МБ (база движка ' + fmt(dg.db_size_mb || 0) + ' МБ в папке engine_data). Освободите 1–2 ГБ и повторите. Каталог в приложении не пострадал.');
+          return;
+        }
+      } catch (e) { /* движок сам проверит и ответит 507 */ }
       await withProgress('Python: импорт файла', f.name, async () => {
         const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 600000);
         try {

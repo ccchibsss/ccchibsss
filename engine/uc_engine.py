@@ -34,7 +34,23 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.142-pyengine-28'
+VERSION = '12.9.144-pyengine-29'
+
+class DiskFullError(Exception):
+    """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
+
+MIN_FREE_FOR_IMPORT = 250 * 1024 * 1024
+
+def ensure_free_space(need_bytes=0):
+    """Предпроверка места ПЕРЕД записью в SQLite: лучше честный отказ до
+       импорта, чем 'database or disk is full' в середине и полупустая база.
+       Нужно: минимум 250 МБ и не меньше 4 размеров файла (строки в SQLite
+       шире исходного CSV: индексы, FTS, история цен, WAL)."""
+    import shutil as _sh
+    try: free = _sh.disk_usage(str(DATA)).free
+    except Exception: return
+    need = max(MIN_FREE_FOR_IMPORT, int(need_bytes or 0) * 4)
+    if free < need: raise DiskFullError(f'free={free} need={need}')
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -703,12 +719,18 @@ def import_file_bytes(conn, filename, data):
     """Файл разбирает движок, а не браузер: CSV/XLSX/ZIP -> строки -> каталог."""
     name = os.path.basename(str(filename or 'file'))
     files = files_from_zip(data) if name.lower().endswith('.zip') else [(name, data)]
+    ensure_free_space(sum(len(b) for _, b in files))  # v12.9.144: отказ до записи, а не в середине
     total = 0
-    for fname, blob in files:
-        rows = rows_from_xlsx_bytes(blob) if fname.lower().endswith('.xlsx') else rows_from_csv_bytes(blob)
-        total += import_rows(conn, rows, f'file:{name}', rebuild_fts=False)
-    conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
-    conn.commit()
+    try:
+        for fname, blob in files:
+            rows = rows_from_xlsx_bytes(blob) if fname.lower().endswith('.xlsx') else rows_from_csv_bytes(blob)
+            total += import_rows(conn, rows, f'file:{name}', rebuild_fts=False)
+        conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
+        conn.commit()
+    except Exception:
+        try: conn.rollback()  # не оставлять полуприменённый импорт
+        except Exception: pass
+        raise
     log_api(conn, 'importFile', name, 'ok', f'строк {total}')
     return {'file': name, 'imported': total}
 
@@ -1742,6 +1764,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data)})
             except Exception as e:
+                # v12.9.144: этот путь раньше возвращал сырой 'database or disk is full'
+                if isinstance(e, DiskFullError) or 'disk is full' in str(e) or 'database or disk' in str(e):
+                    return self._send_disk_full()
                 return self._send(500, {'ok': False, 'error': str(e)[:300]})
         if self.path == '/parse/file':
             from urllib.parse import unquote
@@ -1753,6 +1778,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 return self._send(200, {'ok': True, **parse_file_bytes(db(), fname, data)})
             except Exception as e:
+                if isinstance(e, DiskFullError) or 'disk is full' in str(e) or 'database or disk' in str(e):
+                    return self._send_disk_full()
                 return self._send(500, {'ok': False, 'error': str(e)[:300]})
         try:
             body = self._body()
@@ -1833,7 +1860,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.commit()
                 return self._send(200, {'ok': True})
         except Exception as e:
-            if 'disk is full' in str(e) or 'database or disk' in str(e):
+            if isinstance(e, DiskFullError) or 'disk is full' in str(e) or 'database or disk' in str(e):
                 return self._send_disk_full()
             return self._send(500, {'ok': False, 'error': str(e)[:300]})
         return self._send(404, {'ok': False, 'error': 'not found'})
