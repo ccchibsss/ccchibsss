@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.153-client+visible-sync';
+const APP_VERSION = '12.9.154-client+export-fallback';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -40356,9 +40356,38 @@ const Exp = {
        модалки при этом заменяется стандартным набором движка (20 колонок). */
     try {
       if (await PyEngine.health()) {
+        /* v12.9.154: таблица пуста после перезагрузки, а каталог в SQLite
+           движка жив (синхронизации/импорты) — подтягиваем его обратно,
+           вместо «ничего нет». */
+        if (!S.rows.length) {
+          try {
+            const _prods = await PyEngine._pullProducts();
+            if (_prods.length) {
+              const _m = PyEngine._mergeProducts(_prods, false);
+              if (_m.added) {
+                bumpVersion();
+                try { Table.paint(); } catch (e) { }
+                if (typeof persistSoon === 'function') persistSoon();
+                Toast.info('Каталог восстановлен из движка', fmt(_m.added) + ' SKU подтянуто из SQLite движка — браузерная копия после перезагрузки оказалась пуста.');
+              }
+            }
+          } catch (e) { console.warn('[UC] восстановление каталога из движка:', e); }
+        }
         const fmtChoice = $('#expFmt') ? $('#expFmt').value : 'xlsx';
-        const rowsE = forceRows || Exp.rows();
-        if (!rowsE.length) { Toast.warn('Нет данных', 'Выборка пуста — проверьте фильтр и объём экспорта.'); return; }
+        let rowsE = forceRows || Exp.rows();
+        if (!rowsE.length) {
+          /* v12.9.154: как браузерный _runImpl — фильтр не дал строк, а каталог
+             не пуст: выгружаем весь каталог и объясняем, а не тупик «Нет данных».
+             После перезагрузки чаще всего виноват сохранённый фильтр/объём. */
+          if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала загрузите прайс — первый файл создаёт каталог, следующие только обогащают его.'); return; }
+          const _st0 = catalogSelectionStats($('#expScope') ? $('#expScope').value : 'filter');
+          const _reason = (typeof OzonExport !== 'undefined' && OzonExport.emptyReason) ? OzonExport.emptyReason(_st0) : 'проверьте фильтр и объём экспорта';
+          if (!exportCategoryNames().size && !(typeof ChzTnved !== 'undefined' && ChzTnved.isFiltered())) {
+            rowsE = S.rows.filter(p => (S.settings.showExcluded || !p.excluded) && !p.dimensionAnomalyBlocked);
+            if (rowsE.length) Toast.warn('Фильтр не дал строк — выгружаем весь каталог', _reason + ' Строк в файле: ' + fmt(rowsE.length) + '.');
+          }
+          if (!rowsE.length) { Toast.warn('Нет данных', _reason + ' В каталоге ' + fmt(S.rows.length) + ' SKU — данные на месте, пуста только выборка.'); return; }
+        }
         const arts = rowsE.map(p => ({ article: p.article, brand: p.brand || '' }));
         if (fmtChoice === 'ozon_csv' || fmtChoice === 'ozon_xlsx') {
           await PyEngine.exportOzon(fmtChoice === 'ozon_xlsx' ? 'xlsx' : 'csv', arts);
