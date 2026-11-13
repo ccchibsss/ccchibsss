@@ -495,6 +495,25 @@ class TestExternalXlsx(unittest.TestCase):
         self.assertIn(b'xlsx.js', E._XLSX_JS)
         self.assertEqual(E._extract_xlsx('<html>без либы</html>'), '<html>без либы</html>')
 
+class TestSqlExportSelection(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+        E.import_rows(self.conn, [
+            {'article': 'A1', 'brand': 'BOSCH', 'name': 'Фильтр', 'price': 1000, 'cost': 600},
+            {'article': 'A2', 'brand': 'MANN', 'name': 'Фильтр 2', 'price': 2000, 'cost': 900}], 'test')
+    def test_catalog_keys_filter(self):
+        data = E.export_catalog_csv_bytes(self.conn, keys=[('A1', 'BOSCH')])
+        self.assertIn('A1', data.decode('utf-8-sig'))
+        self.assertNotIn('A2', data.decode('utf-8-sig'))
+        x = E.export_catalog_xlsx_bytes(self.conn, keys=[('A2', 'MANN')])
+        self.assertTrue(x.startswith(b'PK'))
+    def test_ozon_xlsx_keys(self):
+        x = E.export_ozon_xlsx_bytes(self.conn, keys={('A1', 'BOSCH')})
+        self.assertTrue(x.startswith(b'PK'))
+
 class TestProtocol(unittest.TestCase):
     def test_register_protocol_graceful(self):
         # на не-Windows и без реестра — тихий False, без исключений
