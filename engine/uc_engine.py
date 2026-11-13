@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.128-pyengine-19'
+VERSION = '12.9.129-pyengine-20'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -1561,9 +1561,36 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {'ok': False, 'error': str(e)[:300]})
         return self._send(404, {'ok': False, 'error': 'not found'})
 
+def register_protocol():
+    """v12.9.129: протокол unitcontrol:// в HKCU (Windows, без админа).
+       Ссылка из HTML, открытого файлом, запускает движок одним кликом:
+       браузер спросит разрешение один раз. Не Windows / не вышло — тихо."""
+    if sys.platform != 'win32': return False
+    try:
+        import winreg
+        if FROZEN: cmd = f'"{sys.executable}" serve'
+        else: cmd = f'"{sys.executable}" "{BASE / "uc_engine.py"}" serve'
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\Classes\unitcontrol') as k:
+            winreg.SetValueEx(k, '', 0, winreg.REG_SZ, 'URL:UNIT CONTROL')
+            winreg.SetValueEx(k, 'URL Protocol', 0, winreg.REG_SZ, '')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\Classes\unitcontrol\shell\open\command') as k:
+            winreg.SetValueEx(k, '', 0, winreg.REG_SZ, cmd)
+        return True
+    except Exception:
+        return False
+
 def serve(port=8765):
     get_token()
-    srv = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    register_protocol()
+    try:
+        srv = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    except OSError:
+        # уже запущен (например, клик по unitcontrol:// при живом движке):
+        # просто открыть браузер и выйти
+        import webbrowser
+        print('Движок уже запущен — открываю браузер.')
+        if not os.environ.get('UC_NO_BROWSER'): webbrowser.open(f'http://127.0.0.1:{port}/')
+        return
     url = f'http://127.0.0.1:{port}/'
     print(f'UC PyEngine {VERSION}: {url}  (токен: {TOKEN_PATH})')
     print('Приложение открыто в браузере. Не закрывайте это окно, пока работаете; закрыть окно = остановить движок.')
