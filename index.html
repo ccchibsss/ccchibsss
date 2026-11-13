@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.131-client+sql-export';
+const APP_VERSION = '12.9.132-client+sql-calc';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21657,7 +21657,24 @@ let _econEnsureJob = null;
 async function ensureEconomics() {
   if (!S._econPending || !S.rows.length) return false;
   if (_econEnsureJob) return _econEnsureJob;
-  _econEnsureJob = (async () => { await runPipeline(true); return true; })();
+  _econEnsureJob = (async () => {
+    /* v12.9.132: массовый отложенный пересчёт при живом движке делает SQL:
+       главные цифры каталога считает движок (быстро, инкрементально, без
+       нагрузки на вкладку). Детализация по площадкам при этом не строится —
+       она досчитается браузером точечно при открытии строки/раздела.
+       Движок недоступен или упал — прежний браузерный пайплайн. */
+    try {
+      if (typeof PyEngine !== 'undefined' && await PyEngine.health()) {
+        const r = await PyEngine.recalcAndApply(null);
+        if (r && r.applied) {
+          S._econPending = false; persistEconPending();
+          console.info('[UC] экономика каталога посчитана движком (SQL): ' + fmt(r.applied) + ' SKU');
+          return true;
+        }
+      }
+    } catch (e) { console.warn('[UC] ensureEconomics via engine:', e); }
+    await runPipeline(true); return true;
+  })();
   try { return await _econEnsureJob; } finally { _econEnsureJob = null; }
 }
 
@@ -26662,10 +26679,12 @@ const PyEngine = {
         (maxDiff > 0.011 ? '. Расхождение ожидаемо, если настройки движка отличаются от приложения (возвраты/хранение задаются отдельно).' : ' — расчёты совпадают.'));
     });
   },
-  async recalcCatalog() {
-    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Полный пересчёт на движке недоступен — приложение считает встроенным расчётом. Запустите движок ярлыком «UNIT CONTROL».'); this.refreshStatus(); return; }
-    if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала загрузите прайс.'); return; }
-    await withProgress('Python: пересчёт каталога', 'строки → SQLite → экономика на движке', async (prog) => {
+  /* v12.9.132: ядро массового пересчёта на движке: синхронизация каталога в
+     SQLite, recalc на движке и применение главных цифр (прибыль, маржа, ROI,
+     безубыток, целевая цена) к строкам приложения. Используется и кнопкой
+     «Пересчёт на движке», и отложенным полным расчётом ensureEconomics(). */
+  async recalcAndApply(prog) {
+      if (!S.rows.length) return { applied: 0, recalculated: 0 };
       const CH = 5000;
       const payloadOf = p => ({ article: p.article, brand: p.brand || '', name: p.name || '', price: num(p.price), cost: num(p.cost),
         stock: num(p.stock), sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width),
@@ -26692,11 +26711,18 @@ const PyEngine = {
         if (!r) continue;
         p.netProfit = num(r.profit); p.margin = num(r.margin); p.roi = num(r.roi);
         p.breakEvenPrice = num(r.break_even); p.tgtPrice = num(r.target);
-        p.pyEngineCalc = '12.9.104';
+        p.pyEngineCalc = '12.9.132';
         applied++;
       }
       bumpVersion();
       try { Table.paint(); } catch (e) { }
+      return { applied, ...(rec || {}) };
+  },
+  async recalcCatalog() {
+    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Полный пересчёт на движке недоступен — приложение считает встроенным расчётом. Запустите движок ярлыком «UNIT CONTROL».'); this.refreshStatus(); return; }
+    if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала загрузите прайс.'); return; }
+    await withProgress('Python: пересчёт каталога', 'строки → SQLite → экономика на движке', async (prog) => {
+      const { applied, ...rec } = await this.recalcAndApply(prog);
       Toast.ok('Каталог пересчитан на Python-движке',
         'применено к ' + fmt(applied) + ' SKU из ' + fmt(S.rows.length) +
         ' · прибыльных по движку: ' + fmt(rec.profitable || 0) +
