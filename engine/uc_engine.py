@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.151-pyengine-36'
+VERSION = '12.9.152-pyengine-37'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -905,17 +905,25 @@ def import_file_bytes(conn, filename, data, enrich_only=False):
     name = os.path.basename(str(filename or 'file'))
     files = files_from_zip(data) if name.lower().endswith('.zip') else [(name, data)]
     ensure_free_space(sum(len(b) for _, b in files))  # v12.9.144: отказ до записи, а не в середине
-    total = 0; skipped = 0
-    existing = None
+    total = 0; skipped = 0; oe_matched = 0
+    existing = None; oe_to_key = {}
     if enrich_only:
         existing = {_norm_pair(r[0], r[1]) for r in conn.execute('SELECT article,brand FROM products')}
+        for _a, _b, _oe in conn.execute('SELECT article,brand,oe_numbers FROM products'):
+            for _c in _oe_codes(_oe): oe_to_key.setdefault(_c, set()).add((_a, _b))
     try:
         for fname, blob in files:
             rows = rows_from_xlsx_bytes(blob) if fname.lower().endswith('.xlsx') else rows_from_csv_bytes(blob)
             if existing is not None:
                 kept = []
                 for r in rows:
-                    if _norm_pair(r.get('article', ''), r.get('brand', '')) in existing: kept.append(r)
+                    if _norm_pair(r.get('article', ''), r.get('brand', '')) in existing: kept.append(r); continue
+                    # как findByOe браузера: уникальный OE -> та же карточка прайса
+                    _keys = set()
+                    for _c in _oe_codes(r.get('oe_numbers', '')): _keys |= oe_to_key.get(_c, set())
+                    if len(_keys) == 1:
+                        _ka, _kb = next(iter(_keys))
+                        r = dict(r); r['article'], r['brand'] = _ka, _kb; oe_matched += 1; kept.append(r)
                     elif str(r.get('article', '')).strip(): skipped += 1
                 rows = kept
             total += import_rows(conn, rows, f'file:{name}', rebuild_fts=False)
@@ -926,7 +934,7 @@ def import_file_bytes(conn, filename, data, enrich_only=False):
         except Exception: pass
         raise
     log_api(conn, 'importFile', name, 'ok', f'строк {total}, вне прайса пропущено {skipped}')
-    return {'file': name, 'imported': total, 'skipped_outside_price': skipped, 'enrich_only': bool(enrich_only)}
+    return {'file': name, 'imported': total, 'skipped_outside_price': skipped, 'enrich_only': bool(enrich_only), 'oe_matched': oe_matched}
 
 def _norm_key_part(v):
     """Как normArticle в приложении: верхний регистр, только буквы/цифры."""
@@ -946,7 +954,7 @@ def enrich_oe(conn):
     """Обогащение по OE-графу в SQL: транзитивные группы (union-find по oe_links),
        заполняются только пустые поля; артикулы группы дописываются в аналоги."""
     conn.execute('DELETE FROM oe_links')
-    prods = conn.execute('SELECT article,brand,name,weight,length,width,height,oe_numbers,analog_list FROM products').fetchall()
+    prods = conn.execute('SELECT article,brand,name,applicability,weight,length,width,height,oe_numbers,analog_list FROM products').fetchall()
     by_key = {(r['article'], r['brand']): dict(r) for r in prods}
     oe_to_keys = {}
     for r in prods:
@@ -967,7 +975,7 @@ def enrich_oe(conn):
         for k in keys[1:]: union(keys[0], k)
     groups = {}
     for k in by_key: groups.setdefault(find(k), []).append(k)
-    filled = {'name': 0, 'dims': 0, 'analog_list': 0}
+    filled = {'name': 0, 'applicability': 0, 'dims': 0, 'analog_list': 0}
     multi_groups = 0
     for members in groups.values():
         if len(members) < 2: continue
@@ -981,6 +989,9 @@ def enrich_oe(conn):
             updates = {}
             if not str(r['name'] or '').strip() and best_name:
                 updates['name'] = best_name; filled['name'] += 1
+            _apps = [x['applicability'] for x in rows if str(x['applicability'] or '').strip()]
+            if not str(r['applicability'] or '').strip() and _apps:
+                updates['applicability'] = max(set(_apps), key=_apps.count); filled['applicability'] += 1
             if complete and not all(v > 0 for v in dims_of(r)):
                 same_art = [d for d in complete if d['article'] == r['article']]
                 donor = same_art[0] if same_art else complete[0]
