@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.137-pyengine-24'
+VERSION = '12.9.139-pyengine-25'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -301,8 +301,10 @@ def secrets():
 
 # ---------------- импорт строк (CSV/XLSX/ZIP) ----------------
 ALIASES = {
-    'article': ('артикул', 'article', 'sku', 'код'), 'brand': ('бренд', 'brand', 'производитель'),
-    'name': ('название', 'name', 'наименование'), 'price': ('цена', 'price'),
+    'article': ('артикул', 'article', 'sku', 'код', 'каталожный номер', 'каталожный'),
+    'brand': ('бренд', 'brand', 'производитель'),
+    'name': ('название', 'name', 'наименование', 'описание'), 'price': ('цена', 'price'),
+    'barcode': ('штрихкод', 'barcode', 'ean'), 'multiplicity': ('кратность', 'multiplicity'),
     'cost': ('себестоимость', 'cost', 'закупка'), 'stock': ('остаток', 'stock', 'количество'),
     'oe_numbers': ('oe', 'oem', 'ое', 'номер oe'), 'weight': ('вес', 'weight'),
     'sales': ('продажи', 'sales'), 'category': ('категор', 'category'),

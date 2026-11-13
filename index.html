@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.137-client+secrets-engine';
+const APP_VERSION = '12.9.139-client+supplier-headers';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -23780,7 +23780,7 @@ const HVC = {
   /* Варианты имён колонок из блока v100.21 (нечёткий маппинг со скорингом) */
   variants: {
     oe_number: ['oe номер', 'oe', 'оe', 'номер', 'code', 'oe_number', 'oe number', 'oem'],
-    artikul: ['артикул', 'article', 'sku', 'artikul', 'код товара', 'код', 'код артикула'],
+    artikul: ['артикул', 'article', 'sku', 'artikul', 'код товара', 'код', 'код артикула', 'каталожный номер'],
     brand: ['бренд', 'brand', 'производитель', 'manufacturer', 'марка'],
     name: ['наименование', 'название', 'name', 'описание', 'description', 'товар', 'наименование товара'],
     applicability: ['применимость', 'автомобиль', 'vehicle', 'applicability', 'применяемость'],
@@ -23808,21 +23808,29 @@ const HVC = {
   detectColumns(actual, expectedKeys) {
     const lower = {}; actual.forEach(c => lower[String(c).toLowerCase().trim()] = c);
     const used = new Set(), out = {};
-    for (const exp of expectedKeys) {
-      const vars = HVC.variants[exp] || [exp];
-      let best = null, bestScore = -1;
-      for (const v of vars) {
-        const vl = String(v).toLowerCase().trim();
-        for (const al in lower) {
-          const orig = lower[al]; if (used.has(orig)) continue;
-          let sc = 0;
-          if (vl === al) sc = 100;
-          else if (al.includes(vl)) sc = 50 + vl.length;
-          else if (vl.includes(al)) sc = 30 + al.length;
-          if (sc > bestScore) { bestScore = sc; best = orig; }
+    /* v12.9.139: два прохода — сначала ТОЧНЫЕ совпадения заголовков (100),
+       затем нечёткие. Иначе «Каталожный номер» по подстроке «номер» уходил
+       в OE-колонку, а артикул не находился вовсе (реальный файл поставщика
+       export_Moskow: Бренд/Каталожный номер/Описание — импорт давал 0 SKU). */
+    for (const pass of [0, 1]) {
+      for (const exp of expectedKeys) {
+        if (Object.values(out).includes(HVC.expectedMap[exp])) continue;
+        const vars = HVC.variants[exp] || [exp];
+        let best = null, bestScore = -1;
+        for (const v of vars) {
+          const vl = String(v).toLowerCase().trim();
+          for (const al in lower) {
+            const orig = lower[al]; if (used.has(orig)) continue;
+            let sc = 0;
+            if (vl === al) sc = 100;
+            else if (al.includes(vl)) sc = 50 + vl.length;
+            else if (vl.includes(al)) sc = 30 + al.length;
+            if (pass === 0 && sc !== 100) continue;
+            if (sc > bestScore) { bestScore = sc; best = orig; }
+          }
         }
+        if (best && bestScore > 0) { out[best] = HVC.expectedMap[exp]; used.add(best); }
       }
-      if (best && bestScore > 0) { out[best] = HVC.expectedMap[exp]; used.add(best); }
     }
     return out;
   },

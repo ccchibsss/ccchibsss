@@ -585,6 +585,20 @@ class TestSecretsB6(unittest.TestCase):
         E.save_secret('UC_SET_wbApiToken', '')
         self.assertNotIn('UC_SET_wbApiToken', E.secrets())
 
+class TestSupplierHeaders139(unittest.TestCase):
+    def test_moskow_supplier_csv(self):
+        # реальный формат поставщика: Бренд;Каталожный номер;Описание;Остаток;...;Цена;Штрихкод;ТН ВЭД (cp1251)
+        text = ('Бренд;Каталожный номер;Описание;Остаток;Кратность отгрузки;Валюта;Цена;Штрихкод;ТН ВЭД\r\n'
+                'METELLI;01-2497;Втулка клапана VOLVO;1;1;RUB;149.86;000403;8708999797\r\n'
+                'KYB;441040;Амортизатор AUDI;2;1;RUB;4434.5;000441;\r\n')
+        rows = E.rows_from_csv_bytes(text.encode('cp1251'))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['article'], '01-2497')
+        self.assertEqual(rows[0]['brand'], 'METELLI')
+        self.assertEqual(str(rows[0]['name']), 'Втулка клапана VOLVO')
+        self.assertEqual(str(rows[0]['barcode']), '000403')
+        self.assertEqual(float(str(rows[0]['price']).replace(',', '.')), 149.86)
+
 class TestProtocol(unittest.TestCase):
     def test_register_protocol_graceful(self):
         # на не-Windows и без реестра — тихий False, без исключений
