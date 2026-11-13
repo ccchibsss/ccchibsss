@@ -741,3 +741,46 @@ class TestDiskPreflight144(unittest.TestCase):
             self.assertRaises(E.DiskFullError, E.import_file_bytes, conn, 'p.csv',
                 'Артикул;Бренд;Цена\nF1;B;10\n'.encode('utf-8'))
         self.assertEqual(conn.execute('SELECT COUNT(*) c FROM products').fetchone()['c'], 0)
+
+class TestSqlParity145(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_enrich_only_first_file(self):
+        E.import_file_bytes(self.conn, 'price.csv', 'Артикул;Бренд;Цена\nF100;BOSCH;700\n'.encode('utf-8'))
+        res = E.import_file_bytes(self.conn, 'cross.csv',
+            'Артикул;Бренд;Название\nF100;BOSCH;Фильтр\nF999;BOSCH;Чужой\n'.encode('utf-8'), enrich_only=True)
+        self.assertEqual(res['skipped_outside_price'], 1)
+        rows = self.conn.execute('SELECT article,name FROM products ORDER BY article').fetchall()
+        self.assertEqual(len(rows), 1)  # новый SKU из второго файла не создан
+        self.assertEqual(rows[0]['name'], 'Фильтр')  # а существующий обогатился
+    def test_norm_keys_and_quarantine(self):
+        E.import_rows(self.conn, [{'article': 'F 100', 'brand': 'BOSCH', 'oe_numbers': 'OE1'}], 't')
+        E.import_donors(self.conn, [{'article': 'F-100', 'brand': 'bosch', 'name': 'Фильтр', 'category': 'Фильтры'}], 'd')
+        res = E.enrich_full(self.conn)
+        self.assertEqual(res['filled']['name'], 1)  # нормализованная пара совпала
+        self.assertEqual(res['filled']['category'], 1)
+    def test_quarantine_conflicting_norm(self):
+        E.import_rows(self.conn, [{'article': 'A-1', 'brand': 'X', 'oe_numbers': 'OE9'},
+                                  {'article': 'A 1', 'brand': 'X', 'name': 'Другой'}], 't')
+        E.import_donors(self.conn, [{'article': 'A1', 'brand': 'X', 'name': 'Не должен попасть'}], 'd')
+        res = E.enrich_full(self.conn)
+        self.assertGreaterEqual(res['quarantined'], 2)
+        got = self.conn.execute("SELECT name FROM products WHERE article='A-1'").fetchone()['name']
+        self.assertEqual(got, '')  # спорная идентичность не обогатилась
+    def test_calc_row_overrides_and_multiplicity(self):
+        st = {'commission_pct': 14, 'transfer_pct': 1.5, 'last_mile': 25, 'handover': 10,
+              'pack': 18, 'transit': 30, 'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20}
+        base = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        own = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10, 'ozon_commission': 30}, st)
+        self.assertGreater(own['total'], base['total'])  # своя ставка SKU важнее настроек
+        mult = E.calc_row({'article': 'A', 'price': 1000, 'cost': 100, 'sales': 10, 'multiplicity': 3}, st)
+        plain = E.calc_row({'article': 'A', 'price': 1000, 'cost': 100, 'sales': 10}, st)
+        self.assertGreater(mult['total'], plain['total'])  # кратность подняла себестоимость
+    def test_group_articles_filled(self):
+        E.import_rows(self.conn, [{'article': 'G1', 'brand': 'B', 'oe_numbers': 'OEG'},
+                                  {'article': 'G2', 'brand': 'B', 'oe_numbers': 'OEG'}], 't')
+        res = E.enrich_full(self.conn)
+        self.assertEqual(res['filled']['group_articles'], 2)
