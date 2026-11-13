@@ -11,6 +11,10 @@ curl -s --max-time 2 http://127.0.0.1:8765/health >nul 2>nul
 if %errorlevel%==0 goto open
 echo Движок не запущен - запускаю...
 
+if exist "UNIT CONTROL.exe" (
+  start "" /min "UNIT CONTROL.exe" serve
+  goto wait
+)
 if exist "UC-движок.exe" (
   start "" /min "UC-движок.exe" serve
   goto wait
