@@ -952,5 +952,5 @@ class TestEnrichParity151(unittest.TestCase):
               'wb': {'fulfillment': 'FBS', 'commission_pct': 0, 'acquiring_pct': 0, 'sc_per_kg': 10, 'vol_divisor': 5000},
               '_volume': 2.5, '_weight': 0, '_dims': (0, 0, 0)}
         u = E.wb_unit(1000, 0, st)
-        # платный вес из объёма: 2.5л*1000/5000=0.5кг -> СЦ 5р; total=5, tax 60
-        self.assertAlmostEqual(u['total'], 65, delta=0.011)
+        # платный вес из объёма: 2.5л*1000/5000=0.5кг -> СЦ 5р; логистика 67*1.7=113.9; tax 60
+        self.assertAlmostEqual(u['total'], 178.9, delta=0.011)
