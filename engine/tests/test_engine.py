@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import csv, io, os, sys, unittest
+import csv, io, os, sys, unittest, collections
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import uc_engine as E
 
@@ -722,3 +722,22 @@ class TestImportEnrich(unittest.TestCase):
         self.assertIn('F100', row[1])                 # аналоги дописаны
         dims = self.conn.execute("SELECT length FROM products WHERE article='F200'").fetchone()
         self.assertEqual(dims[0], 10)                 # габариты заполнены от донора группы
+
+
+class TestDiskPreflight144(unittest.TestCase):
+    def test_ensure_free_space_raises(self):
+        import unittest.mock as mock
+        U = collections.namedtuple('U', 'total used free')
+        with mock.patch('shutil.disk_usage', return_value=U(10**9, 10**9, 1024)):
+            self.assertRaises(E.DiskFullError, E.ensure_free_space, 1000)
+    def test_import_file_rejects_before_write(self):
+        import tempfile, pathlib
+        tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(tmp); E.DB_PATH = pathlib.Path(tmp) / 't.db'
+        conn = E.db()
+        import unittest.mock as mock
+        U = collections.namedtuple('U', 'total used free')
+        with mock.patch('shutil.disk_usage', return_value=U(10**9, 10**9, 1024)):
+            self.assertRaises(E.DiskFullError, E.import_file_bytes, conn, 'p.csv',
+                'Артикул;Бренд;Цена\nF1;B;10\n'.encode('utf-8'))
+        self.assertEqual(conn.execute('SELECT COUNT(*) c FROM products').fetchone()['c'], 0)
