@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.134-pyengine-22'
+VERSION = '12.9.136-pyengine-23'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -203,9 +203,12 @@ CREATE TABLE IF NOT EXISTS mail_log(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEX
   sender TEXT, filename TEXT, rows INTEGER, status TEXT);
 CREATE VIRTUAL TABLE IF NOT EXISTS products_fts USING fts5(article, brand, name, oe_numbers, content='products', content_rowid='rowid');
 '''
+_SCHEMA_DONE = set()
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    try: conn.execute('PRAGMA busy_timeout=5000')
+    except Exception: pass
     # v12.9.118: WAL кратно ускоряет массовые записи (импорт/обогащение) и не
     # блокирует чтение на время записи; synchronous=NORMAL безопасен при WAL.
     try:
@@ -213,6 +216,8 @@ def db():
         conn.execute('PRAGMA synchronous=NORMAL')
         conn.execute('PRAGMA temp_store=MEMORY')
     except Exception: pass
+    if str(DB_PATH) in _SCHEMA_DONE:  # B4: схема и миграции — один раз на процесс
+        return conn
     conn.executescript(SCHEMA)
     # миграция баз до v12.9.110: обогащаемые текстовые поля каталога
     ecols = {r[1] for r in conn.execute('PRAGMA table_info(eco_results)')}
@@ -233,7 +238,13 @@ def db():
     for col in ('multiplicity', 'net_weight', 'old_price'):
         if col not in cols:
             conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
+    # B5: retention — история цен год, лог API 90 дней
+    try:
+        conn.execute("DELETE FROM price_history WHERE ts < datetime('now','-365 days')")
+        conn.execute("DELETE FROM api_log WHERE ts < datetime('now','-90 days')")
+    except Exception: pass
     conn.commit()
+    _SCHEMA_DONE.add(str(DB_PATH))
     return conn
 
 def log_api(conn, action, endpoint, status, detail=''):
@@ -300,8 +311,21 @@ def map_header(header):
     out = {}
     low = [str(h or '').strip().lower() for h in header]
     for field, names in ALIASES.items():
+        # B7: точное совпадение > начало заголовка > подстрока; «штрихкод» — не артикул
+        def score(i, h):
+            if field == 'article' and 'штрих' in h: return -1
+            for n in names:
+                if h == n: return 0
+            for n in names:
+                if h.startswith(n): return 1
+            if any(n in h for n in names): return 2
+            return -1
+        best = None
         for i, h in enumerate(low):
-            if any(n in h for n in names): out[field] = i; break
+            sc = score(i, h)
+            if sc >= 0 and (best is None or sc < best[0]): best = (sc, i)
+            if best and best[0] == 0: break
+        if best is not None: out[field] = best[1]
     return out
 
 def rows_from_csv_bytes(data):
@@ -311,6 +335,9 @@ def rows_from_csv_bytes(data):
         try: text = data.decode('cp1251')
         except Exception: pass
     delim = ';' if text.split('\n', 1)[0].count(';') >= text.split('\n', 1)[0].count(',') else ','
+    try:  # B9: Sniffer учитывает кавычки; fallback — эвристика по первой строке
+        delim = csv.Sniffer().sniff(text[:2048], delimiters=';,\t').delimiter
+    except Exception: pass
     rows = list(csv.reader(io.StringIO(text), delimiter=delim))
     if not rows: return []
     mp = map_header(rows[0])
@@ -342,11 +369,16 @@ def rows_from_xlsx_bytes(data):
     return out
 
 def files_from_zip(data):
-    out = []
+    # B3 (аудит №2): лимиты против zip-бомб — по числу файлов и распакованному объёму
+    out = []; total = 0
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for name in z.namelist():
-            if name.lower().endswith(('.csv', '.xlsx')):
-                out.append((os.path.basename(name), z.read(name)))
+        infos = [i for i in z.infolist() if i.filename.lower().endswith(('.csv', '.xlsx'))]
+        if len(infos) > 200: raise ValueError('в архиве больше 200 файлов данных')
+        for info in infos:
+            if info.file_size > 200 * 1024 * 1024: raise ValueError('файл в архиве больше 200 МБ: ' + info.filename)
+            total += info.file_size
+            if total > 500 * 1024 * 1024: raise ValueError('суммарный объём архива больше 500 МБ')
+            out.append((os.path.basename(info.filename), z.read(info.filename)))
     return out
 
 def import_rows(conn, rows, source, rebuild_fts=True):
@@ -355,7 +387,13 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         art = str(r.get('article', '')).strip()
         if not art: continue
         brand = str(r.get('brand', '')).strip()
-        old = conn.execute('SELECT price,cost FROM products WHERE article=? AND brand=?', (art, brand)).fetchone()
+        old = conn.execute('SELECT price,cost,stock,sales,weight,length,width,height FROM products WHERE article=? AND brand=?', (art, brand)).fetchone()
+        # B1 (аудит №2): поля, которых нет в строке источника, не трогаем —
+        # ценовой файл без остатков не должен обнулять остатки/габариты.
+        # Явно переданный 0 (ключ есть) — честное обновление.
+        def eff(k):
+            if k in r: return num(r.get(k))
+            return float(old[k]) if old is not None else 0.0
         conn.execute('''INSERT INTO products(article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability,barcode,image_url,extra_photos,ozon_sku,ozon_type,ozon_category,model,hazard_class,color,material,country,warranty,diameter,package_contents,rich_content,description,mark_required,group_articles,cross_numbers,multiplicity,net_weight,old_price,source,updated_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime("now"))
             ON CONFLICT(article,brand) DO UPDATE SET
@@ -394,8 +432,8 @@ def import_rows(conn, rows, source, rebuild_fts=True):
               old_price=CASE WHEN excluded.old_price>0 THEN excluded.old_price ELSE products.old_price END,
               source=excluded.source, updated_at=datetime("now")''',
             (art, str(r.get('brand', '')).strip(), str(r.get('name', '')),
-             num(r.get('price')), num(r.get('cost')), num(r.get('stock')), num(r.get('sales')), num(r.get('weight')),
-             num(r.get('length')), num(r.get('width')), num(r.get('height')), num(r.get('volume')),
+             num(r.get('price')), num(r.get('cost')), eff('stock'), eff('sales'), eff('weight'),
+             eff('length'), eff('width'), eff('height'), num(r.get('volume')),
              str(r.get('oe_numbers', '')), str(r.get('analog_list', '')), str(r.get('category', '')), str(r.get('tnved', '')),
              str(r.get('applicability', '')),
              str(r.get('barcode', '')), str(r.get('image_url', '')), str(r.get('extra_photos', '')),
@@ -407,11 +445,11 @@ def import_rows(conn, rows, source, rebuild_fts=True):
              str(r.get('cross_numbers', '')), num(r.get('multiplicity')), num(r.get('net_weight')),
              num(r.get('old_price')), source))
         # история цен (п.6): только реальные изменения цены/себестоимости
-        eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old[0] if old else 0)
-        eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old[1] if old else 0)
-        if eff_price > 0 and (not old or abs(old[0] - eff_price) > 1e-9 or abs(old[1] - eff_cost) > 1e-9):
+        eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
+        eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
+        if eff_price > 0 and (not old or abs(old['price'] - eff_price) > 1e-9 or abs(old['cost'] - eff_cost) > 1e-9):
             conn.execute('INSERT INTO price_history(article,brand,price,cost,stock,source,ts) VALUES(?,?,?,?,?,?,datetime("now"))',
-                         (art, brand, eff_price, eff_cost, num(r.get('stock')), source))
+                         (art, brand, eff_price, eff_cost, eff('stock'), source))
         n += 1
     if rebuild_fts:
         conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
@@ -977,7 +1015,10 @@ def watch_folder_once(folder=None):
         for name, data in files:
             rows = rows_from_xlsx_bytes(data) if name.lower().endswith('.xlsx') else rows_from_csv_bytes(data)
             total += import_rows(conn, rows, f'folder:{f.name}')
-        shutil.move(str(f), str(processed / f.name))
+        dest = processed / f.name
+        if dest.exists():  # B8: повторное имя не должно ронять перенос
+            dest = processed / (f.stem + '-' + time.strftime('%Y%m%d-%H%M%S') + f.suffix)
+        shutil.move(str(f), str(dest))
     if total: log_api(conn, 'watchFolder', str(folder), 'ok', f'строк {total}')
     return {'imported_rows': total}
 

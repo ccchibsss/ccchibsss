@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.134-client+audit-fixes';
+const APP_VERSION = '12.9.136-client+audit2-fixes';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21669,6 +21669,12 @@ async function ensureEconomics() {
         if (r && r.applied) {
           S._econPending = false; persistEconPending();
           console.info('[UC] экономика каталога посчитана движком (SQL): ' + fmt(r.applied) + ' SKU');
+          /* B2 (аудит №2): честно предупреждаем, что цифры движка посчитаны по
+             плоским ставкам из снимка настроек, а не по тарифам категорий
+             браузера — они могут отличаться от построчного расчёта. */
+          Toast.info('Экономика посчитана движком (SQL)',
+            fmt(r.applied) + ' SKU: прибыль, маржа, ROI, безубыток и целевая цена — по плоским ставкам движка. ' +
+            'Построчная детализация по площадкам досчитается браузером при открытии разделов; для сверки есть «Проверить расчёт» в Каталоге V.');
           return true;
         }
       }
@@ -26707,7 +26713,7 @@ const PyEngine = {
         if (!r) continue;
         p.netProfit = num(r.profit); p.margin = num(r.margin); p.roi = num(r.roi);
         p.breakEvenPrice = num(r.break_even); p.tgtPrice = num(r.target);
-        p.pyEngineCalc = '12.9.132';
+        p.pyEngineCalc = '12.9.136';
         applied++;
       }
       bumpVersion();

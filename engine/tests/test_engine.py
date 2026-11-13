@@ -546,6 +546,32 @@ class TestAuditFixes133(unittest.TestCase):
         E.save_secret('UC_MAIL_PASSWORD', 'pw123')
         self.assertEqual(E.secrets().get('UC_MAIL_PASSWORD'), 'pw123')
 
+class TestAudit2Fixes135(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(self.tmp); E.DB_PATH = pathlib.Path(self.tmp) / 't.db'
+        self.conn = E.db()
+    def test_missing_fields_not_clobbered(self):  # B1
+        E.import_rows(self.conn, [{'article': 'A1', 'brand': 'B', 'price': 1000, 'cost': 600,
+                                   'stock': 50, 'sales': 10, 'weight': 1.5, 'length': 10, 'width': 10, 'height': 10}], 'full')
+        E.import_rows(self.conn, [{'article': 'A1', 'brand': 'B', 'price': 1100}], 'price-only')
+        r = self.conn.execute("SELECT price,stock,sales,weight,length FROM products WHERE article='A1'").fetchone()
+        self.assertEqual(tuple(r), (1100.0, 50.0, 10.0, 1.5, 10.0))
+        E.import_rows(self.conn, [{'article': 'A1', 'brand': 'B', 'stock': 0}], 'zero')  # явный 0 — честный
+        self.assertEqual(self.conn.execute("SELECT stock FROM products WHERE article='A1'").fetchone()[0], 0.0)
+    def test_zip_limits(self):  # B3
+        import io as _io, zipfile
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+            for i in range(201): z.writestr('f%d.csv' % i, 'a;b\n1;2\n')
+        with self.assertRaises(ValueError): E.files_from_zip(buf.getvalue())
+    def test_barcode_not_article(self):  # B7
+        rows = E.rows_from_csv_bytes('Штрихкод;Артикул;Цена\n460001;ART1;100\n'.encode('utf-8'))
+        self.assertEqual(rows[0]['article'], 'ART1')
+    def test_db_reinit_same_path(self):  # B4: повторные db() не падают и схема готова
+        c2 = E.db(); self.assertIsNotNone(c2.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='products'").fetchone())
+
 class TestProtocol(unittest.TestCase):
     def test_register_protocol_graceful(self):
         # на не-Windows и без реестра — тихий False, без исключений
