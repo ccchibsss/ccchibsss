@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.129-pyengine-20'
+VERSION = '12.9.131-pyengine-21'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -994,11 +994,16 @@ _EXPORT_SQL = ('SELECT p.article,p.brand,p.name,p.price,p.cost,p.stock,p.sales,p
     'p.volume,p.oe_numbers,p.analog_list,e.total,e.profit,e.margin,e.roi,e.break_even,e.target '
     'FROM products p LEFT JOIN eco_results e ON e.article=p.article AND e.brand=p.brand ORDER BY p.article,p.brand')
 
-def export_catalog_csv_bytes(conn, enc='utf-8'):
+def _filter_keys(rows, keys):
+    if keys is None: return rows
+    ks = {(str(a), str(b)) for a, b in keys}
+    return [r for r in rows if (str(r['article'] or ''), str(r['brand'] or '')) in ks]
+
+def export_catalog_csv_bytes(conn, enc='utf-8', keys=None):
     import csv as _csv
     buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
     w.writerow([h for _, h in EXPORT_COLS])
-    for r in conn.execute(_EXPORT_SQL):
+    for r in _filter_keys(conn.execute(_EXPORT_SQL).fetchall(), keys):
         w.writerow(['' if r[k] is None else r[k] for k, _ in EXPORT_COLS])
     text = buf.getvalue()
     if enc == 'cp1251': return text.encode('cp1251', errors='replace')
@@ -1080,8 +1085,8 @@ def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None,
         for name, content in parts.items(): z.writestr(name, content)
     return out.getvalue()
 
-def export_catalog_xlsx_bytes(conn):
-    rows = conn.execute(_EXPORT_SQL).fetchall()
+def export_catalog_xlsx_bytes(conn, keys=None):
+    rows = _filter_keys(conn.execute(_EXPORT_SQL).fetchall(), keys)
     return _xlsx_from_rows([h for _, h in EXPORT_COLS],
                            [[r[k] for k, _ in EXPORT_COLS] for r in rows], 'Каталог')
 
@@ -1540,6 +1545,23 @@ class Handler(BaseHTTPRequestHandler):
                     discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys,
                     chz_codes=body.get('chz_codes')),
                     'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
+            if self.path == '/export/ozon.xlsx':
+                keys = None
+                if body.get('articles') is not None:
+                    keys = {(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']}
+                return self._send_bytes(200, export_ozon_xlsx_bytes(conn,
+                    discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys,
+                    chz_codes=body.get('chz_codes')),
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
+            if self.path.startswith('/export/catalog'):
+                keys = None
+                if body.get('articles') is not None:
+                    keys = [(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']]
+                if '.xlsx' in self.path:
+                    return self._send_bytes(200, export_catalog_xlsx_bytes(conn, keys=keys),
+                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_catalog_engine.xlsx')
+                return self._send_bytes(200, export_catalog_csv_bytes(conn, body.get('enc') or 'utf-8', keys=keys),
+                    'text/csv; charset=utf-8', 'UC_catalog_engine.csv')
             if self.path == '/outbox':
                 n = enqueue(conn, body.get('kind', ''), body.get('marketplace', ''), body.get('items') or [])
                 return self._send(200, {'ok': True, 'queued': n})

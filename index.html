@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.130-client+storage-guard';
+const APP_VERSION = '12.9.131-client+sql-export';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26858,9 +26858,38 @@ const PyEngine = {
       ' · изменилась цена: ' + fmt((d.price_changed || []).length) + (ch ? '. Например: ' + ch : '') +
       '. Снимки: ' + esc(from.created || '') + ' → ' + esc(to.created || '') + '.');
   },
-  async exportOzon() {
+  async _download(path, body, filename, timeoutMs) {
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), timeoutMs || 600000);
+    try {
+      const r = await fetch(this.base() + path, { method: body ? 'POST' : 'GET', signal: ctl.signal,
+        headers: body ? { 'X-UC-Token': this.token(), 'Content-Type': 'application/json' } : { 'X-UC-Token': this.token() },
+        body: body ? JSON.stringify(body) : undefined });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    } finally { clearTimeout(to); }
+  },
+  async exportCatalogFormat(fmt, articles) {
+    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Экспорт на движке недоступен — используйте обычный экспорт приложения.'); return false; }
+    const isXlsx = fmt !== 'csv';
+    await withProgress('Python: экспорт каталога', 'файл собирает движок из SQLite', async () => {
+      await this._syncCatalog('app-export-fmt');
+      try { await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: this._settingsSnapshot() }) }); } catch (e) { }
+      await this._download('/export/catalog' + (isXlsx ? '.xlsx' : '.csv'),
+        { articles: articles || null }, isXlsx ? 'UC_catalog_engine.xlsx' : 'UC_catalog_engine.csv');
+      Toast.ok('Каталог экспортирован на Python-движке (SQL)',
+        'Файл собран движком из SQLite без сохранения в IndexedDB и без построения XLSX во вкладке. Колонки — стандартный набор движка (20), объём: ' +
+        fmt(articles ? articles.length : S.rows.length) + ' SKU.');
+    });
+    return true;
+  },
+  async exportOzon(format, articlesOverride) {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Выгрузка OZON на движке недоступна — используйте обычный экспорт OZON приложения.'); return; }
-    await withProgress('Python: экспорт OZON', 'CSV шаблона собирает движок', async () => {
+    const isXlsx = format === 'xlsx';
+    await withProgress('Python: экспорт OZON', (isXlsx ? 'XLSX' : 'CSV') + ' шаблона собирает движок', async () => {
       await this._syncCatalog('app-ozon-export');
       try { // пары «категория → тип» из загруженного дерева Ozon — для подстановки и проверки на движке
         if (typeof OzonReference !== 'undefined' && OzonReference.hasData()) {
@@ -26869,23 +26898,25 @@ const PyEngine = {
         }
       } catch (e) { /* справочник не ушёл — выгрузка идёт без проверки пар */ }
       const discount = (typeof ozonDiscountPct === 'function') ? ozonDiscountPct() : 0;
-      const selArticles = (S.sel && S.sel.size && typeof selKey === 'function')
+      const selArticles = articlesOverride !== undefined ? articlesOverride
+        : (S.sel && S.sel.size && typeof selKey === 'function')
         ? S.rows.filter(p => S.sel.has(selKey(p))).map(p => ({ article: p.article, brand: p.brand || '' })) : null;
       const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 600000);
       try {
+        const ext = isXlsx ? 'xlsx' : 'csv';
         const r = selArticles
-          ? await fetch(this.base() + '/export/ozon.csv', { method: 'POST', signal: ctl.signal,
+          ? await fetch(this.base() + '/export/ozon.' + ext, { method: 'POST', signal: ctl.signal,
               headers: { 'X-UC-Token': this.token(), 'Content-Type': 'application/json' },
               body: JSON.stringify({ articles: selArticles, discount_pct: discount }) })
-          : await fetch(this.base() + '/export/ozon.csv?discount_pct=' + encodeURIComponent(discount), { signal: ctl.signal, headers: { 'X-UC-Token': this.token() } });
+          : await fetch(this.base() + '/export/ozon.' + ext + '?discount_pct=' + encodeURIComponent(discount), { signal: ctl.signal, headers: { 'X-UC-Token': this.token() } });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const blob = await r.blob();
         const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob); a.download = 'UC_ozon_engine.csv';
+        a.href = URL.createObjectURL(blob); a.download = 'UC_ozon_engine.' + ext;
         document.body.appendChild(a); a.click(); a.remove();
         setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-        Toast.ok('Выгрузка OZON собрана на Python-движке',
-          'Файл UC_ozon_engine.csv: шаблон 46 колонок, строк ' + fmt(selArticles ? selArticles.length : S.rows.length) +
+        Toast.ok('Выгрузка OZON собрана на Python-движке (SQL)',
+          'Файл UC_ozon_engine.' + ext + ': шаблон 46 колонок, строк ' + fmt(selArticles ? selArticles.length : S.rows.length) +
           '. Проверьте колонки «Ошибка/Недочёты» в файле перед загрузкой в кабинет; полная проверка приложения (пары категорий, источники ТН ВЭД) пока остаётся в браузерной выгрузке.');
       } finally { clearTimeout(to); }
     });
@@ -33848,7 +33879,20 @@ const OzonExport = {
       </tbody></table>`;
   },
 
-  async run() { return exportGuard('Экспорт в OZON', () => this._runImpl()); },
+  async run() {
+    /* v12.9.131: при живом движке выгрузку собирает SQL — без предэкспортного
+       сохранения в IndexedDB (именно оно висло минутами на полном диске). */
+    try {
+      const opts0 = this.getOptions();
+      if ((!opts0.split || opts0.split === 'one') && await PyEngine.health()) {
+        const pick0 = this.resolveRows(opts0.scope);
+        if (!pick0.rows.length) { Toast.warn('Нет строк для выгрузки', this.emptyReason(pick0.stats)); return; }
+        await PyEngine.exportOzon(opts0.fmt === 'xlsx' ? 'xlsx' : 'csv', pick0.rows.map(p => ({ article: p.article, brand: p.brand || '' })));
+        return;
+      }
+    } catch (e) { console.warn('[UC] OzonExport via engine:', e); }
+    return exportGuard('Экспорт в OZON', () => this._runImpl());
+  },
   async _runImpl() {
     const opts = this.getOptions();
     if (opts.split && opts.split !== 'one') return this.runSplit(opts.split);
@@ -33906,6 +33950,11 @@ const OzonExport = {
     
     // Прямые кнопки скачивания в разделе #v-export
     bindBtn('#btnExportOzonCsvDirect', async () => {
+      if (await PyEngine.health()) { // v12.9.131: экспорт через SQL, без IndexedDB-сохранения
+        const pick0 = OzonExport.resolveRows(OzonExport.getViewOptions('csv_utf8').scope);
+        if (!pick0.rows.length) return Toast.warn('Нет строк для выгрузки', OzonExport.emptyReason(pick0.stats));
+        return PyEngine.exportOzon('csv', pick0.rows.map(p => ({ article: p.article, brand: p.brand || '' })));
+      }
       const opts = OzonExport.getViewOptions('csv_utf8');
       const pick = OzonExport.resolveRows(opts.scope);
       const rows = pick.rows;
@@ -33924,6 +33973,11 @@ const OzonExport = {
     });
 
     bindBtn('#btnExportOzonXlsxDirect', async () => {
+      if (await PyEngine.health()) { // v12.9.131: экспорт через SQL, без IndexedDB-сохранения
+        const pick0 = OzonExport.resolveRows(OzonExport.getViewOptions('xlsx').scope);
+        if (!pick0.rows.length) return Toast.warn('Нет строк для выгрузки', OzonExport.emptyReason(pick0.stats));
+        return PyEngine.exportOzon('xlsx', pick0.rows.map(p => ({ article: p.article, brand: p.brand || '' })));
+      }
       const opts = OzonExport.getViewOptions('xlsx');
       const pick = OzonExport.resolveRows(opts.scope);
       const rows = pick.rows;
@@ -40123,7 +40177,27 @@ const Exp = {
   },
 
   /* ГЛАВНЫЙ ЭКСПОРТ: одна книга XLSX (или один CSV) независимо от объёма. */
-  async run(forceRows) { return exportGuard('Экспорт', () => this._runImpl(forceRows)); },
+  async run(forceRows) {
+    /* v12.9.131: при живом движке файл собирает SQL из SQLite — вкладка не
+       сохраняет каталог в IndexedDB и не строит XLSX в памяти. Выбор колонок
+       модалки при этом заменяется стандартным набором движка (20 колонок). */
+    try {
+      if (await PyEngine.health()) {
+        const fmtChoice = $('#expFmt') ? $('#expFmt').value : 'xlsx';
+        const rowsE = forceRows || Exp.rows();
+        if (!rowsE.length) { Toast.warn('Нет данных', 'Выборка пуста — проверьте фильтр и объём экспорта.'); return; }
+        const arts = rowsE.map(p => ({ article: p.article, brand: p.brand || '' }));
+        if (fmtChoice === 'ozon_csv' || fmtChoice === 'ozon_xlsx') {
+          await PyEngine.exportOzon(fmtChoice === 'ozon_xlsx' ? 'xlsx' : 'csv', arts);
+        } else {
+          await PyEngine.exportCatalogFormat(fmtChoice === 'csv' ? 'csv' : 'xlsx', arts);
+        }
+        try { modal('#mExport', false); } catch (e) { }
+        return;
+      }
+    } catch (e) { console.warn('[UC] Exp via engine:', e); }
+    return exportGuard('Экспорт', () => this._runImpl(forceRows));
+  },
   /* v12.9.87: лёгкий режим — после успешной выгрузки расчётные данные
      сбрасываются (releaseEconomics), каталог снова занимает минимум памяти. */
   async _releaseAfterExport() {
