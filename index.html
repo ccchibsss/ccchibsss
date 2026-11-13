@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.139-client+supplier-headers';
+const APP_VERSION = '12.9.140-client+enrich-fields-sql';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26853,7 +26853,14 @@ const PyEngine = {
       mark_required: p.markRequired === true ? 'Да' : (p.markRequired === false ? 'Нет' : ''),
       group_articles: p.group_articles || '', cross_numbers: p.cross_numbers || '',
       multiplicity: num(p.multiplicity || p.pack || p.qty_in_pack || 0), net_weight: num(p.net_weight || 0),
-      old_price: num(p.old_price ?? p.oldPrice ?? p.priceOld ?? p.listPrice ?? 0) });
+      old_price: num(p.old_price ?? p.oldPrice ?? p.priceOld ?? p.listPrice ?? 0),
+      /* v12.9.140: поля обогащения — в SQLite движка, как в браузерном импорте */
+      original_article: p.originalArticle || '', category_type: p.category_type || '', category_src: p.category_src || '',
+      ozon_description_category_id: p.ozon_description_category_id || '', ozon_type_id: p.ozon_type_id || '',
+      mark_status: p.markStatus || '', mark_code: p.markCode || '', dimensions_str: p.dimensions_str || '',
+      currency: p.currency || '', ozon_commission: num(p.ozon_commission || 0), ozon_logistics: num(p.ozon_logistics || 0),
+      ozon_realfbs_delivery: num(p.ozon_realfbs_delivery || 0), ozon_failed_cost: num(p.ozon_failed_cost || 0),
+      min_stock: num(p.minStock || 0), no_buy_pct: num(p.noBuyPct || 0), fixed_cost: num(p.fixed || 0) });
     for (let i = 0; i < S.rows.length; i += CH) {
       await this._fetch('/import/rows', { method: 'POST', timeout: 120000,
         body: JSON.stringify({ rows: S.rows.slice(i, i + CH).map(payloadOf), source: source || 'app', final: i + CH >= S.rows.length }) });
