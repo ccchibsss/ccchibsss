@@ -870,3 +870,17 @@ class TestUnits147(unittest.TestCase):
         self.assertAlmostEqual(E.num(rows[0]['weight']), 0.85)
         self.assertAlmostEqual(E.num(rows[1]['length']), 230)
         self.assertAlmostEqual(E.num(rows[1]['height']), 80)
+
+class TestRecheck148(unittest.TestCase):
+    def test_num_thousands_dots(self):
+        self.assertEqual(E.num('12.345.678'), 12345678)
+        self.assertEqual(E.num('1 200,50'), 1200.5)
+    def test_donor_dims_not_zeroed(self):
+        import tempfile, pathlib
+        tmp = tempfile.mkdtemp()
+        E.DATA = pathlib.Path(tmp); E.DB_PATH = pathlib.Path(tmp) / 't.db'
+        conn = E.db()
+        E.import_donors(conn, [{'article': 'D1', 'brand': 'B', 'weight': 1.5, 'length': 10, 'width': 5, 'height': 4}], 's1')
+        E.import_donors(conn, [{'article': 'D1', 'brand': 'B', 'name': 'Имя'}], 's1')
+        r = conn.execute("SELECT weight,length,name FROM donors WHERE article='D1'").fetchone()
+        self.assertEqual(r['weight'], 1.5); self.assertEqual(r['length'], 10); self.assertEqual(r['name'], 'Имя')

@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.147-pyengine-32'
+VERSION = '12.9.148-pyengine-33'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -65,6 +65,8 @@ def num(v):
         s = s.replace('.', '', 1).replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
     elif ',' in s:
         s = s.replace(',', '.') if s.count(',') == 1 else s.replace(',', '')
+    elif s.count('.') > 1:
+        s = s.replace('.', '')  # 12.345.678 — тысячные, как num() браузера
     try: return float(s)
     except ValueError: return 0.0
 
@@ -964,7 +966,10 @@ def import_donors(conn, rows, source):
               applicability=CASE WHEN excluded.applicability<>'' THEN excluded.applicability ELSE donors.applicability END,
               warranty=CASE WHEN excluded.warranty<>'' THEN excluded.warranty ELSE donors.warranty END,
               country=CASE WHEN excluded.country<>'' THEN excluded.country ELSE donors.country END,
-              weight=excluded.weight, length=excluded.length, width=excluded.width, height=excluded.height,
+              weight=CASE WHEN excluded.weight>0 THEN excluded.weight ELSE donors.weight END,
+              length=CASE WHEN excluded.length>0 THEN excluded.length ELSE donors.length END,
+              width=CASE WHEN excluded.width>0 THEN excluded.width ELSE donors.width END,
+              height=CASE WHEN excluded.height>0 THEN excluded.height ELSE donors.height END,
               oe_numbers=CASE WHEN excluded.oe_numbers<>'' THEN excluded.oe_numbers ELSE donors.oe_numbers END''',
             (art, str(r.get('brand', '')).strip(), source, str(r.get('name', '')), str(r.get('category', '')),
              str(r.get('tnved', '')), str(r.get('applicability', '')), str(r.get('warranty', '')), str(r.get('country', '')),
