@@ -619,6 +619,30 @@ class TestEnrichFields140(unittest.TestCase):
         r = self.conn.execute("SELECT currency,min_stock FROM products WHERE article='A1'").fetchone()
         self.assertEqual(tuple(r), ('RUB', 3.0))
 
+class TestXlsxStdlib141(unittest.TestCase):
+    def test_engine_written_xlsx(self):
+        # книга, записанная самим движком (inlineStr), читается без openpyxl
+        data = E._xlsx_from_rows(['Артикул', 'Бренд', 'Цена'], [['F100', 'BOSCH', 700]], 'Лист')
+        rows = E._xlsx_sheet_rows(data)
+        self.assertEqual(rows[0][0], 'Артикул')
+        self.assertEqual(rows[1][0], 'F100')
+        self.assertEqual(rows[1][2], 700)
+    def test_shared_strings_xlsx(self):
+        import io as _io, zipfile
+        buf = _io.BytesIO()
+        ss = ('<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="4" uniqueCount="4">'
+              '<si><t>Артикул</t></si><si><t>Цена</t></si><si><t>ART1</t></si><si><t>BOSCH</t></si></sst>')
+        sheet = ('<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+                 '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>'
+                 '<row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>1500</v></c></row></sheetData></worksheet>')
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('xl/sharedStrings.xml', ss); z.writestr('xl/worksheets/sheet1.xml', sheet)
+        rows = E.rows_from_xlsx_bytes(buf.getvalue())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['article'], 'ART1')
+        out = E.rows_from_xlsx_bytes(E._xlsx_from_rows(['Артикул', 'Бренд', 'Цена'], [['F100', 'BOSCH', 700]], 'Лист'))
+        self.assertEqual(out[0]['article'], 'F100')
+
 class TestProtocol(unittest.TestCase):
     def test_register_protocol_graceful(self):
         # на не-Windows и без реестра — тихий False, без исключений
