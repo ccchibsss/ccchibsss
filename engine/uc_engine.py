@@ -406,7 +406,7 @@ def secrets():
 
 # ---------------- импорт строк (CSV/XLSX/ZIP) ----------------
 ALIASES = {
-    'article': ('артикул', 'article', 'sku', 'код', 'каталожный номер', 'каталожный'),
+    'article': ('артикул', 'article', 'sku', 'каталожный номер', 'код товара', 'артикул продавца', 'артикул поставщика'),
     'brand': ('бренд', 'brand', 'производитель'),
     'name': ('название', 'name', 'наименование', 'описание'), 'price': ('цена', 'price'),
     'barcode': ('штрихкод', 'barcode', 'ean'), 'multiplicity': ('кратность', 'multiplicity'),
@@ -431,26 +431,36 @@ ALIASES = {
     'min_stock': ('мин. остаток', 'минимальный остаток', 'min_stock', 'неснижаемый'),
     'no_buy_pct': ('невыкуп', 'no_buy', 'возврат'), 'fixed_cost': ('фикс. расходы', 'fixed'),
     'ozon_commission': ('вознаграждение ozon', 'комиссия ozon', 'ozon_commission'),
+    'ozon_logistics': ('логистика ozon', 'ozon_logistics', 'ozon logistics'),
+    'ozon_realfbs_delivery': ('ozon_realfbs_delivery', 'доставка ozon realfbs', 'ozon realfbs доставка'),
+    'net_weight': ('вес нетто', 'масса нетто', 'вес товара без упаковки', 'net_weight', 'net weight'),
     'old_price': ('зачёркнутая цена', 'зачеркнутая цена', 'старая цена', 'old_price')}
 def map_header(header):
-    out = {}
+    """v12.9.146 (проверка №3): назначение колонок однозначное, как guessField
+       браузера: одна колонка — одно поле. Раньше независимый проход по полям
+       отдавал «Код ТН ВЭД» и в article, и в tnved, а «Зачёркнутую цену» —
+       и в price, и в old_price. Побеждает лучшее совпадение (точное >
+       начало > подстрока), при равенстве — порядок полей как объявлен."""
     low = [str(h or '').strip().lower() for h in header]
-    for field, names in ALIASES.items():
-        # B7: точное совпадение > начало заголовка > подстрока; «штрихкод» — не артикул
-        def score(i, h):
-            if field == 'article' and 'штрих' in h: return -1
-            for n in names:
-                if h == n: return 0
-            for n in names:
-                if h.startswith(n): return 1
-            if any(n in h for n in names): return 2
-            return -1
-        best = None
+    cands = []  # (score, -len(alias), field_order, col, field): длинный алиас точнее
+    for fo, (field, names) in enumerate(ALIASES.items()):
         for i, h in enumerate(low):
-            sc = score(i, h)
-            if sc >= 0 and (best is None or sc < best[0]): best = (sc, i)
-            if best and best[0] == 0: break
-        if best is not None: out[field] = best[1]
+            if not h: continue
+            if field == 'article' and 'штрих' in h: continue
+            sc, best_len = -1, 0
+            for n in names:
+                if h == n: sc, best_len = 0, len(n); break
+            if sc < 0:
+                for n in names:
+                    if h.startswith(n): sc, best_len = 1, max(best_len, len(n)); break
+            if sc < 0:
+                for n in names:
+                    if n in h: sc, best_len = 2, max(best_len, len(n))
+            if sc >= 0: cands.append((sc, -best_len, fo, i, field))
+    out, used_cols, used_fields = {}, set(), set()
+    for sc, _nl, fo, i, field in sorted(cands):
+        if i in used_cols or field in used_fields: continue
+        out[field] = i; used_cols.add(i); used_fields.add(field)
     return out
 
 def rows_from_csv_bytes(data):

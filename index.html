@@ -26824,7 +26824,12 @@ const PyEngine = {
           S.rows.push({ article: r.article, brand: r.brand || '', name: r.name || '', price: num(r.price), cost: num(r.cost),
             stock: num(r.stock), sales: num(r.sales), weight: num(r.weight), length: num(r.length), width: num(r.width),
             height: num(r.height), volume: num(r.volume), oe_numbers: r.oe_numbers || '', analog_list: r.analog_list || '',
-            category: r.category || '', tnved: r.tnved || '', applicability: r.applicability || '' });
+            category: r.category || '', tnved: r.tnved || '', applicability: r.applicability || '',
+            /* v12.9.146 (проверка №3): новая строка из движка — со всеми полями, что он вернул */
+            barcode: r.barcode || '', warranty: r.warranty || '', country: r.country || '',
+            group_articles: r.group_articles || '', cross_numbers: r.cross_numbers || '',
+            category_type: r.category_type || '', ozon_category: r.ozon_category || '', ozon_type: r.ozon_type || '',
+            description: r.description || '' });
           added++;
         }
         continue;

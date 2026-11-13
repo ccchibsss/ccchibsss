@@ -829,3 +829,20 @@ class TestParityRecheck146(unittest.TestCase):
         st = dict(self.ST); st['no_buy_pct'] = 100
         r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
         self.assertEqual((r['break_even'], r['target']), (0, 0))
+
+class TestHeaderMapping146(unittest.TestCase):
+    def test_one_column_one_field(self):
+        mp = E.map_header(['Код ТН ВЭД', 'Артикул', 'Бренд'])
+        self.assertEqual(mp['article'], 1); self.assertEqual(mp['tnved'], 0)
+        mp2 = E.map_header(['Артикул', 'Зачёркнутая цена', 'Цена'])
+        self.assertEqual(mp2['old_price'], 1); self.assertEqual(mp2['price'], 2)
+        mp3 = E.map_header(['Артикул', 'Весогабариты', 'Вес, кг'])
+        self.assertEqual(mp3['dimensions_str'], 1); self.assertEqual(mp3['weight'], 2)
+    def test_browser_fields_recognized(self):
+        mp = E.map_header(['Артикул', 'Логистика Ozon, ₽/ед', 'Вес нетто, кг', 'Ozon realFBS доставка, ₽/ед'])
+        self.assertEqual(mp.get('ozon_logistics'), 1)
+        self.assertEqual(mp.get('net_weight'), 2)
+        self.assertEqual(mp.get('ozon_realfbs_delivery'), 3)
+    def test_supplier_file_still_maps(self):
+        mp = E.map_header(['Бренд', 'Каталожный номер', 'Описание', 'Остаток', 'Кратность отгрузки', 'Валюта', 'Цена', 'Штрихкод', 'ТН ВЭД'])
+        self.assertEqual(mp['article'], 1); self.assertEqual(mp['price'], 6); self.assertEqual(mp['tnved'], 8)
