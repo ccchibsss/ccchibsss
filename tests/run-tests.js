@@ -774,3 +774,33 @@ assert(app.includes('async migrateSecrets') && app.includes('async loadSecrets')
 
 // v12.9.139: заголовки поставщиков — каталожный номер это артикул, точные совпадения раньше нечётких
 assert(app.includes("'каталожный номер']") && app.includes('для OE-колонку'.length ? 'сначала ТОЧНЫЕ совпадения' : ''), 'детект колонок: каталожный номер и два прохода');
+
+// v12.9.139 (живой прогон): autoMap на реальных заголовках файла поставщика
+{
+  const between = (a, b) => { const i = app.indexOf(a); assert(i >= 0, 'нет фрагмента ' + a); const j = app.indexOf(b, i); assert(j >= 0, 'нет конца ' + b); return app.slice(i, j); };
+  let code = '';
+  code += between('const STD = [', '\n];\n') + '\n];\n';
+  code += between('const FIELD_ALIAS = {', '\n};\n') + '\n};\n';
+  code += between('function skipFieldHeader(header) {', '\n}\n') + '\n}\n';
+  code += between('function guessField(header) {', '\n}\nfunction autoMap') + '\n}\n';
+  const variants = between('  variants: {', '\n  expectedMap:').replace(/^  variants: /, '').replace(/,\s*$/, '');
+  const expectedMap = between('expectedMap: {', '},\n').replace(/^expectedMap: /, '') + '}';
+  const detect = between('  detectColumns(actual, expectedKeys) {', '\n  },\n  fileTypeOf').replace(/^  detectColumns/, 'detectColumns') + '\n  }';
+  code += `const HVC = { variants: ${variants}, expectedMap: ${expectedMap}, ${detect} };\n`;
+  code += between('function autoMap(headers) {', '\n}\n') + '\n}\n';
+  code += ';this.autoMap=autoMap; this.HVC=HVC;';
+  const c2 = {}; vm.createContext(c2); vm.runInContext(code, c2);
+  const headers = ['Бренд','Каталожный номер','Описание','Остаток','Кратность отгрузки','Валюта','Цена','Штрихкод','ТН ВЭД','Требуется сертификат','Ссылка на сертификат'];
+  const mapped = Object.fromEntries(c2.autoMap(headers).map(m => [m.src, m.field]));
+  assert.strictEqual(mapped['Каталожный номер'], 'article', 'Каталожный номер -> article');
+  assert.strictEqual(mapped['Бренд'], 'brand');
+  assert.strictEqual(mapped['Описание'], 'name');
+  assert.strictEqual(mapped['Остаток'], 'stock');
+  assert.strictEqual(mapped['Цена'], 'price');
+  assert.strictEqual(mapped['Штрихкод'], 'barcode');
+  assert.strictEqual(mapped['ТН ВЭД'], 'tnved');
+  assert.strictEqual(mapped['Кратность отгрузки'], 'multiplicity');
+  assert.strictEqual(mapped['Ссылка на сертификат'], '', 'ссылка на сертификат не должна уходить в фото');
+  const det = c2.HVC.detectColumns(headers, Object.keys(c2.HVC.expectedMap));
+  assert.strictEqual(det['Каталожный номер'], 'article', 'detectColumns: каталожный номер не уходит в OE');
+}
