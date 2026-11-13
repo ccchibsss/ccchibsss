@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.126-pyengine-18'
+VERSION = '12.9.128-pyengine-19'
 
 # ---------------- деньги и округление (Excel-стиль, как в приложении) ----------------
 def rnd(x, d=2):
@@ -1282,6 +1282,25 @@ def _app_html_path():
         if cand.exists(): return cand
     return None
 
+_XLSX_JS = None
+
+def _extract_xlsx(html):
+    """v12.9.128: SheetJS выносится из inline-блока во внешний /lib/xlsx.js.
+       У пользователя inline-блок не исполнялся (код текстом + Invalid or
+       unexpected token) при байт-в-байт исправном файле — виновато
+       взаимодействие библиотеки с HTML-парсером script-данных. Внешний
+       скрипт HTML-парсер не трогает вовсе. На диске index.html прежний:
+       открытие файлом работает как раньше."""
+    global _XLSX_JS
+    start = html.find('<script>/*! xlsx встроен офлайн')
+    if start < 0: return html
+    end = html.find('</script>', start)
+    if end < 0: return html
+    js = html[html.find('\n', start):end]
+    if 'xlsx.js' not in js: return html
+    _XLSX_JS = js.encode('utf-8')
+    return html[:start] + '<script src="/lib/xlsx.js"></script>' + html[end + len('</script>'):]
+
 def render_app_html():
     """Приложение с авто-токеном: страница отдана самим движком с его же адреса,
        поэтому токен можно вшить в HTML — пользователю не нужно ничего вставлять.
@@ -1289,6 +1308,7 @@ def render_app_html():
     app_file = _app_html_path()
     if app_file is None: return None
     html = app_file.read_text(encoding='utf-8')
+    html = _extract_xlsx(html)
     inject = '<script>window.__UC_PY_TOKEN__=' + json.dumps(get_token()) + ';</script>'
     if '</head>' in html: html = html.replace('</head>', inject + '</head>', 1)
     else: html = inject + html
@@ -1352,6 +1372,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers(); self.wfile.write(body)
                 return
             return self._send(404, {'ok': False, 'error': 'index.html не найден рядом с движком'})
+        if self.path == '/lib/xlsx.js':
+            if _XLSX_JS is None:
+                render_app_html()
+            if _XLSX_JS is None: return self._send(404, {'ok': False, 'error': 'xlsx не найден в index.html'})
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/javascript; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(_XLSX_JS)))
+            self.end_headers(); self.wfile.write(_XLSX_JS)
+            return
         if self.path == '/health':
             return self._send(200, {'ok': True, 'service': 'UC-PyEngine', 'version': VERSION})
         if self.path == '/diag':
