@@ -166,9 +166,10 @@ def _ozon_browser_unit(price, cost, st):
         else: handover = rnd(num(oz.get('handover_fee', 10)) / units)
     storage = rnd(liters * num(oz.get('storage_per_l')) * num(oz.get('storage_days', 30))) if scheme == 'FBO' else 0.0
     rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
-    failed_override = num(st.get('failed_case')) > 0
-    failed_case = num(st.get('failed_case')) if failed_override else (
-        realfbs_del + num(oz.get('realfbs_return')) if scheme == 'REALFBS'
+    failed_override = num(st.get('failed_case')) > 0 or num(oz.get('failed_manual')) > 0
+    realfbs_service = (num(oz.get('realfbs_service', 20)) / max(1.0, num(oz.get('realfbs_units')) or 1)) if scheme == 'REALFBS' else 0.0
+    failed_case = num(st.get('failed_case')) or num(oz.get('failed_manual')) if failed_override else (
+        realfbs_del + num(oz.get('realfbs_return')) + realfbs_service if scheme == 'REALFBS'
         else 2 * manual_log + last_mile + num(oz.get('return_handling')))
     returns = rnd(failed_case * rate / (100 - rate), 6) if rate < 100 else 0.0
     return_storage = 0.0 if failed_override else (
@@ -181,7 +182,7 @@ def _ozon_browser_unit(price, cost, st):
     transit = num(st.get('transit', 30)) if scheme == 'FBS' else 0.0
     fixed = num(st.get('fixed_per_unit', 0))
     parts = [cost, comm, transfer, logistics, last_mile, handover, pack, transit,
-             returns, return_storage, storage, ads, cofin, nonstd, late, fixed]
+             returns, return_storage, storage, ads, cofin, nonstd, late, fixed, realfbs_service]
     tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'),
                    num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
     total = rnd(sum(parts) + tax)
@@ -193,6 +194,8 @@ def solve_prices(price, cost, st, target_margin=20.0, sales=1):
        Как в приложении: при продажах 0 безубыток не выдумывается (0)."""
     if not (num(sales) > 0):
         return {'break_even': 0, 'target': 0}
+    if min(100.0, max(0.0, num(st.get('no_buy_pct', 0)))) >= 100:
+        return {'break_even': 0, 'target': 0}  # как solveMarketplacePrices при returnRateInvalid
     def profit(p):
         return rnd(p - ozon_unit(p, cost, st)['total'])
     def ok(p, margin):
@@ -227,8 +230,14 @@ def calc_row(row, st):
     st2 = dict(st); st2['_volume'] = vol; st2['_weight'] = num(row.get('weight'))
     if num(row.get('ozon_commission')) > 0: st2['commission_pct'] = num(row.get('ozon_commission'))
     if num(row.get('no_buy_pct')) > 0: st2['no_buy_pct'] = num(row.get('no_buy_pct'))
+    elif isinstance(st.get('no_buy_by_category'), dict) and str(row.get('category') or '') in st['no_buy_by_category']:
+        st2['no_buy_pct'] = num(st['no_buy_by_category'][str(row.get('category'))])
     if num(row.get('ozon_failed_cost')) > 0: st2['failed_case'] = num(row.get('ozon_failed_cost'))
-    if num(row.get('fixed_cost')) > 0: st2['fixed_per_unit'] = num(row.get('fixed_cost'))
+    # браузер: месячный фикс (SKU + общий/число SKU) делится на прогноз продаж
+    _fixed_month = num(row.get('fixed_cost')) + num(st.get('fixed_monthly_per_sku'))
+    if _fixed_month > 0:
+        _sales = num(row.get('sales'))
+        st2['fixed_per_unit'] = _fixed_month / _sales if _sales > 0 else _fixed_month
     if num(row.get('ozon_logistics')) > 0: st2['_row_logistics'] = num(row.get('ozon_logistics'))
     if num(row.get('ozon_realfbs_delivery')) > 0: st2['_row_realfbs'] = num(row.get('ozon_realfbs_delivery'))
     if num(row.get('ozon_logistics')) > 0 or num(row.get('ozon_realfbs_delivery')) > 0:
@@ -744,7 +753,7 @@ def _calc_all(rows, st):
     except Exception:
         return seq(), False
 
-_ECO_FIELDS = ('price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume',
+_ECO_FIELDS = ('price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category',
                'multiplicity', 'ozon_commission', 'ozon_logistics', 'ozon_realfbs_delivery',
                'ozon_failed_cost', 'no_buy_pct', 'fixed_cost')
 
@@ -759,7 +768,7 @@ def recalc_catalog(conn, st, force=False):
        если изменились её расчётные входы или настройки экономики (хэш в
        eco_results.inputs_hash). force=True — полный пересчёт как раньше.
        Итоги ответа считаются по всей таблице результатов, семантика та же."""
-    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost FROM products').fetchall()]
     old = {(r['article'], r['brand']): r['inputs_hash'] for r in
            conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
     todo, hashes = [], {}

@@ -810,3 +810,22 @@ class TestBrowserParity146(unittest.TestCase):
         st = {k: v for k, v in self.ST.items() if k != 'ozon'}
         r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
         self.assertGreater(r['total'], 0)
+
+class TestParityRecheck146(unittest.TestCase):
+    ST = TestBrowserParity146.ST
+    def test_default_and_category_no_buy(self):
+        st = dict(self.ST); st['no_buy_pct'] = 8
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        # failed=225, returns=225*8/92=19.565..; parts=838+19.57=857.57, tax 60 -> 917.57
+        self.assertAlmostEqual(r['total'], 917.57, delta=0.02)
+        st2 = dict(st); st2['no_buy_by_category'] = {'Обувь': 20}
+        r2 = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10, 'category': 'Обувь'}, st2)
+        self.assertGreater(r2['total'], r['total'])
+    def test_fixed_monthly_divided_by_sales(self):
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10, 'fixed_cost': 100}, dict(self.ST))
+        # фикс 100/мес при 10 продажах = 10/ед: parts 838+10=848, tax 60, total 908
+        self.assertAlmostEqual(r['total'], 908, delta=0.011)
+    def test_solver_no_buy_100(self):
+        st = dict(self.ST); st['no_buy_pct'] = 100
+        r = E.calc_row({'article': 'A', 'price': 1000, 'cost': 500, 'sales': 10}, st)
+        self.assertEqual((r['break_even'], r['target']), (0, 0))
