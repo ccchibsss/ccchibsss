@@ -17,6 +17,9 @@ engine_data/secrets.json (на Windows рекомендуется DPAPI-обёр
 """
 import argparse, csv, email, imaplib, io, json, math, os, re, shutil, sqlite3, sys, time, zipfile
 from decimal import Decimal, ROUND_HALF_UP
+from price_solver import stable_floor, js_round
+from hvc_enrichment import enrich_rows as hvc_enrich_rows
+from name_category import apply as apply_name_category, MARKERS as NAME_CATEGORY_MARKERS
 from email.header import decode_header
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,7 +37,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.153-pyengine-38'
+VERSION = '12.9.156-pyengine-40'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -153,9 +156,9 @@ def _ozon_browser_unit(price, cost, st):
     transfer = rnd(price * num(st.get('transfer_pct', 1.5)) / 100)
     ads = rnd(price * num(oz.get('boost_pct')) / 100)
     cofin = rnd(price * num(oz.get('cofin_pct')) / 100)
-    manual_log = num(st.get('_row_logistics', oz.get('logistics_manual')))
+    manual_log = rnd(num(st.get('_row_logistics', oz.get('logistics_manual'))) * num(oz.get('logistics_factor', 1)))
     processing = 0.0 if scheme == 'REALFBS' else num(oz.get('fbo_processing') if scheme == 'FBO' else oz.get('processing'))
-    realfbs_del = num(st.get('_row_realfbs', 0))
+    realfbs_del = rnd(num(st.get('_row_realfbs', 0)) * num(oz.get('logistics_factor', 1)))
     logistics = realfbs_del if scheme == 'REALFBS' else rnd(manual_log + processing)
     last_mile = 0.0 if scheme == 'REALFBS' else num(oz.get('last_mile', st.get('last_mile', 25)))
     units = max(1.0, num(oz.get('units_per_shipment')) or 1)
@@ -189,7 +192,7 @@ def _ozon_browser_unit(price, cost, st):
                    num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
     total = rnd(sum(parts) + tax)
     return {'total': total, 'commission': comm, 'transfer': transfer, 'tax': tax,
-            'returns': rnd(returns + return_storage), 'storage': storage}
+            'returns': rnd(returns + return_storage), 'storage': storage, '_expense_names': ['commission', 'paymentTransfer', 'lastMile', 'boost', 'cofin', 'logistics', 'scDelivery', 'packaging', 'processing', 'storage', 'returns', 'returnStorage', 'tax', 'nonStd', 'lateShip'], '_monthly_parts': [comm, transfer, last_mile, ads, cofin, logistics, handover, pack, transit + realfbs_service, storage, returns, return_storage, tax, nonstd, late], '_percent': comm + transfer + ads + cofin}
 
 def wb_unit(price, cost, st):
     """v12.9.149: WB — формулой evaluateWb браузера: база логистики по объёму,
@@ -204,15 +207,15 @@ def wb_unit(price, cost, st):
     sgt = num(st.get('_weight', 0)) > 25 or max(dims) > 200 or sum(dims) > 280
     coeff = 1.0 if sgt else num(wb.get('warehouse_coeff', 1.7))
     direct_base = min(3000.0, max(1000.0, base)) if sgt else base
-    logistics = rnd(rnd(direct_base * coeff) + (num(wb.get('acceptance')) if scheme == 'FBO' else 0.0))
+    logistics = rnd(rnd(direct_base * coeff * num(wb.get('logistics_factor', 1))) + (num(wb.get('acceptance')) if scheme == 'FBO' else 0.0))
     storage = wb_storage_month(v, num(wb.get('storage_per_l', 0.15)), num(wb.get('storage_coeff', 1)), num(wb.get('storage_days', 30))) if scheme == 'FBO' else 0.0
     div = num(wb.get('vol_divisor')) or 5000
     _vol_kg = (dims[0] * dims[1] * dims[2] / div) if all(d > 0 for d in dims) else (v * 1000 / div if v > 0 else 0.0)
     billable = max(num(st.get('_weight', 0)), _vol_kg)
     sc_delivery = rnd(num(wb.get('sc_per_kg', 12)) * billable) if scheme == 'FBS' else 0.0
     rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
-    failed_manual = num(wb.get('failed_manual'))
-    if failed_manual > 0: failed_case = failed_manual
+    failed_manual = wb.get('failed_manual')
+    if failed_manual is not None and str(failed_manual).strip() != '' and num(failed_manual) >= 0: failed_case = num(failed_manual)
     elif scheme == 'FBS':
         import datetime as _dt
         today = _dt.date.today()
@@ -231,38 +234,162 @@ def wb_unit(price, cost, st):
     parts = [cost, comm, transfer, logistics, sc_delivery, pack, transit, returns, storage, ads, cofin, fixed]
     tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
     return {'total': rnd(sum(parts) + tax), 'commission': comm, 'transfer': transfer, 'tax': tax,
-            'returns': rnd(returns), 'storage': storage}
+            'returns': rnd(returns), 'storage': storage, '_expense_names': ['commission', 'paymentTransfer', 'boost', 'cofin', 'logistics', 'scDelivery', 'packaging', 'processing', 'storage', 'returns', 'tax'], '_monthly_parts': [comm, transfer, ads, cofin, logistics, sc_delivery, pack, transit, storage, returns, tax], '_percent': comm + transfer + ads + cofin}
+
+def _billable(st):
+    dims = st.get('_dims') or (0, 0, 0); v = num(st.get('_volume', 0))
+    div = num((st.get('wb') or {}).get('vol_divisor')) or num((st.get('ym') or {}).get('vol_divisor')) or 5000
+    vol_kg = (dims[0] * dims[1] * dims[2] / div) if all(d > 0 for d in dims) else (v * 1000 / div if v > 0 else 0.0)
+    return max(num(st.get('_weight', 0)), vol_kg), vol_kg
+
+def mm_unit(price, cost, st):
+    """Мегамаркет (evaluateMm): комиссия, эквайринг, лояльность, реклама;
+       FBS — ручная логистика и СЦ, FBO — логистика в комиссии, хранение за единицу."""
+    mm = st.get('mm') or {}
+    scheme = str(mm.get('fulfillment') or 'FBS').upper()
+    comm = rnd(price * num(mm.get('commission_pct', 12)) / 100)
+    transfer = rnd(price * num(mm.get('acquiring_pct', 1.5)) / 100)
+    cofin = rnd(price * num(mm.get('loyalty_pct')) / 100)
+    ads = rnd(price * num(mm.get('boost_pct')) / 100)
+    logistics = rnd(num(mm.get('fbs_logistics')) * num(mm.get('logistics_factor', 1))) if scheme == 'FBS' else 0.0
+    billable, _vk = _billable(st)
+    sc = rnd(num(mm.get('sc_per_kg', 12)) * billable) if scheme == 'FBS' else 0.0
+    storage = num(mm.get('storage_per_unit')) if scheme == 'FBO' else 0.0
+    rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
+    failed = num(mm.get('failed_manual')) if num(mm.get('failed_manual', -1)) >= 0 else num(mm.get('return_fee'))
+    returns = rnd(failed * rate / (100 - rate), 6) if rate < 100 else 0.0
+    parts = [cost, comm, transfer, logistics, sc, num(st.get('pack', 18)),
+             num(st.get('transit', 30)) if scheme == 'FBS' else 0.0, returns, storage, ads, cofin,
+             num(st.get('fixed_per_unit', 0))]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    return {'total': rnd(sum(parts) + tax), 'commission': comm, 'transfer': transfer, 'tax': tax,
+            'returns': rnd(returns), 'storage': storage, '_expense_names': ['commission', 'paymentTransfer', 'boost', 'cofin', 'logistics', 'scDelivery', 'packaging', 'processing', 'storage', 'returns', 'tax'], '_monthly_parts': [comm, transfer, ads, cofin, logistics, sc, num(st.get('pack', 18)), num(st.get('transit', 30)) if scheme == 'FBS' else 0, storage, returns, tax], '_percent': comm + transfer + ads + cofin}
+
+def avito_unit(price, cost, st):
+    """Авито (evaluateAvito): комиссия (с минимумом 1 ₽ при включённом профи),
+       доставка/скидка продавца, размещение, невыкуп от расхода случая, реклама/софин."""
+    av = st.get('avito') or {}
+    nominal = rnd(price * num(av.get('commission_pct', 6)) / 100)
+    comm = max(1.0, nominal) if av.get('pro_min_enabled') and price > 0 else nominal
+    rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
+    failed = num(av.get('failed_manual')) if num(av.get('failed_manual', -1)) >= 0 else num(av.get('return_fee'))
+    returns = rnd(failed * rate / (100 - rate), 6) if rate < 100 else 0.0
+    ads = rnd(price * num(av.get('boost_pct')) / 100); cofin = rnd(price * num(av.get('cofin_pct')) / 100)
+    parts = [cost, comm, rnd(num(av.get('logistics')) * num(av.get('logistics_factor', 1))), num(st.get('pack', 18)), num(av.get('listing_fee')),
+             returns, ads, cofin, num(st.get('fixed_per_unit', 0))]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    return {'total': rnd(sum(parts) + tax), 'commission': comm, 'transfer': 0.0, 'tax': tax,
+            'returns': rnd(returns), 'storage': 0.0, '_expense_names': ['commission', 'boost', 'cofin', 'logistics', 'packaging', 'returns', 'tax', 'listing'], '_monthly_parts': [comm, ads, cofin, rnd(num(av.get('logistics')) * num(av.get('logistics_factor', 1))), num(st.get('pack', 18)), returns, tax, num(av.get('listing_fee'))], '_percent': comm + ads + cofin}
+
+def _fbs_middle_mile(volume_liters):
+    import math as _m
+    liters = int(_m.ceil(max(0.0, num(volume_liters))))
+    if not liters: return 0.0
+    return rnd(min(5500.0, 92 + min(max(liters - 1, 0), 199) * 8 + max(liters - 200, 0) * 5))
+
+def ym_unit(price, cost, st):
+    """Яндекс Маркет (evaluateYm): размещение из тарифного снимка строки,
+       средняя миля по объёму, последняя миля 5% с капом 1000, спецтариф 42%
+       (<=300 ₽ и <=5 л до конца 2026), обработка FBS, невыкуп с хранением возврата."""
+    ym = st.get('ym') or {}
+    scheme = 'FBY' if str(ym.get('fulfillment') or 'FBS').upper() == 'FBO' else 'FBS'
+    v = num(st.get('_volume', 0)); dims = st.get('_dims') or (0, 0, 0)
+    billable, vol_kg = _billable(st)
+    import datetime as _dt
+    cheap = bool(ym.get('cheap_enabled', True)) and price > 0 and price <= 300 and v > 0 \
+        and int(-(-v // 1)) <= 5 and _dt.date.today() <= _dt.date(2026, 12, 31) \
+        and (all(d > 0 for d in dims) or v > 0)
+    placement_pct = num(st['_ym_placement_pct']) if '_ym_placement_pct' in st else num(ym.get('fallback_placement', 47))
+    placement = 0.0 if cheap else rnd(price * placement_pct / 100)
+    special = rnd(price * 42 / 100) if cheap else 0.0
+    middle = 0.0 if cheap else rnd(_fbs_middle_mile(v) * num(ym.get('logistics_factor', 1)))
+    last_mile = 0.0 if cheap else rnd(min(price * 0.05, 1000))
+    transfer = rnd(price * (num(st.get('_ym_transfer_pct')) or num(ym.get('payout_pct', 2.8))) / 100)
+    agency = num(st.get('_ym_agency_fee')) or num(ym.get('agency_default', 0.12))
+    ads = rnd(price * num(st.get('_ym_boost_pct')) / 100); cofin = rnd(price * num(ym.get('cofin_pct')) / 100)
+    is_kgt = num(st.get('_weight', 0)) >= 15 or max(dims) >= 70
+    if scheme == 'FBS':
+        processing = num(ym.get('processing_manual')) if num(ym.get('processing_manual', -1)) >= 0 else (rnd(vol_kg * 10) if is_kgt else 25.0)
+    else: processing = 0.0
+    sc = rnd(num(ym.get('sc_per_kg', 12)) * billable) if scheme == 'FBS' else 0.0
+    pack = 0.0 if scheme == 'FBY' else num(st.get('pack', 18))
+    transit = num(st.get('transit', 30)) if scheme == 'FBS' else 0.0
+    rate = min(100.0, max(0.0, num(st.get('_ym_no_buy_pct', st.get('no_buy_pct', 0)))))
+    share = max(0.0, min(100.0, num(ym.get('same_city_pct')))) / 100 if scheme == 'FBS' else 0.0
+    extra = num(ym.get('return_fixed')) + num(ym.get('extra_return_per_kg')) * billable
+    failed_manual = num(ym.get('failed_manual', -1)) >= 0
+    failed = num(ym.get('failed_manual')) if failed_manual else ((0.0 if cheap else middle * (1 - share) + num(ym.get('return_handling', 15))) + extra)
+    returns = rnd(failed * rate / (100 - rate), 6) if rate < 100 else 0.0
+    return_storage = 0.0 if failed_manual else rnd(num(ym.get('return_storage_days')) * num(ym.get('return_storage_per_day', 25)) * (rate / (100 - rate) if rate < 100 else 0.0), 6)
+    storage = num(ym.get('storage_per_sale')) if scheme == 'FBY' else 0.0
+    penalties = num(ym.get('penalties'))
+    parts = [cost, placement, special, agency, transfer, last_mile, middle, sc, pack, transit,
+             processing, returns, return_storage, storage, penalties, ads, cofin, num(st.get('fixed_per_unit', 0))]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    return {'total': rnd(sum(parts) + tax), 'commission': placement, 'transfer': transfer, 'tax': tax,
+            'returns': rnd(returns + return_storage), 'storage': storage, '_expense_names': ['commission', 'specialFee', 'acquiring', 'paymentTransfer', 'lastMile', 'boost', 'cofin', 'logistics', 'scDelivery', 'packaging', 'processing', 'storage', 'returns', 'returnStorage', 'penalties', 'tax'], '_monthly_parts': [placement, special, agency, transfer, last_mile, ads, cofin, middle, sc, pack, transit + processing, storage, returns, return_storage, penalties, tax], '_percent': placement + special + transfer + ads + cofin + (last_mile if price * 0.05 <= 1000 else 0)}
+
+def _net_unit(price, cost, st, sales, unit_result):
+    if '_monthly_parts' not in unit_result:
+        return rnd(price - unit_result['total'])
+    parts = unit_result['_monthly_parts']
+    if sales <= 0:
+        return rnd(price - cost - sum(parts), 4)
+    monthly = sum(rnd(value * sales) for value in parts)
+    fixed_month = num(st.get('_fixed_month', num(st.get('fixed_per_unit')) * sales))
+    net = rnd(rnd(price * sales) - rnd(cost * sales) - monthly - max(0, fixed_month))
+    return net / sales
+
 
 def solve_prices(price, cost, st, target_margin=20.0, sales=1, unit=None):
-    """Целочисленный решатель: первое целое с прибылью >= 0 и >= целевой маржи.
-       Как в приложении: при продажах 0 безубыток не выдумывается (0)."""
-    if not (num(sales) > 0):
+    sales = max(0, num(sales))
+    if sales <= 0 or num(st.get('no_buy_pct')) >= 100:
         return {'break_even': 0, 'target': 0}
-    if min(100.0, max(0.0, num(st.get('no_buy_pct', 0)))) >= 100:
-        return {'break_even': 0, 'target': 0}  # как solveMarketplacePrices при returnRateInvalid
-    _unit = unit or ozon_unit
-    def profit(p):
-        return rnd(p - _unit(p, cost, st)['total'])
-    def ok(p, margin):
-        return profit(p) - p * margin / 100 >= 0
-    # аналитический старт для процентной части + локальная доводка
-    pct_rate = (num(st.get('commission_pct', 14)) + num(st.get('transfer_pct', 1.5))) / 100
-    if st.get('tax_regime', 'usn_income_6') in ('usn_income_6', 'custom'):
-        pct_rate += num(st.get('tax_pct', 6)) / 100
-    fixed_est = max(1.0, cost + num(st.get('last_mile', 25)) + num(st.get('handover', 10))
-                    + num(st.get('pack', 18)) + num(st.get('transit', 30)))
-    def find(margin):
-        denom = 1 - pct_rate - margin / 100
-        p = max(0, math.ceil(fixed_est / denom)) if denom > 0.01 else 10_000_000
-        p = min(p, 10_000_000)
-        while p < 10_000_000 and not ok(p, margin): p += 1
-        while p > 0 and ok(p - 1, margin): p -= 1
-        return p if ok(p, margin) else 10_000_000
-    be = find(0.0)
-    tgt = max(be, find(target_margin)) if be < 10_000_000 else 10_000_000
-    return {'break_even': be, 'target': tgt}
+    unit = unit or ozon_unit
+    cache = {}
+    def evaluate(p):
+        if p not in cache: cache[p] = _net_unit(p, cost, st, sales, unit(p, cost, st))
+        return cache[p]
+    base = unit(price, cost, st)
+    percent = num(base.get('_percent', base.get('commission', 0) + base.get('transfer', 0)))
+    if st.get('tax_regime', 'usn_income_6') in ('usn_income_6', 'usn_income_7', 'usn_income_vat_5', 'usn_income_vat_7', 'self_employed_4', 'self_employed_6', 'custom'):
+        percent += base['tax']
+    rate = max(0, min(0.95, percent / price)) if price > 0 else 0
+    fixed = price - _net_unit(price, cost, st, sales, base) - percent
+    if not math.isfinite(fixed) or fixed < 0: fixed = max(1, cost)
+    be_guess = max(0, js_round(fixed / max(0.005, 1 - rate)))
+    margin = max(0, num(target_margin)) / 100
+    target_guess = max(0, js_round(fixed / max(0.005, 1 - rate - margin)))
+    edge = 300 if unit is ym_unit and (st.get('ym') or {}).get('cheap_enabled', True) and 0 < num(st.get('_volume')) <= 5 else 0
+    be = stable_floor(be_guess, evaluate, edge)
+    target = stable_floor(target_guess, lambda p: evaluate(p) - p * margin if p > 0 else -1, edge)
+    return {'break_even': be, 'target': max(be, target)}
+
+def _calculation_dimensions(row, settings):
+    if not settings.get('calc_std_dims'): return row
+    context = json.loads(row.get('dimension_context') or '{}')
+    if context.get('blocked'): return row
+    dictionary = settings.get('std_dims')
+    if dictionary is None: dictionary = _asset('std_dims.json') or []
+    normalize = lambda v: re.sub(r'\s+', ' ', re.sub(r'[()\[\]\-_,.„“”«»/\\]', ' ', str(v or '').lower())).strip()
+    candidates = []
+    for field in ('category_type', 'name', 'category'):
+        key = normalize(row.get(field))
+        if key:
+            candidates.extend(d for d in dictionary if normalize(d.get('c')) == key)
+    signatures = {tuple(rnd(num(d.get(k)), 6) for k in ('l', 'w', 'h', 'wt')) for d in candidates}
+    if len(signatures) != 1: return row
+    result = dict(row)
+    for field, key in (('length', 'l'), ('width', 'w'), ('height', 'h'), ('weight', 'wt')):
+        if num(result.get(field)) <= 0 and num(candidates[0].get(key)) > 0:
+            result[field] = num(candidates[0][key])
+    # A derived volume must follow temporary dimensions; explicit volume is kept.
+    if not context.get('explicitVolume'):
+        result['volume'] = num(result.get('length')) * num(result.get('width')) * num(result.get('height')) / 1000
+    return result
 
 def calc_row(row, st):
+    row = _calculation_dimensions(row, st)
     price, cost = num(row.get('price')), num(row.get('cost'))
     if num(row.get('eff_price')) > 0: price = num(row.get('eff_price'))  # v12.9.149: промо-цена, как effPrice браузера
     # v12.9.145: паритет с браузером (calcMarketplacesEconomics/costWithMultiplicity):
@@ -275,13 +402,21 @@ def calc_row(row, st):
     vol = num(row.get('volume')) or (L * W * H / 1000 if L and W and H else 0.0)
     st2 = dict(st); st2['_volume'] = vol; st2['_weight'] = num(row.get('weight'))
     st2['_dims'] = (num(row.get('length')), num(row.get('width')), num(row.get('height')))
+    for field, (market, key) in ROW_ECO_OVERRIDES.items():
+        if row.get(field) is not None and str(row[field]).strip() != '':
+            value = max(0, num(row[field]))
+            if market:
+                st2[market] = {**(st2.get(market) or {}), key: value}
+            else:
+                st2[key] = value
     if num(row.get('ozon_commission')) > 0: st2['commission_pct'] = num(row.get('ozon_commission'))
-    if num(row.get('no_buy_pct')) > 0: st2['no_buy_pct'] = num(row.get('no_buy_pct'))
+    if row.get('no_buy_pct') is not None and str(row.get('no_buy_pct')).strip() != '': st2['no_buy_pct'] = num(row.get('no_buy_pct'))
     elif isinstance(st.get('no_buy_by_category'), dict) and str(row.get('category') or '') in st['no_buy_by_category']:
         st2['no_buy_pct'] = num(st['no_buy_by_category'][str(row.get('category'))])
     if num(row.get('ozon_failed_cost')) > 0: st2['failed_case'] = num(row.get('ozon_failed_cost'))
     # браузер: месячный фикс (SKU + общий/число SKU) делится на прогноз продаж
     _fixed_month = num(row.get('fixed_cost')) + num(st.get('fixed_monthly_per_sku'))
+    st2['_fixed_month'] = _fixed_month
     if _fixed_month > 0:
         _sales = num(row.get('sales'))
         st2['fixed_per_unit'] = _fixed_month / _sales if _sales > 0 else _fixed_month
@@ -291,19 +426,65 @@ def calc_row(row, st):
         # заданный маршрут SKU заменяет усреднённую пару «последняя миля + сдача»
         st2['last_mile'] = num(row.get('ozon_logistics')) + num(row.get('ozon_realfbs_delivery'))
         st2['handover'] = 0
-    _is_wb = str(st.get('mp_scope') or '').upper() == 'WB'
-    _unit = wb_unit if _is_wb else ozon_unit
+    _scope = str(st.get('mp_scope') or '').upper()
+    if _scope == 'ALL': _scope = 'YM'
+    if row.get('ym_placement_pct') is not None: st2['_ym_placement_pct'] = num(row.get('ym_placement_pct'))
+    if row.get('ym_transfer_pct') is not None: st2['_ym_transfer_pct'] = num(row.get('ym_transfer_pct'))
+    if row.get('ym_agency_fee') is not None: st2['_ym_agency_fee'] = num(row.get('ym_agency_fee'))
+    if row.get('ym_boost_pct') is not None: st2['_ym_boost_pct'] = num(row.get('ym_boost_pct'))
+    if row.get('ym_return_pct') is not None: st2['_ym_no_buy_pct'] = num(row.get('ym_return_pct'))
+    # What-If is scoped to the selected marketplace, as scenarioPct in JS.
+    scenario = st.get('scenario') or {}
+    market = {'WB': 'wb', 'MM': 'mm', 'AVITO': 'avito', 'YM': 'ym', 'OZON': 'ozon'}.get(_scope)
+    if market and scenario:
+        options = dict(st2.get(market) or {})
+        for source, key in (('boostPct', 'boost_pct'), ('cofinPct', 'cofin_pct'), ('logisticsFactor', 'logistics_factor')):
+            if scenario.get(source) is not None and scenario[source] != '':
+                options[key] = max(0, num(scenario[source]))
+        if market == 'mm' and 'cofin_pct' in options: options['loyalty_pct'] = options['cofin_pct']
+        if market == 'ym':
+            if scenario.get('ymCommissionPct') is not None: st2['_ym_placement_pct'] = max(0, num(scenario['ymCommissionPct']))
+            if scenario.get('boostPct') is not None: st2['_ym_boost_pct'] = max(0, num(scenario['boostPct']))
+        st2[market] = options
+        if scenario.get('targetMargin') is not None: st2['target_margin'] = max(0, num(scenario['targetMargin']))
+    _unit = {'WB': wb_unit, 'MM': mm_unit, 'AVITO': avito_unit, 'YM': ym_unit}.get(_scope, ozon_unit)
     u = _unit(price, cost, st2)
-    profit = rnd(price - u['total'])
-    solved = solve_prices(price, cost, st2, num(st.get('target_margin', 20)), row.get('sales', 1), unit=_unit)
-    return {'article': row.get('article', ''), 'brand': row.get('brand', ''), 'total': u['total'], 'profit': profit,
-            'margin': rnd(profit / price * 100, 1) if price else 0.0,
-            'roi': rnd(profit / cost * 100, 1) if cost else 0.0,
+    net_unit = _net_unit(price, cost, st2, max(0, num(row.get('sales', 1))), u)
+    profit = rnd(net_unit)
+    total = rnd(price - net_unit)
+    solved = solve_prices(price, cost, st2, num(st2.get('target_margin', 20)), row.get('sales', 1), unit=_unit)
+    expenses = dict(zip(u.get('_expense_names', []), u.get('_monthly_parts', [])))
+    if not expenses:
+        expenses = {'commission': u['commission'], 'paymentTransfer': u['transfer'], 'tax': u['tax'], 'returns': u['returns'], 'storage': u['storage']}
+    sales = max(0, num(row.get('sales', 1)))
+    fields = {key: expenses.get(key, 0.0) for key in (
+        'commission', 'specialFee', 'acquiring', 'paymentTransfer', 'logistics', 'lastMile',
+        'scDelivery', 'packaging', 'processing', 'returns', 'returnStorage', 'penalties',
+        'boost', 'cofin', 'tax', 'storage', 'listing', 'nonStd', 'lateShip')}
+    fields.update({'revenue': price, 'cogs': cost, 'effPrice': price, 'costPerUnit': total,
+                   'perUnitNet': profit, 'contribution': rnd(price - cost - sum(expenses.values()), 4),
+                   'fixedTotal': _fixed_month, 'fixedTotalRaw': _fixed_month,
+                   'mRevenue': rnd(price * sales), 'mCogs': rnd(cost * sales),
+                   'mNetProfit': rnd(net_unit * sales) if sales > 0 else -_fixed_month})
+    for name in ('Commission', 'LastMile', 'Logistics', 'Tax', 'Processing', 'Returns'):
+        fields['m' + name] = rnd(expenses.get(name[0].lower() + name[1:], 0) * sales)
+    return {'article': row.get('article', ''), 'brand': row.get('brand', ''), 'total': total, 'profit': profit,
+            'margin': rnd(net_unit / price * 100, 1) if price else 0.0,
+            'roi': rnd(net_unit / cost * 100, 1) if cost else 0.0,
             'commission': u['commission'], 'tax': u['tax'], 'returns': u['returns'],
             'storage': u['storage'], 'volume': rnd(vol, 4),
-            'break_even': solved['break_even'], 'target': solved['target']}
+            'break_even': solved['break_even'], 'target': solved['target'], 'fields': fields}
 
 # ---------------- SQLite ----------------
+ROW_ECO_OVERRIDES = {
+    'wb_commission': ('wb', 'commission_pct'), 'wb_failed_cost': ('wb', 'failed_manual'),
+    'mm_commission': ('mm', 'commission_pct'), 'mm_logistics': ('mm', 'fbs_logistics'),
+    'mm_failed_cost': ('mm', 'failed_manual'),
+    'avito_commission': ('avito', 'commission_pct'), 'avito_failed_cost': ('avito', 'failed_manual'),
+    'ym_processing_per_unit': ('ym', 'processing_manual'), 'ym_failed_cost': ('ym', 'failed_manual'),
+    'pack_cost': (None, 'pack'), 'ym_cofin_pct': ('ym', 'cofin_pct'),
+}
+
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS products(
   article TEXT NOT NULL, brand TEXT DEFAULT '', name TEXT DEFAULT '',
@@ -364,10 +545,21 @@ def db():
     if str(DB_PATH) in _SCHEMA_DONE:  # B4: схема и миграции — один раз на процесс
         return conn
     conn.executescript(SCHEMA)
+    conn.execute('CREATE TABLE IF NOT EXISTS oe_registry(oe TEXT PRIMARY KEY, data TEXT NOT NULL)')
+    if 'fields_json' not in {r[1] for r in conn.execute('PRAGMA table_info(eco_results)')}:
+        conn.execute("ALTER TABLE eco_results ADD COLUMN fields_json TEXT DEFAULT '{}'")
     # миграция баз до v12.9.110: обогащаемые текстовые поля каталога
     ecols = {r[1] for r in conn.execute('PRAGMA table_info(eco_results)')}
     if 'inputs_hash' not in ecols:
         conn.execute("ALTER TABLE eco_results ADD COLUMN inputs_hash TEXT DEFAULT ''")
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(products)')}
+    for col in ('dimension_review', 'dimension_context'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT DEFAULT '{{}}'")
+    # Nullable overrides: NULL is unspecified; explicit zero is a valid tariff.
+    for col in ROW_ECO_OVERRIDES:
+        if col not in cols:
+            conn.execute(f'ALTER TABLE products ADD COLUMN {col} REAL DEFAULT NULL')
     dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
     for col in ('warranty', 'country'):
         if col not in dcols:
@@ -398,6 +590,11 @@ def db():
         conn.execute("ALTER TABLE products ADD COLUMN visible TEXT DEFAULT '1'")
     if 'excluded' not in cols:
         conn.execute("ALTER TABLE products ADD COLUMN excluded TEXT DEFAULT '0'")
+    for col in ('ym_placement_pct', 'ym_transfer_pct', 'ym_agency_fee', 'ym_boost_pct', 'ym_return_pct'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
+    if 'ym_found' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN ym_found REAL DEFAULT 1")
     dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
     for col, typ, dflt in (('barcode', 'TEXT', "''"), ('image_url', 'TEXT', "''"), ('multiplicity', 'REAL', '0')):
         if col not in dcols:
@@ -767,6 +964,20 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         if 'excluded' in r:
             conn.execute('UPDATE products SET excluded=? WHERE article=? AND brand=?',
                          ('1' if str(r.get('excluded')).lower() in ('1', 'true', 'да') else '0', art, brand))
+        for _ymf in ('ym_placement_pct', 'ym_transfer_pct', 'ym_agency_fee', 'ym_boost_pct', 'ym_return_pct', 'ym_found'):
+            if _ymf in r:
+                conn.execute(f'UPDATE products SET {_ymf}=? WHERE article=? AND brand=?',
+                             (num(r.get(_ymf)), art, brand))
+        for field in ('dimension_review', 'dimension_context'):
+            if field in r:
+                value = r[field] if isinstance(r[field], dict) else {}
+                conn.execute(f'UPDATE products SET {field}=? WHERE article=? AND brand=?',
+                             (json.dumps(value, ensure_ascii=False), art, brand))
+        for field in ROW_ECO_OVERRIDES:
+            if field in r:
+                value = r[field]
+                value = None if value is None or str(value).strip() == '' else max(0, num(value))
+                conn.execute(f'UPDATE products SET {field}=? WHERE article=? AND brand=?', (value, art, brand))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
@@ -864,23 +1075,60 @@ def _calc_all(rows, st):
     except Exception:
         return seq(), False
 
-_ECO_FIELDS = ('price', 'eff_price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category',
+_ECO_FIELDS = ('name', 'category_type', 'dimension_context', 'price', 'eff_price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category', 'ym_placement_pct', 'ym_return_pct',
                'multiplicity', 'ozon_commission', 'ozon_logistics', 'ozon_realfbs_delivery',
-               'ozon_failed_cost', 'no_buy_pct', 'fixed_cost')
+               'ozon_failed_cost', 'no_buy_pct', 'fixed_cost', 'ym_transfer_pct', 'ym_agency_fee',
+               'ym_boost_pct', 'ym_found') + tuple(ROW_ECO_OVERRIDES)
 
 def _eco_hash(row, st):
     import hashlib
     payload = [row.get(k) for k in _ECO_FIELDS]
-    raw = json.dumps([payload, st], sort_keys=True, ensure_ascii=False, default=str)
+    raw = json.dumps(['expense-fields-v1', payload, st], sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+def whatif_catalog(conn, settings, scenario_settings, overrides=None, scenario_inputs=None):
+    """Read-only comparison. Never replaces eco_results or product inputs."""
+    by_cat = {}
+    base_total = scenario_total = 0.0
+    included = skipped = 0
+    inputs = {_norm_pair(r.get('article'), r.get('brand')): r for r in (scenario_inputs or [])}
+    for source in conn.execute('SELECT * FROM products ORDER BY rowid'):
+        row = dict(source)
+        if str(row.get('excluded', '0')).lower() in ('1', 'true', 'да'): continue
+        context = json.loads(row.get('dimension_context') or '{}')
+        if context.get('blocked') or context.get('modelReviewRequired') or context.get('noBuyInconsistent') or context.get('missingTariffBlocked'):
+            skipped += 1; continue
+        scope = str(settings.get('mp_scope', 'OZON')).upper()
+        if scope in ('YM', 'ALL') and not num(row.get('ym_found', 1)):
+            skipped += 1; continue
+        scenario_row = dict(row)
+        patch = inputs.get(_norm_pair(row['article'], row['brand']), {})
+        for field in ('no_buy_pct', 'ym_return_pct', 'price', 'eff_price', 'sales'):
+            if field in patch: scenario_row[field] = patch[field]
+        rate_field = 'ym_return_pct' if scope in ('YM', 'ALL') else 'no_buy_pct'
+        if num(row.get(rate_field)) >= 100 or num(scenario_row.get(rate_field)) >= 100:
+            skipped += 1; continue
+        base = calc_row(row, settings)
+        scen = calc_row(scenario_row, {**scenario_settings, 'scenario': overrides or {}})
+        category = str(row.get('category') or '—')
+        bucket = by_cat.setdefault(category, {'base': 0.0, 'scen': 0.0})
+        base_total += base['profit']; scenario_total += scen['profit']
+        bucket['base'] += base['profit']; bucket['scen'] += scen['profit']
+        included += 1
+    return {'base': rnd(base_total), 'scen': rnd(scenario_total), 'delta': rnd(scenario_total - base_total),
+            'pct': (scenario_total - base_total) / abs(base_total) * 100 if base_total else None,
+            'included': included, 'skipped': skipped, 'byCat': by_cat}
 
 def recalc_catalog(conn, st, force=False):
     """Инкрементальный пересчёт (v12.9.119): строка пересчитывается только
        если изменились её расчётные входы или настройки экономики (хэш в
        eco_results.inputs_hash). force=True — полный пересчёт как раньше.
        Итоги ответа считаются по всей таблице результатов, семантика та же."""
-    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost,excluded FROM products').fetchall()]
+    rows = [dict(r) for r in conn.execute('SELECT * FROM products').fetchall()]
     rows = [r for r in rows if str(r.get('excluded', '0')).lower() not in ('1', 'true', 'да')]  # как пайплайн браузера
+    if str(st.get('mp_scope') or '').upper() in ('YM', 'ALL'):
+        # браузер: нет совместимого тарифа ЯМ — экономика строки не считается
+        rows = [r for r in rows if num(r.get('ym_found', 1)) > 0]
     old = {(r['article'], r['brand']): r['inputs_hash'] for r in
            conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
     todo, hashes = [], {}
@@ -889,13 +1137,13 @@ def recalc_catalog(conn, st, force=False):
         hashes[(row['article'], row['brand'])] = h
         if force or old.get((row['article'], row['brand'])) != h: todo.append(row)
     results, parallel = _calc_all(todo, st)
-    conn.executemany('''INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at,inputs_hash)
-        VALUES(?,?,?,?,?,?,?,?,datetime("now"),?)
+    conn.executemany('''INSERT INTO eco_results(article,brand,total,profit,margin,roi,break_even,target,computed_at,inputs_hash,fields_json)
+        VALUES(?,?,?,?,?,?,?,?,datetime("now"),?,?)
         ON CONFLICT(article,brand) DO UPDATE SET total=excluded.total, profit=excluded.profit,
           margin=excluded.margin, roi=excluded.roi, break_even=excluded.break_even,
-          target=excluded.target, computed_at=excluded.computed_at, inputs_hash=excluded.inputs_hash''',
+          target=excluded.target, computed_at=excluded.computed_at, inputs_hash=excluded.inputs_hash, fields_json=excluded.fields_json''',
         [(res['article'], row['brand'], res['total'], res['profit'], res['margin'],
-          res['roi'], res['break_even'], res['target'], hashes[(row['article'], row['brand'])])
+          res['roi'], res['break_even'], res['target'], hashes[(row['article'], row['brand'])], json.dumps(res.get('fields', {}), ensure_ascii=False))
          for row, res in zip(todo, results)])
     alive = set(hashes)
     for key in old:
@@ -1064,7 +1312,118 @@ def import_donors(conn, rows, source):
 def _dims_of(r):
     return (num(r['length']), num(r['width']), num(r['height']), num(r['weight']))
 
-def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto'):
+def _dimension_candidate_allowed(product, dims, policy):
+    """Numeric/category checks used by AnomalyDetector for a proposed tuple.
+    Review and import blocks are supplied separately by the client snapshot.
+    """
+    l, w, h, weight = dims
+    if not all(math.isfinite(x) and x > 0 for x in dims): return False
+    key = lambda x: re.sub(r'\s+', ' ', str(x or '').strip().lower().replace('ё', 'е'))
+    limit = next((x for x in policy.get('limits', []) if key(x.get('category')) == key(product.get('category'))),
+                 {'maxW': 400, 'maxL': 300, 'maxVol': 1000})
+    computed = l * w * h / 1000
+    raw_net = product.get('net_weight')
+    if isinstance(raw_net, bool): return False
+    if raw_net is not None and raw_net != '':
+        if isinstance(raw_net, (int, float)):
+            if not math.isfinite(raw_net): return False
+        elif not re.fullmatch(r'[+-]?(?:(?:\d{1,3}(?:[\s\u00a0\u202f]\d{3})+)|\d+)(?:[.,]\d+)?|[+-]?[.,]\d+', str(raw_net).strip()):
+            return False
+    net = num(raw_net)
+    if net < 0 or net > weight + max(1e-9, weight * 1e-9): return False
+    if not math.isfinite(computed) or weight / computed > 30: return False
+    if weight > num(limit.get('maxW')) or max(l, w, h) > num(limit.get('maxL')): return False
+    context = json.loads(product.get('dimension_context') or '{}')
+    explicit = policy.get('explicit_volume', {}).get(_norm_pair(product['article'], product['brand']), context.get('explicitVolume', False))
+    sources = context.get('sources') or {}
+    if (weight, l, w, h) == (0.5, 15, 10, 5) and sources.get('Прайс-лист') and not any(sources.get(k) for k in ('weight', 'Вес, кг', 'Вес в упаковке, кг')):
+        return False
+    vol = num(product.get('volume')) if explicit else computed
+    if vol < 0 or vol > num(limit.get('maxVol')): return False
+    if explicit and vol > 0 and max(vol / computed, computed / vol) > 4: return False
+    return True
+
+def match_condition(row, field, op, value):
+    v = row.get(field)
+    if op == 'empty': return v is None or v == ''
+    t = str(value if value is not None else '').lower().strip()
+    if not t or v is None or v == '': return False
+    text = str(v).lower()
+    if op == 'contains': return t in text
+    if op == '!contains': return t not in text
+    if op == 'eq': return text == t
+    if op == 'ne': return text != t
+    if op == 'startsWith': return text.startswith(t)
+    if op == 'gt': return num(v) > num(t)
+    if op == 'lt': return num(v) < num(t)
+    if op == 'regex':
+        try: return bool(re.search(t, str(v or ''), re.I))
+        except re.error: return False
+    return False
+
+
+def enrich_name_categories(conn, rows, context, enabled=True):
+    context = dict(context or {})
+    context['categories'] = sorted(context.get('categories', []), key=lambda c: num(c.get('priority')))
+    conn.execute('CREATE TABLE IF NOT EXISTS name_category_reference(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
+    conn.execute('INSERT OR REPLACE INTO name_category_reference VALUES(1,?)', (json.dumps(context,ensure_ascii=False),))
+    result = []
+    for row in rows:
+        output = apply_name_category(row, context, enabled, match_condition)
+        fields = {k: output[k] for k in ('category',) + NAME_CATEGORY_MARKERS if k in output}
+        removed = [k for k in NAME_CATEGORY_MARKERS if k not in output]
+        conn.execute('UPDATE products SET category=? WHERE article=? AND brand=?',
+                     (output.get('category',''), row.get('article',''), row.get('brand','')))
+        result.append({'article':row.get('article'), 'brand':row.get('brand',''), 'fields':fields, 'removed':removed})
+    conn.commit()
+    return {'rows':result}
+
+def enrich_hvc(conn, reference=None, mode='auto', cat_mode='artbrand', columns=None, policy=None):
+    """HVC snapshot route; keeps ordered graph and dimension evidence intact."""
+    conn.execute('CREATE TABLE IF NOT EXISTS hvc_reference(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
+    if reference is not None:
+        conn.execute('INSERT OR REPLACE INTO hvc_reference VALUES(1,?)', (json.dumps(reference, ensure_ascii=False),))
+    stored = conn.execute('SELECT data FROM hvc_reference WHERE id=1').fetchone()
+    if stored is None: raise ValueError('Сначала синхронизируйте справочник HVC')
+    reference = json.loads(stored[0])
+    policy = policy or {}
+    rows = []
+    for row in conn.execute('SELECT * FROM products ORDER BY rowid'):
+        p = dict(row)
+        context = json.loads(p.get('dimension_context') or '{}')
+        p['_sources'] = context.get('sources') or {}
+        p['oe_norm'] = context.get('oeNorm') or ''
+        p['dimensionAnomalyBlocked'] = bool(context.get('blocked'))
+        review = json.loads(p.get('dimension_review') or '{}')
+        if review: p['_dimensionOeReview'] = review
+        rows.append(p)
+    def allowed(p, t):
+        candidate = dict(p)
+        context = json.loads(candidate.get('dimension_context') or '{}')
+        context['sources'] = p.get('_sources') or {}
+        candidate['dimension_context'] = json.dumps(context, ensure_ascii=False)
+        return _dimension_candidate_allowed(candidate, tuple(num(t[k]) for k in ('length','width','height','weight')), policy)
+    enriched = hvc_enrich_rows(rows, reference, mode, cat_mode, columns,
+        time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), num, rnd, allowed)
+    fields = ('name','applicability','category','tnved','weight','length','width','height',
+              'multiplicity','image_url','barcode','analog_list','group_articles')
+    output = []
+    for before, after in zip(rows, enriched):
+        patch = {k: after[k] for k in fields if k in after and after[k] != before.get(k)}
+        # Provenance is part of the result, not a client-side reconstruction.
+        context = json.loads(after.get('dimension_context') or '{}')
+        context['sources'] = after.get('_sources') or {}
+        patch['dimension_context'] = json.dumps(context, ensure_ascii=False)
+        patch['dimension_review'] = json.dumps(after.get('_dimensionOeReview') or {}, ensure_ascii=False)
+        conn.execute('UPDATE products SET ' + ','.join(k+'=?' for k in patch) + ' WHERE article=? AND brand=?',
+                     (*patch.values(), after['article'], after['brand']))
+        output.append({**{k: after.get(k) for k in fields}, 'article': after['article'], 'brand': after['brand'],
+            '_sources': after.get('_sources') or {}, '_dimensionOeReview': after.get('_dimensionOeReview'),
+            'groupSize': after.get('groupSize')})
+    conn.commit()
+    return {'rows': output, 'processed': len(rows)}
+
+def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto', enrich_cols=None, dimension_policy=None, oe_registry=None):
     """Полное обогащение по правилам приложения (HVC):
        - доноры: та же пара Артикул+Бренд (реестр donors) и транзитивная OE-группа;
        - категория/ТН ВЭД: по умолчанию только Артикул+Бренд (cat_mode='artbrand');
@@ -1073,8 +1432,11 @@ def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto'):
        - габариты: цельный комплект той же пары, иначе меньший комплект OE-группы;
          совместимость с уже заполненными обязательна, заполняются только пустые;
        - аналоги: артикулы OE-группы (как enrich_oe). Заполненные поля не трогаем."""
+    dimension_policy = dimension_policy or {}
+    reviews = []
+    enabled = lambda field: enrich_cols is None or bool(enrich_cols.get(field, True))
     prods = [dict(r) for r in conn.execute(
-        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list,group_articles,barcode,image_url,multiplicity FROM products')]
+        'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,analog_list,group_articles,barcode,image_url,multiplicity,net_weight,volume,dimension_review,dimension_context FROM products')]
     donors = [dict(r) for r in conn.execute(
         'SELECT article,brand,name,category,tnved,applicability,warranty,country,weight,length,width,height,oe_numbers,barcode,image_url,multiplicity FROM donors')]
     # v12.9.145: ключи — как в браузере (normArticle): «F 100» и «F-100» одна пара.
@@ -1089,22 +1451,27 @@ def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto'):
     quarantined = sum(1 for r in prods if _norm_pair(r['article'], r['brand']) in unsafe_norms)
     # OE-граф: продукты и доноры в одних группах (узел = ('p'|'d', article, brand, idx))
     nodes = [('p', i) for i in range(len(prods))] + [('d', i) for i in range(len(donors))]
-    parent = {n: n for n in nodes}
-    def find(x):
-        while parent[x] != x: parent[x] = parent[parent[x]]; x = parent[x]
-        return x
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb: parent[rb] = ra
     oe_map = {}
     for kind, i in nodes:
         r = prods[i] if kind == 'p' else donors[i]
         if kind == 'p' and _norm_pair(r['article'], r['brand']) in unsafe_norms: continue
         for oe in _oe_codes(r['oe_numbers']): oe_map.setdefault(oe, []).append((kind, i))
-    for lst in oe_map.values():
-        for other in lst[1:]: union(lst[0], other)
+    # HVC._oeSetOf uses direct OE holders, not transitive connected components.
     groups = {}
-    for n in nodes: groups.setdefault(find(n), []).append(n)
+    for i, product in enumerate(prods):
+        members = [('p', i)]
+        seen = set(members)
+        for oe in _oe_codes(product['oe_numbers']):
+            for node in oe_map.get(oe, []):
+                if node not in seen:
+                    seen.add(node); members.append(node)
+        groups[i] = members
+    if oe_registry is not None:
+        conn.execute('DELETE FROM oe_registry')
+        conn.executemany('INSERT OR REPLACE INTO oe_registry(oe,data) VALUES(?,?)',
+                         [(str(r['oe']), json.dumps(r, ensure_ascii=False)) for r in oe_registry if str(r.get('oe', '')).strip()])
+    registry = {r['oe']: json.loads(r['data']) for r in conn.execute('SELECT oe,data FROM oe_registry ORDER BY rowid')}
+
     filled = {'name': 0, 'applicability': 0, 'category': 0, 'tnved': 0, 'warranty': 0, 'country': 0, 'dims': 0, 'analog_list': 0, 'group_articles': 0, 'barcode': 0, 'image_url': 0, 'multiplicity': 0}
     conflicts = {'category': 0, 'tnved': 0}
     def unanimous(values):
@@ -1113,32 +1480,33 @@ def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto'):
         return (vals[0] if len(uniq) == 1 else None), len(uniq) > 1
     def frequent(values):
         vals = [str(v).strip() for v in values if str(v or '').strip()]
-        return max(set(vals), key=vals.count) if vals else ''
-    for members in groups.values():
+        return vals[0] if vals else ''
+    for target_index, members in groups.items():
         group_prods = [prods[i] for kind, i in members if kind == 'p']
         if not group_prods: continue
         group_donors = [donors[i] for kind, i in members if kind == 'd']
-        for p in group_prods:
+        for p in [prods[target_index]]:
             if _norm_pair(p['article'], p['brand']) in unsafe_norms: continue  # карантин
             pair = donors_by_key.get(_norm_pair(p['article'], p['brand']), [])
             updates = {}
-            if not str(p['name'] or '').strip():
-                v = frequent([d['name'] for d in pair]) or frequent(
-                    [d['name'] for d in group_donors] + [g['name'] for g in group_prods])
-                if v: updates['name'] = v; filled['name'] += 1
-            if not str(p['applicability'] or '').strip():
-                v = frequent([d['applicability'] for d in pair]) or frequent(
-                    [d['applicability'] for d in group_donors] + [g['applicability'] for g in group_prods])
-                if v: updates['applicability'] = v; filled['applicability'] += 1
+            # artbrand never falls back to an OE donor. Auto runs OE first.
+            oe_text = group_donors if enrich_mode in ('oe', 'auto') else []
+            rep = next((registry[oe] for oe in _oe_codes(p['oe_numbers']) if oe in registry), {})
+            pair_text = pair if enrich_mode in ('artbrand', 'auto') else []
+            for field in ('name', 'applicability'):
+                if enabled(field) and not str(p[field] or '').strip():
+                    v = (str(rep.get(field) or '').strip() if enrich_mode in ('oe', 'auto') else '') or frequent([d[field] for d in oe_text]) or frequent([d[field] for d in pair_text])
+                    if v: updates[field] = v; filled[field] += 1
             for field in ('category', 'tnved'):
+                if not enabled(field): continue
                 _placeholders = {'без категории', 'разное', 'прочее', 'не определено'}
                 _cur = str(p[field] or '').strip()
                 if _cur and not (field == 'category' and _cur.lower() in _placeholders): continue
-                _vals = [d[field] for d in pair if not (field == 'category' and str(d[field] or '').strip().lower() in _placeholders)]
+                _vals = [d[field] for d in (pair if cat_mode in ('artbrand', 'auto') else []) if not (field == 'category' and str(d[field] or '').strip().lower() in _placeholders)]
                 v, conf = unanimous(_vals)
                 if conf: conflicts[field] += 1
                 if not v and cat_mode in ('oe', 'auto'):
-                    _pool = [d[field] for d in group_donors] + [g[field] for g in group_prods if g is not p]
+                    _pool = [rep.get(field)] + [d[field] for d in group_donors]
                     if field == 'category': _pool = [x for x in _pool if str(x or '').strip().lower() not in _placeholders]
                     v, conf2 = unanimous(_pool)
                     if conf2: conflicts[field] += 1
@@ -1149,26 +1517,36 @@ def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto'):
                 v, conf = unanimous([d[field] for d in pair])
                 if v: updates[field] = v; filled[field] = filled.get(field, 0) + 1
             cur = _dims_of(p)
-            if not all(v > 0 for v in cur):
+            context = json.loads(p.get('dimension_context') or '{}')
+            existing_review = json.loads(p.get('dimension_review') or '{}')
+            blocked = bool(existing_review or context.get('blocked')) or _norm_pair(p['article'], p['brand']) in dimension_policy.get('blocked', [])
+            if not blocked and any(enabled(f) and not cur[i] > 0 for i, f in enumerate(('length', 'width', 'height', 'weight'))):
                 cands = []
                 _oe_pool = (group_donors + group_prods) if enrich_mode in ('oe', 'auto') else []
                 for d in pair + _oe_pool:
                     t = _dims_of(d)
                     if all(v > 0 for v in t): cands.append(t)
-                # та же пара — приоритет; далее меньший комплект мерой браузера:
+                # Minimum complete tuple, using the browser's ordering:
                 # (объём л, наибольшая сторона, вес, сумма сторон)
                 pair_cands = [_dims_of(d) for d in pair if all(v > 0 for v in _dims_of(d))]
-                _measure = lambda t: (round(t[0] * t[1] * t[2] / 1000, 6), max(t[0], t[1], t[2]), t[3], t[0] + t[1] + t[2])
-                pool = pair_cands + sorted(cands, key=_measure)
+                _measure = lambda t: (rnd(t[0] * t[1] * t[2] / 1000, 6), rnd(max(t[:3]), 4), rnd(t[3], 6), rnd(sum(t[:3]), 4))
+                pool = sorted(pair_cands + cands, key=_measure)
                 for t in pool:
-                    if all(not (c > 0) or c == tv for c, tv in zip(cur, t)):  # совместимость с заполненным
+                    if _dimension_candidate_allowed(p, t, dimension_policy) and all(not (c > 0) or c == tv for c, tv in zip(cur, t)):  # совместимость с заполненным
                         for i, f in enumerate(('length', 'width', 'height', 'weight')):
-                            if not cur[i] > 0: updates[f] = t[i]
+                            if enabled(f) and not cur[i] > 0: updates[f] = t[i]
                         filled['dims'] += 1
+                        before = dict(zip(('length', 'width', 'height', 'weight'), cur))
+                        after = {f: updates.get(f, v) for f, v in before.items()}
+                        reviews.append({'article': p['article'], 'brand': p['brand'],
+                            'before': before, 'after': after,
+                            'source': 'Каталог V: комплект ОВХ · сверьте упаковку', 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
+                        conn.execute('UPDATE products SET dimension_review=? WHERE article=? AND brand=?',
+                                     (json.dumps(reviews[-1], ensure_ascii=False), p['article'], p['brand']))
                         break
             # штрихкод/фото/кратность — только та же пара донора (как HVC.enrichOne)
             if pair:
-                if not str(p.get('barcode') or '').strip():
+                if enabled('barcode') and not str(p.get('barcode') or '').strip():
                     _bc = next((str(d['barcode']).strip() for d in pair if str(d.get('barcode') or '').strip()), '')
                     if _bc: updates['barcode'] = _bc; filled['barcode'] = filled.get('barcode', 0) + 1
                 if not str(p.get('image_url') or '').strip():
@@ -1177,23 +1555,42 @@ def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto'):
                 if not num(p.get('multiplicity')) > 0:
                     _mu = next((num(d['multiplicity']) for d in pair if num(d.get('multiplicity')) > 0), 0)
                     if _mu > 0: updates['multiplicity'] = _mu; filled['multiplicity'] = filled.get('multiplicity', 0) + 1
-            others = sorted({g['article'] for g in group_prods if g['article'] != p['article']})
-            if others:
-                cur_set = {x.strip() for x in str(p['analog_list'] or '').split(',') if x.strip()}
-                merged = sorted(cur_set | set(others))
-                if merged != sorted(cur_set):
-                    updates['analog_list'] = ', '.join(merged); filled['analog_list'] += 1
-            if not str(p.get('group_articles') or '').strip():
-                grp = sorted({g['article'] for g in group_prods if str(g['article'] or '').strip()})
-                if len(grp) > 1:
-                    updates['group_articles'] = ' / '.join(grp); filled['group_articles'] += 1
+            # Lists follow the direct holder order; HVC caps analogs at 40.
+            active = (enrich_mode in ('oe', 'auto') and bool(_oe_codes(p['oe_numbers']))) or (enrich_mode in ('artbrand', 'auto') and bool(pair))
+            if active:
+                seen_articles = {_norm_key_part(p['article'])}
+                analogs = []
+                for donor in group_donors:
+                    normalized = _norm_key_part(donor['article'])
+                    if normalized and normalized not in seen_articles:
+                        seen_articles.add(normalized)
+                        if len(analogs) < 40: analogs.append(donor['article'])
+                if enabled('analog_list'):
+                    value = ', '.join(analogs)
+                    if value != str(p['analog_list'] or ''):
+                        updates['analog_list'] = value; filled['analog_list'] += 1
+                if enabled('group_articles'):
+                    group_articles = [p['article']]
+                    group_seen = {_norm_key_part(p['article'])}
+                    for oe in _oe_codes(p['oe_numbers']):
+                        holders = oe_map.get(oe, [])
+                        if len(holders) > 2000: continue
+                        for kind, index in holders:
+                            row = prods[index] if kind == 'p' else donors[index]
+                            normalized = _norm_key_part(row['article'])
+                            if normalized and normalized not in group_seen and len(group_articles) < 500:
+                                group_seen.add(normalized); group_articles.append(row['article'])
+                    value = dimension_policy.get('group_separator', ' / ').join(group_articles)
+                    if value != str(p.get('group_articles') or ''):
+                        updates['group_articles'] = value; filled['group_articles'] += 1
+            updates = {k: v for k, v in updates.items() if enabled(k)}
             if updates:
                 sets = ', '.join(f'{k}=?' for k in updates)
                 conn.execute(f'UPDATE products SET {sets} WHERE article=? AND brand=?',
                              (*updates.values(), p['article'], p['brand']))
     conn.commit()
     log_api(conn, 'enrichFull', 'sqlite', 'ok', f'cat_mode={cat_mode}, заполнено {filled}, конфликты {conflicts}')
-    return {'cat_mode': cat_mode, 'filled': filled, 'conflicts': conflicts, 'donors': len(donors), 'quarantined': quarantined}
+    return {'cat_mode': cat_mode, 'filled': filled, 'conflicts': conflicts, 'donors': len(donors), 'quarantined': quarantined, 'dimension_reviews': reviews}
 
 # ---------------- обобщённый разбор файлов (п.5 аудита, v12.9.111) ----------------
 def _raw_table(filename, data):
@@ -2007,14 +2404,14 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
-            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability,warranty,country,group_articles,cross_numbers,barcode,category_type,ozon_category,ozon_type,description FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+            rows = conn.execute('SELECT article,brand,name,price,cost,stock,sales,weight,length,width,height,volume,oe_numbers,analog_list,category,tnved,applicability,warranty,country,group_articles,cross_numbers,barcode,category_type,ozon_category,ozon_type,description,dimension_review,dimension_context FROM products ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
             total = conn.execute('SELECT COUNT(*) c FROM products').fetchone()['c']
             return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
         if self.path.startswith('/catalog/results'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
-            rows = conn.execute('SELECT article,brand,total,profit,margin,roi,break_even,target FROM eco_results ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+            rows = conn.execute('SELECT article,brand,total,profit,margin,roi,break_even,target,fields_json FROM eco_results ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
             total = conn.execute('SELECT COUNT(*) c FROM eco_results').fetchone()['c']
             return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
         if self.path == '/outbox':
@@ -2071,15 +2468,24 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/donors/import':
                 n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
                 return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/catalog/enrich-name-category':
+                return self._send(200, {'ok': True, **enrich_name_categories(conn,
+                    body.get('rows') or [], body.get('context') or {}, body.get('enabled') is not False)})
+            if self.path == '/catalog/enrich-hvc':
+                return self._send(200, {'ok': True, **enrich_hvc(conn, body.get('reference'),
+                    body.get('mode') or 'auto', body.get('cat_mode') or 'artbrand', body.get('columns'), body.get('policy'))})
             if self.path == '/catalog/enrich-full':
-                return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand', body.get('enrich_mode') or 'auto')})
+                return self._send(200, {'ok': True, **enrich_full(conn, body.get('cat_mode') or 'artbrand', body.get('enrich_mode') or 'auto', body.get('enrich_cols'), body.get('dimension_policy'), body.get('oe_registry'))})
+            if self.path == '/catalog/whatif':
+                return self._send(200, {'ok': True, **whatif_catalog(conn, body.get('settings') or {},
+                    body.get('scenario_settings') or {}, body.get('overrides'), body.get('scenario_inputs'))})
             if self.path == '/catalog/recalc':
                 return self._send(200, {'ok': True, **recalc_catalog(conn, body.get('settings') or {}, force=bool(body.get('force')))})
             if self.path.startswith('/catalog/results'):
                 from urllib.parse import urlparse, parse_qs
                 qs = parse_qs(urlparse(self.path).query)
                 off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
-                rows = conn.execute('SELECT article,brand,total,profit,margin,roi,break_even,target FROM eco_results ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
+                rows = conn.execute('SELECT article,brand,total,profit,margin,roi,break_even,target,fields_json FROM eco_results ORDER BY article,brand LIMIT ? OFFSET ?', (lim, off)).fetchall()
                 total = conn.execute('SELECT COUNT(*) c FROM eco_results').fetchone()['c']
                 return self._send(200, {'ok': True, 'total': total, 'rows': [dict(r) for r in rows]})
             if self.path == '/snapshots':
