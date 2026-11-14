@@ -1,0 +1,13 @@
+const fs=require('fs'), vm=require('vm');
+const html=fs.readFileSync(__dirname+'/../index.html','utf8');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));
+const extract=name=>html.match(new RegExp('const '+name+' = \\{[\\s\\S]*?\\n\\};\\n'))[0];
+const condition=html.match(/function matchCond\(o, field, op, val\) \{[\s\S]*?\n\}/)[0];
+const context={S:{cats:input.categories||[],rules:input.rules||[]},num:v=>Number(v)||0};
+vm.createContext(context);
+vm.runInContext(condition+'\n'+extract('OzonAuto')+'\n'+extract('NameCategory')+'\nthis.N=NameCategory;this.O=OzonAuto;',context);
+context.O._index=()=>({heads:new Set(input.heads||[])});
+context.N.hasExplicitCategorySource=p=>!!p._categoryExplicitSource;
+const prepared=context.N.prepare();
+for(const row of input.rows) context.N.apply(row,prepared,input.enabled!==false);
+process.stdout.write(JSON.stringify({version:prepared.version,rows:input.rows}));

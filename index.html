@@ -7154,6 +7154,7 @@ html { -webkit-text-size-adjust: 100%; }
     <button type="button" class="btn gh" id="btnSettingsSnapshot" title="Скачать снимок ключевых настроек (без секретов) в формате проекта arena-project — для сверки и переноса между проектами"><i class="fa-solid fa-camera"></i> Снимок настроек</button>
     <button type="button" class="btn gh" id="btnReviewExport" title="Сформировать очередь ручной проверки (конфликты габаритов по OE, висячие кроссы, похожие артикулы) и скачать CSV: заполните колонку «Решение» и загрузите обратно соседней кнопкой"><i class="fa-solid fa-list-check"></i> Очередь проверки ↓</button>
     <button type="button" class="btn gh" id="btnPyToken" title="Задать токен доступа к локальному Python-движку (файл engine/engine_data/token.txt)"><i class="fa-solid fa-key"></i> Токен Python</button>
+    <button type="button" class="btn gh" id="btnProcessingMode" aria-pressed="false" title="Переключить расчёты, импорт и экспорт между браузером и серверным движком SQLite">Обработка: браузер</button>
     <span class="hint" id="pyEngineStatus" title="Статус локального Python-движка">Python: не проверен</span>
     <button type="button" class="btn gh" id="btnReviewImport" title="Загрузить CSV очереди проверки с заполненными решениями: принятые пары запомнятся и применятся, отклонённые больше не предложатся"><i class="fa-solid fa-file-import"></i> Решения проверки ↑</button>
     <button type="button" class="btn ok" id="btnExportOzon" style="font-weight:700" title="Если локальный движок запущен, выгрузку Ozon (46 колонок, выделенные строки или весь каталог) собирает он; если недоступен — рабочая выгрузка приложения, актуальный шаблон проверьте в кабинете"><i class="fa-solid fa-cloud-arrow-down"></i> Экспорт OZON</button>
@@ -13581,7 +13582,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.153-client+visible-sync';
+const APP_VERSION = '12.9.156-client+dual-processing';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19524,7 +19525,22 @@ function billableWeight(p, volumeL) {
 }
 
 /* v10.6 · Сценарий «что если»: клонирует строки, подменяет цену/продажи/ставки и считает Δ ЧП без мутации каталога. */
-function scenarioProfit(dPricePct, dSalesPct, boostPct, cofinPct) {
+async function scenarioProfit(dPricePct, dSalesPct, boostPct, cofinPct) {
+  if (typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql') {
+    await PyEngine.processingAvailable();
+    const stamp = JSON.stringify(S.rows), settingsStamp = JSON.stringify(S.settings);
+    await PyEngine._syncCatalog('app-price-sales-scenario');
+    const settings = PyEngine._settingsSnapshot();
+    const result = await PyEngine._fetch('/catalog/whatif', { method:'POST', timeout:600000,
+      body:JSON.stringify({ settings, scenario_settings:settings, overrides:{boostPct,cofinPct},
+        scenario_inputs:S.rows.map(p => ({ article:p.article, brand:p.brand || '',
+          price:num(p.effPrice || p.price) * (1 + num(dPricePct) / 100),
+          eff_price:num(p.effPrice || p.price) * (1 + num(dPricePct) / 100),
+          sales:Math.max(0, num(p.sales) * (1 + num(dSalesPct) / 100)) })) }) });
+    if (JSON.stringify(S.rows) !== stamp || JSON.stringify(S.settings) !== settingsStamp)
+      throw new Error('Данные изменились во время расчёта сценария. Повторите расчёт.');
+    return { ...result, marketplace:economicScope() };
+  }
   // Compare the same eligible SKU on both sides. A missing scenario is not zero profit.
   let base = 0, scen = 0, included = 0, skipped = 0;
   for (const p of S.rows) {
@@ -21417,6 +21433,9 @@ function runPipeline(full, options) {
     const enrichRules = (S.rules || []).filter(r => r.kind === 'enrich' && r.enabled);
     const nameAutoEnabled = S.settings.autoCategoryByName !== false;
     const nameCategoryContext = full && nameAutoEnabled ? NameCategory.prepare() : null;
+    const sqlEnrichment = typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql';
+    if (full && sqlEnrichment) await PyEngine.enrichNameCategories(nameCategoryContext, nameAutoEnabled, changedRows ? S.rows.filter(p => changedRows.has(p)) : S.rows);
+
     let econErr = 0, firstErr = '';
     try { MarkStatus.reset(); } catch (e) { }
     /* v12.9.46: чанк меньше — прогресс и отрисовка обновляются чаще; на 94k SKU
@@ -21432,6 +21451,8 @@ function runPipeline(full, options) {
        массивы не выделяются. S._econPending помечает каталог как
        «экономика не посчитана»; ensureEconomics() досчитывает её по требованию. */
     const skipEcon = options.skipEconomics === true;
+    const sqlEconomics = !skipEcon && typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql';
+    if (sqlEconomics) await PyEngine.processingAvailable();
     /* v12.9.94: если с прошлого полного расчёта не менялись ни каталог
        (catalogVersion), ни глобальные параметры экономики (fullRecalcStale),
        ни площадка/режим стандартных ОВХ — цифры по всем SKU уже актуальны,
@@ -21504,7 +21525,7 @@ function runPipeline(full, options) {
           p.policyReason = '';
           /* Сначала определяем категории, чтобы политики по категории видели актуальное значение. */
           if (full) {
-            NameCategory.apply(p, nameCategoryContext, nameAutoEnabled);
+            if (!sqlEnrichment) NameCategory.apply(p, nameCategoryContext, nameAutoEnabled);
             CategoryKindAuto.apply(p, nameCategoryContext, nameAutoEnabled);
             if (typeof OzonCat !== 'undefined') OzonAuto.applyPreferred(p);
           }
@@ -21567,7 +21588,7 @@ function runPipeline(full, options) {
           /* Обязательный барьер перед любыми производными полями.  Выполняется
              для каждого SKU при каждом полном и частичном запуске пайплайна. */
           if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p);
-          if (!skipEcon) {
+          if (!skipEcon && !sqlEconomics) {
             if (!econSkipFresh) {
               computeEconomics(p);
               p.economicsDataQuality = econQualityText(p);   /* v12.9.8: почему нули в прибыли */
@@ -21587,6 +21608,10 @@ function runPipeline(full, options) {
       if (typeof UCCancel !== 'undefined') UCCancel.check();
       await _pipelineYield();
       /* Пик памяти ограничен чанком: упаковка уже выполнена выше, до расчёта. */
+    }
+    if (sqlEconomics) {
+      const result = await PyEngine.recalcAndApply(prog);
+      if (result.unsupported) throw new Error('SQLite не поддерживает выбранную площадку: ' + result.unsupported);
     }
     if (prog) prog('группировка по OE-номерам…'); _step(80);
     if (!preserveView && !options.smallDelta && !options.skipGroups) { try { await rebuildGroups(); } catch (e) { console.error('[UC] OE-группы:', e); Toast.err('Ошибка группировки OE', String(e.message || e).slice(0, 160)); } }
@@ -21664,7 +21689,7 @@ async function ensureEconomics() {
        она досчитается браузером точечно при открытии строки/раздела.
        Движок недоступен или упал — прежний браузерный пайплайн. */
     try {
-      if (typeof PyEngine !== 'undefined' && await PyEngine.health()) {
+      if (typeof PyEngine !== 'undefined' && await PyEngine.processingAvailable()) {
         const r = await PyEngine.recalcAndApply(null);
         if (r && r.applied) {
           S._econPending = false; persistEconPending();
@@ -21678,7 +21703,8 @@ async function ensureEconomics() {
           return true;
         }
       }
-    } catch (e) { console.warn('[UC] ensureEconomics via engine:', e); }
+    } catch (e) { if (PyEngine.processingMode() === 'sql') throw e; console.warn('[UC] ensureEconomics via engine:', e); }
+    if (PyEngine.processingMode() === 'sql') throw new Error('SQLite не вернул применимый расчёт. Браузерный пересчёт не запускался.');
     await runPipeline(true); return true;
   })();
   try { return await _econEnsureJob; } finally { _econEnsureJob = null; }
@@ -21691,6 +21717,7 @@ async function ensureEconomics() {
 async function ensureEconomicsFor(rows) {
   if (!S._econPending || !S.rows.length) return false;
   if (!Array.isArray(rows) || !rows.length) return false;
+  if (typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql') return ensureEconomics();
   if (rows.length >= S.rows.length) return ensureEconomics();
   if (_econEnsureJob) { await _econEnsureJob; if (!S._econPending) return true; }
   await runPipeline(true, {
@@ -25219,7 +25246,7 @@ const CompetitorIntel = {
       const f = inp.files[0]; if (!f) return;
       await withProgress('Импорт цен конкурентов', f.name, async () => {
         let rows = null;
-        if (typeof PyEngine !== 'undefined' && await PyEngine.health()) {
+        if (typeof PyEngine !== 'undefined' && await PyEngine.processingAvailable()) {
           try { rows = await PyEngine.parseFile(f); } catch (e) { rows = null; /* откат на браузерный разбор */ }
         }
         if (!rows) { /* движок не разобрал — прежний браузерный путь */
@@ -26221,23 +26248,25 @@ const UI = {
       Toast.info('Показ включён', 'исключённые SKU видны в таблице со статусом «Исключён»');
     };
     $('#btnImport').onclick = async () => { // v12.9.121: движок встроен в существующую кнопку
-      if (await PyEngine.health()) PyEngine.importFile(); else Import.pick();
+      if (await PyEngine.processingAvailable()) PyEngine.importFile(); else Import.pick();
     };
     const _bdi = $('#btnDiskImport'); if (_bdi) _bdi.onclick = () => DiskImport.pick();
     const _bss = $('#btnSettingsSnapshot'); if (_bss) _bss.onclick = () => SettingsSnapshot.download();
     const _bre = $('#btnReviewExport'); if (_bre) _bre.onclick = () => ReviewQueue.exportCsv();
     const _bpc = $('#btnPyCheck'); if (_bpc) _bpc.onclick = () => PyEngine.checkEconomics();
-    const _bpr = $('#btnPyRecalc'); if (_bpr) _bpr.onclick = () => PyEngine.recalcCatalog();
-    const _bpi = $('#btnPyImport'); if (_bpi) _bpi.onclick = () => PyEngine.importFile();
-    const _bpe = $('#btnPyEnrich'); if (_bpe) _bpe.onclick = () => PyEngine.enrichOe();
+    const _bpr = $('#btnPyRecalc'); if (_bpr) _bpr.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.recalcCatalog() : runPipeline(true);
+    const _bpi = $('#btnPyImport'); if (_bpi) _bpi.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.importFile() : Import.pick();
+    const _bpe = $('#btnPyEnrich'); if (_bpe) _bpe.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.enrichFull('oe') : PyEngine.enrichBrowser('oe');
     const _bpd = $('#btnPyDashboard'); if (_bpd) _bpd.onclick = () => PyEngine.dashboard();
-    const _bpx = $('#btnPyExport'); if (_bpx) _bpx.onclick = () => PyEngine.exportCatalog();
-    const _bpf = $('#btnPyEnrichFull'); if (_bpf) _bpf.onclick = () => PyEngine.enrichFull();
+    const _bpx = $('#btnPyExport'); if (_bpx) _bpx.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.exportCatalog() : Exp.open();
+    const _bpf = $('#btnPyEnrichFull'); if (_bpf) _bpf.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.enrichFull() : PyEngine.enrichBrowser();
     const _bph = $('#btnPyHistory'); if (_bph) _bph.onclick = () => PyEngine.priceHistory();
     const _bps = $('#btnPySnapshot'); if (_bps) _bps.onclick = () => PyEngine.snapshot();
     const _bpa = $('#btnPyAnalogs'); if (_bpa) _bpa.onclick = () => PyEngine.analogHints();
     const _bsd = $('#btnPySnapshotDiff'); if (_bsd) _bsd.onclick = () => PyEngine.snapshotDiff();
-    const _bpo = $('#btnPyOzon'); if (_bpo) _bpo.onclick = () => PyEngine.exportOzon();
+    const _bpo = $('#btnPyOzon'); if (_bpo) _bpo.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.exportOzon() : OzonExport.open();
+    PyEngine.renderProcessingMode();
+    const _mode = $('#btnProcessingMode'); if (_mode) _mode.onclick = () => PyEngine.toggleProcessingMode();
     const _bpt = $('#btnPyToken'); if (_bpt) _bpt.onclick = () => PyEngine.askToken();
     PyEngine.refreshStatus();
     const _bri = $('#btnReviewImport'); if (_bri) _bri.onclick = () => ReviewQueue.pickDecisions();
@@ -26572,6 +26601,40 @@ const SettingsSnapshot = {
    Python+SQLite) пересчитывает экономику своим кодом — приложение сверяет.
    Движок недоступен — приложение работает как раньше (встроенный расчёт). */
 const PyEngine = {
+  processingMode() { return lsGet('uc.processingMode') === 'sql' ? 'sql' : 'browser'; },
+  renderProcessingMode() {
+    const el = $('#btnProcessingMode'); if (!el) return;
+    const sql = this.processingMode() === 'sql';
+    el.textContent = 'Обработка: ' + (sql ? 'SQL' : 'браузер');
+    el.setAttribute('aria-pressed', String(sql));
+    el.title = sql ? 'Серверный движок Python + SQLite. Нажмите для обработки браузером.' : 'Встроенная обработка браузером. Нажмите для SQL-движка.';
+  },
+  async toggleProcessingMode() {
+    if (typeof _econEnsureJob !== 'undefined' && _econEnsureJob) {
+      Toast.warn('Дождитесь расчёта', 'Режим можно переключить после завершения текущей операции.'); return;
+    }
+    const next = this.processingMode() === 'sql' ? 'browser' : 'sql';
+    if (next === 'sql' && (!await this.health() || await this.verifyAuth() !== 'ok')) {
+      Toast.warn('SQL-движок недоступен', 'Запустите движок и проверьте токен. Режим остаётся браузерным.'); return;
+    }
+    lsSet('uc.processingMode', next);
+    S._econPending = true; persistEconPending();
+    this.renderProcessingMode();
+    Toast.info('Режим обработки изменён', next === 'sql' ? 'Расчёт и поддерживаемые операции — серверный движок Python + SQLite.' : 'Расчёт, импорт и экспорт — браузер.');
+  },
+  async enrichBrowser(mode) {
+    return withProgress('Обогащение в браузере', 'Каталог V', async prog => {
+      await HVC.enrichAsync(S.rows, prog, mode);
+      bumpVersion();
+      await runPipeline(true);
+      try { Table.paint(); } catch (e) { }
+    });
+  },
+  async processingAvailable() {
+    if (this.processingMode() !== 'sql') return false;
+    if (!await this.health()) throw new Error('Выбран SQLite, но движок недоступен. Запустите движок или переключитесь в браузерный режим.');
+    return true;
+  },
   base() {
     /* одно окно: если приложение открыто с адреса движка — API там же */
     if (location.protocol.startsWith('http') && (location.port === '8765' || (S.settings && S.settings.pyEngineUrl))) {
@@ -26615,7 +26678,7 @@ const PyEngine = {
        запустить не может, но даём одну ссылку unitcontrol:// (движок
        регистрирует протокол при первом запуске) и сами ловим момент,
        когда движок поднимется: сразу уходим на его адрес с авто-токеном. */
-    if (location.protocol !== 'file:' || this._fileWatchOn) return;
+    if (this.processingMode() !== 'sql' || location.protocol !== 'file:' || this._fileWatchOn) return;
     this._fileWatchOn = true;
     const box = document.createElement('div');
     box.style.cssText = 'position:fixed;z-index:210;left:50%;bottom:14px;transform:translateX(-50%);background:#12233a;border:1px solid #2b5ea7;color:#cfe6ff;border-radius:11px;padding:10px 14px;font-size:12.5px;max-width:680px;box-shadow:0 8px 30px rgba(0,0,0,.45)';
@@ -26658,9 +26721,9 @@ const PyEngine = {
       'Сверьте значение с файлом engine/engine_data/token.txt и введите ещё раз кнопкой «Токен Python».');
     this.refreshStatus();
   },
-  _settingsSnapshot() {
-    const cfg = S.settings || {};
-    return {
+  _settingsSnapshot(overrides, config) {
+    const cfg = config || S.settings || {};
+    const snapshot = {
       commission_pct: num(cfg.ozonCommissionPct == null ? 14 : cfg.ozonCommissionPct),
       transfer_pct: num(cfg.ozonAcquiringPct == null ? 1.5 : cfg.ozonAcquiringPct),
       last_mile: num(cfg.ozonLastMileFixed == null ? 25 : cfg.ozonLastMileFixed),
@@ -26668,6 +26731,8 @@ const PyEngine = {
       tax_regime: cfg.taxRegime || 'usn_income_6', tax_pct: num(cfg.taxPct == null ? 6 : cfg.taxPct),
       tax_osno_share: num(cfg.taxOsnoEligibleSharePct || 0),
       multiplicity_enabled: cfg.useMultiplicity !== false,
+      calc_std_dims: cfg.calcStdDims === true,
+      std_dims: cfg.calcStdDims === true ? STD_DIMS : undefined,
       target_margin: num(cfg.tgtMargin == null ? 20 : cfg.tgtMargin),
       /* v12.9.146: невыкуп как в браузере: по категории, иначе общий fbsUnred (8%) */
       no_buy_pct: num(cfg.fbsUnred == null ? 8 : cfg.fbsUnred),
@@ -26681,7 +26746,30 @@ const PyEngine = {
           boost_pct: g('wbBoostPct', 0), cofin_pct: g('wbCofinPct', 0), warehouse_coeff: g('wbWarehouseCoeff', 1.7),
           acceptance: g('wbAcceptanceFee', 0), storage_per_l: g('wbStoragePerLDay', 0.15), storage_coeff: g('wbStorageCoeff', 1),
           storage_days: g('wbStorageDaysPerUnit', 30), return_extra: g('wbReturnExtraFixed', 0),
-          failed_manual: g('wbFailedCostManual', 0), sc_per_kg: g('fbsScKg', 12), vol_divisor: g('volDivisor', 5000) }; })(),
+          failed_manual: cfg.wbFailedCostManual == null || cfg.wbFailedCostManual === '' ? -1 : num(cfg.wbFailedCostManual), sc_per_kg: g('fbsScKg', 12), vol_divisor: g('volDivisor', 5000) }; })(),
+      /* v12.9.155: Мегамаркет, Авито и Яндекс Маркет для движка */
+      mm: (() => { let scheme = 'FBS'; try { scheme = commonFulfillment(cfg); } catch (e) { }
+        const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
+        return { fulfillment: scheme, commission_pct: g('mmCommissionPct', 12), acquiring_pct: g('mmAcquiringPct', 1.5),
+          loyalty_pct: g('mmAdditionalLoyaltyPct', 0), boost_pct: g('mmBoostPct', 0), fbs_logistics: g('mmFbsLogisticsPerUnit', 0),
+          storage_per_unit: g('mmStoragePerUnit', 0), failed_manual: cfg.mmFailedCostManual == null || cfg.mmFailedCostManual === '' ? -1 : num(cfg.mmFailedCostManual),
+          return_fee: g('mmReturnFeeManual', 0), sc_per_kg: g('fbsScKg', 12) }; })(),
+      avito: (() => { const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
+        return { commission_pct: g('avitoCommissionPct', 6), logistics: g('avitoSellerDeliveryDiscount', 0),
+          listing_fee: g('avitoListingFeePerUnit', 0), boost_pct: g('avitoBoostPct', 0), cofin_pct: 0,
+          failed_manual: cfg.avitoFailedCostManual == null || cfg.avitoFailedCostManual === '' ? -1 : num(cfg.avitoFailedCostManual),
+          return_fee: g('avitoReturnFeeManual', 0), pro_min_enabled: cfg.avitoProMinEnabled === true }; })(),
+      ym: (() => { let scheme = 'FBS'; try { scheme = commonFulfillment(cfg); } catch (e) { }
+        const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
+        let payout = 2.8; try { payout = num(currentPayoutSettings(cfg).pct) || 2.8; } catch (e) { }
+        return { fulfillment: scheme, processing_manual: cfg.ymProcessingPerUnit == null || cfg.ymProcessingPerUnit === '' ? -1 : num(cfg.ymProcessingPerUnit),
+          failed_manual: cfg.ymFailedCostManual == null || cfg.ymFailedCostManual === '' ? -1 : num(cfg.ymFailedCostManual),
+          same_city_pct: g('sameCityReturnPct', 0), return_handling: g('returnHandlingFeePerSku', 15),
+          return_fixed: g('return_fixed_fee', 0), extra_return_per_kg: g('ymExtraReturnPerKg', 0),
+          return_storage_days: g('returnStorageDays', 0), return_storage_per_day: g('returnStoragePerDay', 25),
+          penalties: g('slaPenaltyPerUnit', 0), storage_per_sale: g('ymStoragePerSale', 0),
+          fallback_placement: g('autoPartsFallbackPct', 47), payout_pct: payout, agency_default: g('agencyFeePerSku', 0.12),
+          cheap_enabled: cfg.cheapFbsEnabled !== false, sc_per_kg: g('fbsScKg', 12), vol_divisor: g('volDivisor', 5000) }; })(),
       /* v12.9.146: полная браузерная модель Ozon для движка (evaluateOzon) */
       ozon: (() => { let scheme = 'FBS'; try { scheme = ozonActiveScheme(cfg); } catch (e) { }
         const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
@@ -26700,6 +26788,8 @@ const PyEngine = {
           nonstd_enabled: String(cfg.ozonNonStdEnabled == null ? '1' : cfg.ozonNonStdEnabled) !== '0',
           nonstd_pct: g('ozonNonStdPct', 3), nonstd_cap: g('ozonNonStdCapRub', 280) }; })()
     };
+    if (overrides) snapshot.scenario = { ...overrides };
+    return snapshot;
   },
   /* B6: перенос секретов площадок в движок (DPAPI) и подгрузка в память. */
   async migrateSecrets(silent) {
@@ -26772,20 +26862,19 @@ const PyEngine = {
      SQLite, recalc на движке и применение главных цифр (прибыль, маржа, ROI,
      безубыток, целевая цена) к строкам приложения. Используется и кнопкой
      «Пересчёт на движке», и отложенным полным расчётом ensureEconomics(). */
-  async recalcAndApply(prog) {
+  async recalcAndApply(prog, overrides) {
       if (!S.rows.length) return { applied: 0, recalculated: 0 };
-      /* v12.9.149: движок считает Ozon и WB. Для ЯМ/ММ/Avito он раньше молча
-         подставлял ozon-цифры в netProfit — теперь честный отказ, и вызывающий
-         код досчитывает браузерным пайплайном. */
+      /* v12.9.155: движок считает все пять площадок (Ozon, WB, ЯМ, ММ, Авито)
+         браузерными формулами; unsupported оставлен на случай неизвестного кода. */
       const _scope = String((S.settings && S.settings.activeMarketplace) || 'OZON').toUpperCase();
-      if (!['OZON', 'WB', 'ALL'].includes(_scope)) return { applied: 0, recalculated: 0, unsupported: _scope };
+      if (!['OZON', 'WB', 'YM', 'MM', 'AVITO', 'ALL'].includes(_scope)) return { applied: 0, recalculated: 0, unsupported: _scope };
       const CH = 5000;
       /* A6 (аудит v12.9.133): единая полная синхронизация (~30 полей, как у
          экспортов), а не узкий набор — иначе движок считал по устаревшим
          атрибутам Ozon/категориям. */
       await this._syncCatalog('app-recalc');
       if (prog) prog('каталог синхронизирован в SQLite: ' + fmt(S.rows.length) + ' SKU');
-      const st = this._settingsSnapshot();
+      const st = this._settingsSnapshot(overrides);
       const rec = await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: st }) });
       if (prog) prog('применение результата: ' + fmt(rec.recalculated || 0) + ' SKU посчитано на движке' +
         (rec.skipped ? ', ' + fmt(rec.skipped) + ' без изменений (инкрементальный пересчёт)' : ''));
@@ -26799,9 +26888,10 @@ const PyEngine = {
       for (const p of S.rows) {
         const r = byKey.get(normArticle(p.article) + '|' + normArticle(p.brand || ''));
         if (!r) continue;
+        if (r.fields_json) Object.assign(p, typeof r.fields_json === 'string' ? JSON.parse(r.fields_json) : r.fields_json);
         p.netProfit = num(r.profit); p.margin = num(r.margin); p.roi = num(r.roi);
         p.breakEvenPrice = num(r.break_even); p.tgtPrice = num(r.target);
-        p.pyEngineCalc = '12.9.136';
+        p.pyEngineCalc = '12.9.156';
         applied++;
       }
       bumpVersion();
@@ -26829,7 +26919,7 @@ const PyEngine = {
     }
     return out;
   },
-  _mergeProducts(products, onlyEmpty) {
+  _mergeProducts(products, onlyEmpty, enrichmentLists) {
     const byKey = new Map(S.rows.map(p => [normArticle(p.article) + '|' + normArticle(p.brand || ''), p]));
     let touched = 0, added = 0;
     for (const r of products) {
@@ -26850,8 +26940,15 @@ const PyEngine = {
         continue;
       }
       let ch = false;
+      try {
+        const review = typeof r.dimension_review === 'string' ? JSON.parse(r.dimension_review) : r.dimension_review;
+        if (review && review.after && !p._dimensionOeReview) { p._dimensionOeReview = review; delete p.dimensionAnomalyAck; ch = true; }
+      } catch (e) { console.warn('[UC] invalid dimension review', e); }
       for (const f of ['name', 'oe_numbers', 'analog_list', 'category', 'tnved', 'applicability', 'warranty', 'country', 'group_articles', 'cross_numbers', 'barcode', 'image_url']) {
         if (!String(p[f] || '').trim() && String(r[f] || '').trim()) { p[f] = r[f]; ch = true; }
+      }
+      if (enrichmentLists) for (const f of ['analog_list', 'group_articles']) {
+        if (HVC.enCol(f) && r[f] !== undefined && p[f] !== r[f]) { p[f] = r[f]; ch = true; }
       }
       for (const f of ['weight', 'length', 'width', 'height', 'volume']) {
         if (!(num(p[f]) > 0) && num(r[f]) > 0) { p[f] = num(r[f]); ch = true; }
@@ -26924,13 +27021,34 @@ const PyEngine = {
       eff_price: (p.promo && num(p.promoPrice) > 0) ? num(p.promoPrice) : num(p.price),
       visible: p.visible === false ? 0 : 1,
       excluded: p.excluded ? 1 : 0,
+      ...Object.fromEntries(['wb_commission', 'wb_failed_cost', 'mm_commission', 'mm_logistics',
+        'mm_failed_cost', 'avito_commission', 'avito_failed_cost', 'ym_processing_per_unit', 'ym_failed_cost']
+        .map(k => [k, p[k] == null || p[k] === '' ? null : num(p[k])])),
+      dimension_review: p._dimensionOeReview || {},
+      dimension_context: { blocked: !!p.dimensionAnomalyBlocked, importIssues: p._dimensionImportIssues || {},
+        sources: p._sources || {}, oeNorm:p.oe_norm || '', explicitVolume: productVolumeIsExplicit(p) },
+      pack_cost: p.packCost == null || p.packCost === '' ? null : num(p.packCost),
       /* v12.9.140: поля обогащения — в SQLite движка, как в браузерном импорте */
       original_article: p.originalArticle || '', category_type: p.category_type || '', category_src: p.category_src || '',
       ozon_description_category_id: p.ozon_description_category_id || '', ozon_type_id: p.ozon_type_id || '',
       mark_status: p.markStatus || '', mark_code: p.markCode || '', dimensions_str: p.dimensions_str || '',
       currency: p.currency || '', ozon_commission: num(p.ozon_commission || 0), ozon_logistics: num(p.ozon_logistics || 0),
+      /* v12.9.155: тарифный снимок ЯМ этой строки (tariffFor браузера) — движок
+         сам тарифы кабинета не знает, получает готовые ставки строки */
+      ...(() => {
+        const cfg = S.settings || {}, picked = tariffFor(p), quote = tariffQuoteAudit(p, picked);
+        const stale = !!(quote && quote.isApiOffer && quote.stale);
+        const fallback = stale ? tariffFor(p, true) : null;
+        const t = stale ? (fallback && fallback.found ? fallback : { found:false, commission_pct:0, return_pct:0 }) : picked;
+        const quoted = quote && quote.useCommissionQuote && quote.placementKnown && quote.placementPct >= 0;
+        return { ym_placement_pct: quoted ? quote.placementPct : Math.max(0, num(t.commission_pct ?? t.commission ?? cfg.autoPartsFallbackPct ?? 47)),
+          ym_transfer_pct: quote && quote.usePayoutQuote && quote.transferPct > 0 ? quote.transferPct : (num(t.payment_transfer_pct) > 0 ? num(t.payment_transfer_pct) : currentPayoutSettings(cfg).pct),
+          ym_agency_fee: num(t.agency_fee_per_sku) > 0 ? num(t.agency_fee_per_sku) : Math.max(0, num(cfg.agencyFeePerSku ?? 0.12)),
+          ym_boost_pct: Math.max(0, num(t.boost_pct)), ym_cofin_pct: Math.max(0, num(p.promoCofin ?? cfg.promoCofinDef ?? 0)),
+          ym_return_pct: forecastNoBuyRateInfo(p, t, cfg).rate, ym_found: t.found ? 1 : 0 };
+      })(),
       ozon_realfbs_delivery: num(p.ozon_realfbs_delivery || 0), ozon_failed_cost: num(p.ozon_failed_cost || 0),
-      min_stock: num(p.minStock || 0), no_buy_pct: num(p.noBuyPct || 0), fixed_cost: num(p.fixed || 0) });
+      min_stock: num(p.minStock || 0), no_buy_pct: forecastNoBuyRateInfo(p, null, S.settings || {}).rate, fixed_cost: num(p.fixed || 0) });
     for (let i = 0; i < S.rows.length; i += CH) {
       await this._fetch('/import/rows', { method: 'POST', timeout: 120000,
         body: JSON.stringify({ rows: S.rows.slice(i, i + CH).map(payloadOf), source: source || 'app', final: i + CH >= S.rows.length }) });
@@ -27091,41 +27209,56 @@ const PyEngine = {
       return out;
     } finally { clearTimeout(to); }
   },
-  async enrichFull() {
-    if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Полное обогащение на движке недоступно — используйте обогащение приложения.'); return; }
-    await withProgress('Python: полное обогащение', 'Каталог V в SQLite: доноры и OE-группы', async () => {
-      await this._syncCatalog('app-enrich-full');
-      /* реестр доноров приложения (Каталог V) — в движок, с OE связок */
-      if (typeof HVC !== 'undefined' && HVC.parts && HVC.parts.size) {
-        const donors = [];
-        for (const [key, pt] of HVC.parts) {
-          const oeSet = (HVC.byArt && HVC.byArt.get(key)) || new Set();
-          donors.push({ article: pt.artikul || pt.article || '', brand: pt.brand || '', name: pt.name || '',
-            category: pt.category || '', tnved: pt.tnved || '', applicability: pt.applicability || '',
-            warranty: pt.warranty || '', country: pt.country || '',
-            weight: num(pt.weight), length: num(pt.length), width: num(pt.width), height: num(pt.height),
-            barcode: pt.barcode || '', image_url: pt.image_url || pt.image || '', multiplicity: num(pt.multiplicity || 0),
-            oe_numbers: [...oeSet].join(' / ') });
-        }
-        for (let i = 0; i < donors.length; i += 5000) {
-          await this._fetch('/donors/import', { method: 'POST', timeout: 120000,
-            body: JSON.stringify({ rows: donors.slice(i, i + 5000), source: 'catalogV-app' }) });
-        }
+  async enrichNameCategories(context, enabled, rows) {
+    rows = rows || S.rows;
+    await this.processingAvailable();
+    const fields = ['article','brand','name','category','_categoryNameExplicit','_categoryNameAutoValue',
+      '_categoryNameSource','_categoryNameBrand','_categoryNameRevision','_categoryNameStatus','_categoryNameChoices','_categoryNameMethod'];
+    const reference = { version:context ? context.version : '', categories:S.cats || [], rules:S.rules || [],
+      heads: typeof OzonAuto !== 'undefined' && enabled ? [...OzonAuto._index().heads] : [] };
+    for (let offset=0; offset<rows.length; offset+=1000) {
+      const batch=rows.slice(offset,offset+1000);
+      const result=await this._fetch('/catalog/enrich-name-category', {method:'POST',timeout:120000,
+        body:JSON.stringify({enabled,context:reference,rows:batch.map(p=>({
+          ...Object.fromEntries(fields.filter(k=>p[k]!==undefined).map(k=>[k,p[k]])),
+          _categoryExplicitSource:NameCategory.hasExplicitCategorySource(p)}))})});
+      if (!result.rows || result.rows.length !== batch.length) throw new Error('Неполный ответ автокатегоризации SQLite');
+      batch.forEach((p,i) => { const r=result.rows[i];
+        if (p.article !== r.article || (p.brand || '') !== r.brand) throw new Error('Порядок строк автокатегоризации изменился');
+        for(const k of r.removed || []) delete p[k]; Object.assign(p,r.fields); });
+    }
+  },
+  async enrichFull(modeOverride) {
+    await this.processingAvailable();
+    return withProgress('SQLite: обогащение HVC', 'синхронизация исходного графа и справочников', async () => {
+      await this._syncCatalog('app-hvc-enrich');
+      const keys = new Set([...HVC.parts.keys(), ...S.rows.map(p => HVC.keyOf(p))]);
+      const scope = HVC.identityScope(S.rows);
+      const unsafe = new Set([...keys].filter(k => HVC.identityUnsafeKey(k)));
+      for (const p of S.rows) if (HVC.identityUnsafe(p,scope)) unsafe.add(HVC.keyOf(p));
+      const reference = {
+        parts:[...HVC.parts], oe:[...HVC.oe], byArt:[...HVC.byArt].map(([k,v]) => [k,[...v]]),
+        byOe:[...HVC.byOe].map(([k,v]) => [k,[...v]]), unsafeKeys:[...unsafe],
+        unsafeOe:[...HVC.oe.keys()].filter(k => HVC.identityUnsafeOe(k)),
+        groupSeparator:OE_DELIMITERS[oeMode()].join
+      };
+      const result = await this._fetch('/catalog/enrich-hvc', { method:'POST', timeout:600000,
+        body:JSON.stringify({ reference, mode:modeOverride || HVC.enrichMode(), cat_mode:HVC.enrichCatMode(),
+          columns:Object.fromEntries(HVC.EN_COLS.map(k => [k,HVC.enCol(k)])),
+          policy:{limits:AnomalyDetector.limits || []} }) });
+      const byKey = new Map((result.rows || []).map(p => [HVC.keyOf(p),p]));
+      for (const p of S.rows) {
+        const enriched = byKey.get(HVC.keyOf(p)); if (!enriched) continue;
+        for (const k of ['name','applicability','category','tnved','weight','length','width','height',
+          'multiplicity','image_url','barcode','analog_list','group_articles','groupSize','_sources'])
+          if (enriched[k] !== undefined && enriched[k] !== null) p[k] = enriched[k];
+        if (enriched._dimensionOeReview) { p._dimensionOeReview=enriched._dimensionOeReview; delete p.dimensionAnomalyAck; }
       }
-      const res = await this._fetch('/catalog/enrich-full', { method: 'POST', timeout: 600000,
-        body: JSON.stringify({ cat_mode: (S.settings && S.settings.enrichCatMode) || 'artbrand',
-          enrich_mode: (typeof HVC !== 'undefined' && HVC.enrichMode) ? HVC.enrichMode() : 'auto' }) });
-      const products = await this._pullProducts();
-      const m = this._mergeProducts(products, true);
       bumpVersion();
-      try { Table.paint(); } catch (e) { }
-      const f = res.filled || {}, cf = res.conflicts || {};
-      Toast.ok('Полное обогащение выполнено на движке',
-        'Заполнено: названий ' + fmt(f.name || 0) + ', применимости ' + fmt(f.applicability || 0) +
-        ', категорий ' + fmt(f.category || 0) + ', ТН ВЭД ' + fmt(f.tnved || 0) + ', габаритов ' + fmt(f.dims || 0) +
-        ', аналогов ' + fmt(f.analog_list || 0) + ' · конфликтов пропущено: категорий ' + fmt(cf.category || 0) +
-        ', ТН ВЭД ' + fmt(cf.tnved || 0) + ' · в таблицу подмешано строк: ' + fmt(m.touched) +
-        '. Только пустые поля; способ категории: ' + esc(res.cat_mode || 'artbrand') + '.');
+      S._econPending=true; persistEconPending();
+      try { await persistNow(); Table.paint(); } catch(e) { Toast.warn('Результат в памяти', String(e.message || e)); }
+      Toast.ok('Обогащение HVC выполнено движком', fmt(result.processed || 0) + ' SKU · исходные справочники и граф сохранены в SQLite');
+      return result;
     });
   },
   async enrichOe() {
@@ -34047,7 +34180,7 @@ const OzonExport = {
        сохранения в IndexedDB (именно оно висло минутами на полном диске). */
     try {
       const opts0 = this.getOptions();
-      if ((!opts0.split || opts0.split === 'one') && await PyEngine.health()) {
+      if ((!opts0.split || opts0.split === 'one') && await PyEngine.processingAvailable()) {
         const pick0 = this.resolveRows(opts0.scope);
         if (!pick0.rows.length) { Toast.warn('Нет строк для выгрузки', this.emptyReason(pick0.stats)); return; }
         await PyEngine.exportOzon(opts0.fmt === 'xlsx' ? 'xlsx' : 'csv', pick0.rows.map(p => ({ article: p.article, brand: p.brand || '' })));
@@ -34104,7 +34237,7 @@ const OzonExport = {
     const bindBtn = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
     bindBtn('#btnExportOzon', async () => { // v12.9.121: движок встроен в существующую кнопку
       warnIfLowStorage('экспорта');
-      if (await PyEngine.health()) PyEngine.exportOzon(); else OzonExport.open();
+      if (await PyEngine.processingAvailable()) PyEngine.exportOzon(); else OzonExport.open();
     });
     bindBtn('#btnExportOzonTop', () => OzonExport.open());
     bindBtn('#btnExportOzonCard', () => OzonExport.open());
@@ -34113,7 +34246,7 @@ const OzonExport = {
     
     // Прямые кнопки скачивания в разделе #v-export
     bindBtn('#btnExportOzonCsvDirect', async () => {
-      if (await PyEngine.health()) { // v12.9.131: экспорт через SQL, без IndexedDB-сохранения
+      if (await PyEngine.processingAvailable()) { // v12.9.131: экспорт через SQL, без IndexedDB-сохранения
         const pick0 = OzonExport.resolveRows(OzonExport.getViewOptions('csv_utf8').scope);
         if (!pick0.rows.length) return Toast.warn('Нет строк для выгрузки', OzonExport.emptyReason(pick0.stats));
         return PyEngine.exportOzon('csv', pick0.rows.map(p => ({ article: p.article, brand: p.brand || '' })));
@@ -34136,7 +34269,7 @@ const OzonExport = {
     });
 
     bindBtn('#btnExportOzonXlsxDirect', async () => {
-      if (await PyEngine.health()) { // v12.9.131: экспорт через SQL, без IndexedDB-сохранения
+      if (await PyEngine.processingAvailable()) { // v12.9.131: экспорт через SQL, без IndexedDB-сохранения
         const pick0 = OzonExport.resolveRows(OzonExport.getViewOptions('xlsx').scope);
         if (!pick0.rows.length) return Toast.warn('Нет строк для выгрузки', OzonExport.emptyReason(pick0.stats));
         return PyEngine.exportOzon('xlsx', pick0.rows.map(p => ({ article: p.article, brand: p.brand || '' })));
@@ -40355,10 +40488,39 @@ const Exp = {
        сохраняет каталог в IndexedDB и не строит XLSX в памяти. Выбор колонок
        модалки при этом заменяется стандартным набором движка (20 колонок). */
     try {
-      if (await PyEngine.health()) {
+      if (await PyEngine.processingAvailable()) {
+        /* v12.9.154: таблица пуста после перезагрузки, а каталог в SQLite
+           движка жив (синхронизации/импорты) — подтягиваем его обратно,
+           вместо «ничего нет». */
+        if (!S.rows.length) {
+          try {
+            const _prods = await PyEngine._pullProducts();
+            if (_prods.length) {
+              const _m = PyEngine._mergeProducts(_prods, false);
+              if (_m.added) {
+                bumpVersion();
+                try { Table.paint(); } catch (e) { }
+                if (typeof persistSoon === 'function') persistSoon();
+                Toast.info('Каталог восстановлен из движка', fmt(_m.added) + ' SKU подтянуто из SQLite движка — браузерная копия после перезагрузки оказалась пуста.');
+              }
+            }
+          } catch (e) { console.warn('[UC] восстановление каталога из движка:', e); }
+        }
         const fmtChoice = $('#expFmt') ? $('#expFmt').value : 'xlsx';
-        const rowsE = forceRows || Exp.rows();
-        if (!rowsE.length) { Toast.warn('Нет данных', 'Выборка пуста — проверьте фильтр и объём экспорта.'); return; }
+        let rowsE = forceRows || Exp.rows();
+        if (!rowsE.length) {
+          /* v12.9.154: как браузерный _runImpl — фильтр не дал строк, а каталог
+             не пуст: выгружаем весь каталог и объясняем, а не тупик «Нет данных».
+             После перезагрузки чаще всего виноват сохранённый фильтр/объём. */
+          if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала загрузите прайс — первый файл создаёт каталог, следующие только обогащают его.'); return; }
+          const _st0 = catalogSelectionStats($('#expScope') ? $('#expScope').value : 'filter');
+          const _reason = (typeof OzonExport !== 'undefined' && OzonExport.emptyReason) ? OzonExport.emptyReason(_st0) : 'проверьте фильтр и объём экспорта';
+          if (!exportCategoryNames().size && !(typeof ChzTnved !== 'undefined' && ChzTnved.isFiltered())) {
+            rowsE = S.rows.filter(p => (S.settings.showExcluded || !p.excluded) && !p.dimensionAnomalyBlocked);
+            if (rowsE.length) Toast.warn('Фильтр не дал строк — выгружаем весь каталог', _reason + ' Строк в файле: ' + fmt(rowsE.length) + '.');
+          }
+          if (!rowsE.length) { Toast.warn('Нет данных', _reason + ' В каталоге ' + fmt(S.rows.length) + ' SKU — данные на месте, пуста только выборка.'); return; }
+        }
         const arts = rowsE.map(p => ({ article: p.article, brand: p.brand || '' }));
         if (fmtChoice === 'ozon_csv' || fmtChoice === 'ozon_xlsx') {
           await PyEngine.exportOzon(fmtChoice === 'ozon_xlsx' ? 'xlsx' : 'csv', arts);
@@ -44281,6 +44443,22 @@ const WhatIf = {
     if (sh.pack !== null) scenarioSettings.fbsPack=sh.pack;
     if (sh.unred !== null) scenarioSettings.fbsUnred=sh.unred;
     const scenarioOv={ logisticsFactor:sh.logCoeff, ymCommissionPct:sh.comm };
+    if (typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql') {
+      const rowStamp = JSON.stringify(rows);
+      await PyEngine.processingAvailable();
+      await PyEngine._syncCatalog('app-whatif');
+      const result = await PyEngine._fetch('/catalog/whatif', { method:'POST', timeout:600000,
+        body: JSON.stringify({ settings: PyEngine._settingsSnapshot(),
+          scenario_settings: PyEngine._settingsSnapshot(null, scenarioSettings), overrides: scenarioOv,
+          scenario_inputs: rows.map(p => ({ article:p.article, brand:p.brand || '',
+            no_buy_pct:forecastNoBuyRateInfo(p, null, scenarioSettings).rate,
+            ym_return_pct:forecastNoBuyRateInfo(p, tariffFor(p), scenarioSettings).rate })) }) });
+      if (WhatIf.shadow !== shadow || S.rows !== rows || (S.catalogVersion || 0) !== version || JSON.stringify(S.settings) !== settingsStamp || JSON.stringify(rows) !== rowStamp || JSON.stringify(S.tariffs) !== tariffStamp || JSON.stringify(S.cats || []) !== catsStamp)
+        throw new Error('Данные изменились во время SQLite-расчёта; запустите сценарий повторно.');
+      Object.assign(shadow, { base:result.base, scen:result.scen, delta:result.delta, pct:result.pct,
+        included:result.included, skipped:result.skipped, byCat:result.byCat });
+      WhatIf.renderDelta(); WhatIf.renderChart(); return shadow;
+    }
     let base=0, scen=0, included=0, skipped=0; const byCat=Object.create(null);
     const unavailable = p => p.dimensionAnomalyBlocked || p.noBuyInconsistent || p.modelReviewRequired || p.missingTariffBlocked;
     const changed = () => new Error('Каталог, настройки или тарифы изменились во время расчёта. Запустите сценарий снова.');
@@ -46184,13 +46362,13 @@ function bindAll() {
     await runPipeline(true); Dash.render(); UE.render(); Table.paint();
     Toast.ok('Целевые цены применены локально', `${fmt(eligible.length)} SKU; пропущено ${fmt(skipped)}. Перед отправкой сверьте новый расчёт.`);
   };
-  $('#scenCalc').onclick = () => { // v10.6
+  $('#scenCalc').onclick = async () => { // v10.6
     const dp = num($('#scenDPrice').value), ds = num($('#scenDSales').value);
     const bb = $('#scenBoost').value, cc = $('#scenCofin').value;
     if (dp < -100 || ds < -100 || (bb !== '' && (num(bb) < 0 || num(bb) > 100)) || (cc !== '' && (num(cc) < 0 || num(cc) > 100))) {
       Toast.warn('Проверьте сценарий','Снижение цены/продаж не может превышать 100%; буст и софинансирование — от 0 до 100%.'); return;
     }
-    const r = scenarioProfit(dp, ds, bb === '' ? null : num(bb), cc === '' ? null : num(cc));
+    const r = await scenarioProfit(dp, ds, bb === '' ? null : num(bb), cc === '' ? null : num(cc));
     if (!r.included) { $('#scenOut').textContent = 'Нет сопоставимых SKU; пропущено ' + fmt(r.skipped) + '. Проверьте входные данные и тарифы.'; return; }
     const d = r.base ? (r.scen - r.base) / Math.abs(r.base) * 100 : null;
     $('#scenOut').innerHTML = `База ЧП <b>${money(r.base)}</b> → Сценарий <b style="color:${r.scen >= r.base ? '#2fd6a3' : '#ff5f6d'}">${money(r.scen)}</b> · Δ <b>${money(r.delta)}</b> (${d === null ? 'не определяется при нулевой базе' : (d >= 0 ? '+' : '') + fmt(d,1) + '%'})<br><span class="hint">${esc(r.marketplace)} · сопоставлено ${fmt(r.included)} SKU, пропущено ${fmt(r.skipped)}. Дополнительное софинансирование — условный расход, не тариф площадки.</span>`;

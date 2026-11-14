@@ -200,7 +200,9 @@ class TestEnrichFull(unittest.TestCase):
             {'article': 'F300', 'brand': 'MAHLE', 'price': 900, 'cost': 500, 'oe_numbers': 'OE9', 'category': 'Фильтры'}], 'test')
         E.enrich_full(self.conn)  # artbrand по умолчанию: OE-категорию НЕ берём
         self.assertEqual(self._prod('F200')[1], '')
-        E.enrich_full(self.conn, 'oe')  # oe-режим: доноры единогласны — берём
+        E.import_donors(self.conn, [{'article': 'F300', 'brand': 'MAHLE',
+            'oe_numbers': 'OE9', 'category': 'Фильтры'}], 'catalogV')
+        E.enrich_full(self.conn, 'oe')  # категория должна поступать из реестра, не из текста продукта
         self.assertEqual(self._prod('F200')[1], 'Фильтры')
     def test_dims_smallest_and_compatible(self):
         E.import_rows(self.conn, [
@@ -947,6 +949,188 @@ class TestEnrichParity151(unittest.TestCase):
         E.enrich_full(self.conn, enrich_mode='oe')
         w = self.conn.execute("SELECT weight FROM products WHERE article='P1'").fetchone()['weight']
         self.assertEqual(w, 1)
+    def test_disabled_columns_are_not_filled(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B'}], 't')
+        E.import_donors(self.conn, [{'article': 'P', 'brand': 'B', 'name': 'donor',
+            'category': 'Filters', 'barcode': '123', 'weight': 1,
+            'length': 10, 'width': 8, 'height': 5}], 'd')
+        result = E.enrich_full(self.conn, enrich_cols={
+            'name': False, 'category': False, 'barcode': False,
+            'weight': False, 'length': False, 'width': False, 'height': False})
+        row = dict(self.conn.execute("SELECT * FROM products WHERE article='P'").fetchone())
+        for field in ('name', 'category', 'barcode'):
+            self.assertFalse(row[field])
+            self.assertEqual(result['filled'][field], 0)
+        self.assertEqual(row['weight'], 0)
+        self.assertEqual(result['filled']['dims'], 0)
+
+    def test_artbrand_text_does_not_leak_from_oe(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'oe_numbers': 'OE1'}], 't')
+        E.import_donors(self.conn, [{'article': 'OTHER', 'brand': 'B',
+            'oe_numbers': 'OE1', 'name': 'OE text'}], 'd')
+        E.enrich_full(self.conn, enrich_mode='artbrand')
+        self.assertFalse(self.conn.execute("SELECT name FROM products").fetchone()[0])
+        E.enrich_full(self.conn, enrich_mode='oe')
+        self.assertEqual(self.conn.execute("SELECT name FROM products").fetchone()[0], 'OE text')
+
+    def test_smallest_tuple_wins_over_pair(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'oe_numbers': 'OE1'}], 't')
+        E.import_donors(self.conn, [
+            {'article': 'P', 'brand': 'B', 'weight': 2, 'length': 20, 'width': 20, 'height': 20},
+            {'article': 'Q', 'brand': 'B', 'oe_numbers': 'OE1',
+             'weight': 1, 'length': 10, 'width': 10, 'height': 10}], 'd')
+        E.enrich_full(self.conn)
+        self.assertEqual(self.conn.execute("SELECT length FROM products").fetchone()[0], 10)
+
+    def test_dimension_limits_block_and_review(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B'}], 't')
+        E.import_donors(self.conn, [{'article': 'P', 'brand': 'B',
+            'weight': 2, 'length': 20, 'width': 20, 'height': 20}], 'd')
+        result = E.enrich_full(self.conn, dimension_policy={'limits': [
+            {'category': '', 'maxW': 1, 'maxL': 100, 'maxVol': 100}]})
+        self.assertEqual(result['filled']['dims'], 0)
+        result = E.enrich_full(self.conn, dimension_policy={'blocked': ['P|B']})
+        self.assertEqual(result['filled']['dims'], 0)
+        result = E.enrich_full(self.conn)
+        self.assertEqual(result['dimension_reviews'][0]['after']['weight'], 2)
+        self.assertEqual(result['dimension_reviews'][0]['before']['weight'], 0)
+
+    def test_nullable_tariff_overrides_and_incremental_hash(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'price': 1000,
+            'cost': 100, 'sales': 10, 'wb_commission': 0, 'wb_failed_cost': 0}], 't')
+        row = dict(self.conn.execute('SELECT * FROM products').fetchone())
+        st = {'mp_scope': 'WB', 'no_buy_pct': 50, 'wb': {'commission_pct': 20, 'failed_manual': 100}}
+        result = E.calc_row(row, st)
+        self.assertEqual(result['commission'], 0)
+        self.assertEqual(result['returns'], 0)
+        E.recalc_catalog(self.conn, st)
+        self.assertEqual(E.recalc_catalog(self.conn, st)['recalculated'], 0)
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'wb_commission': 5}], 't')
+        self.assertEqual(E.recalc_catalog(self.conn, st)['recalculated'], 1)
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'wb_commission': None}], 't')
+        row = dict(self.conn.execute('SELECT * FROM products').fetchone())
+        self.assertEqual(E.calc_row(row, st)['commission'], 200)
+        for field in ('ym_transfer_pct', 'ym_agency_fee', 'ym_boost_pct'):
+            changed = dict(row); changed[field] = 99
+            self.assertNotEqual(E._eco_hash(row, st), E._eco_hash(changed, st))
+
+    def test_direct_oe_does_not_cross_transitive_bridge(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'oe_numbers': 'OE1'}], 't')
+        E.import_donors(self.conn, [
+            {'article': 'BRIDGE', 'brand': 'B', 'oe_numbers': 'OE1 / OE2'},
+            {'article': 'REMOTE', 'brand': 'B', 'oe_numbers': 'OE2', 'name': 'remote'}], 'd')
+        E.enrich_full(self.conn, enrich_mode='oe')
+        self.assertFalse(self.conn.execute("SELECT name FROM products WHERE article='P'").fetchone()[0])
+        E.enrich_full(self.conn, enrich_mode='oe', oe_registry=[{'oe': 'OE1', 'name': 'registry'}])
+        self.assertEqual(self.conn.execute("SELECT name FROM products WHERE article='P'").fetchone()[0], 'registry')
+
+    def test_ym_zero_commission_and_scenario(self):
+        row = {'price': 1000, 'cost': 100, 'sales': 10, 'volume': 6, 'ym_placement_pct': 0}
+        st = {'mp_scope': 'YM', 'ym': {'fallback_placement': 47, 'cheap_enabled': False}}
+        self.assertEqual(E.calc_row(row, st)['commission'], 0)
+        result = E.calc_row(row, {**st, 'scenario': {'ymCommissionPct': 10, 'boostPct': 5}})
+        self.assertEqual(result['commission'], 100)
+        self.assertLess(result['profit'], E.calc_row(row, st)['profit'])
+
+    def test_oe_registry_persists_and_explicit_empty_replaces(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'oe_numbers': 'OE1'}], 't')
+        E.enrich_full(self.conn, oe_registry=[{'oe': 'OE1', 'name': 'registry'}])
+        self.conn.execute("UPDATE products SET name='' WHERE article='P'")
+        E.enrich_full(self.conn)
+        self.assertEqual(self.conn.execute("SELECT name FROM products").fetchone()[0], 'registry')
+        self.conn.execute("UPDATE products SET name='' WHERE article='P'")
+        E.enrich_full(self.conn, oe_registry=[])
+        self.assertFalse(self.conn.execute("SELECT name FROM products").fetchone()[0])
+
+    def test_group_is_not_limited_to_40_analogs(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'oe_numbers': 'OE1'}], 't')
+        E.import_donors(self.conn, [{'article': 'D' + str(i), 'brand': 'B', 'oe_numbers': 'OE1'} for i in range(55)], 'd')
+        E.enrich_full(self.conn)
+        row = self.conn.execute('SELECT analog_list,group_articles FROM products').fetchone()
+        self.assertEqual(len(row['analog_list'].split(', ')), 40)
+        self.assertEqual(len(row['group_articles'].split(' / ')), 56)
+
+    def test_whatif_is_read_only_and_uses_matched_rows(self):
+        E.import_rows(self.conn, [
+            {'article': 'P', 'brand': 'B', 'price': 1000, 'cost': 100, 'sales': 10, 'category': 'C'},
+            {'article': 'X', 'brand': 'B', 'price': 1000, 'excluded': 1},
+            {'article': 'BLOCKED', 'brand': 'B', 'price': 1000, 'dimension_context': {'blocked': True}}], 't')
+        st = {'mp_scope': 'AVITO', 'avito': {'commission_pct': 6}, 'tax_regime': 'custom', 'tax_pct': 0}
+        E.recalc_catalog(self.conn, st)
+        before = [tuple(r) for r in self.conn.execute('SELECT * FROM eco_results')]
+        products = [tuple(r) for r in self.conn.execute('SELECT * FROM products')]
+        result = E.whatif_catalog(self.conn, st, st, {'boostPct': 10})
+        self.assertEqual(result['included'], 1)
+        self.assertEqual(result['skipped'], 1)
+        self.assertEqual(result['delta'], -100)
+        self.assertEqual(result['byCat']['C']['scen'] - result['byCat']['C']['base'], -100)
+        self.assertEqual(before, [tuple(r) for r in self.conn.execute('SELECT * FROM eco_results')])
+        self.assertEqual(products, [tuple(r) for r in self.conn.execute('SELECT * FROM products')])
+
+    def test_standard_dims_are_temporary_and_conflicts_rejected(self):
+        st = {'calc_std_dims': True, 'std_dims': [
+            {'c': 'Filter', 'l': 10, 'w': 8, 'h': 5, 'wt': 1},
+            {'c': 'Other', 'l': 20, 'w': 20, 'h': 20, 'wt': 2}]}
+        row = {'article': 'P', 'brand': 'B', 'category_type': 'Filter', 'name': '', 'category': '',
+               'length': 0, 'width': 0, 'height': 0, 'weight': 0}
+        before = dict(row)
+        calculated = E._calculation_dimensions(row, st)
+        self.assertEqual(calculated['length'], 10)
+        self.assertEqual(calculated['volume'], .4)
+        self.assertEqual(row, before)
+        # Browser rejects conflicts across kind/name/category, not just duplicates.
+        row['name'] = 'Other'
+        self.assertEqual(E._calculation_dimensions(row, st)['length'], 0)
+        row['name'] = ''
+        row['dimension_context'] = '{"blocked":true}'
+        self.assertEqual(E._calculation_dimensions(row, st)['weight'], 0)
+
+    def test_price_sales_scenario_does_not_change_inputs(self):
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'price': 1000,
+                                  'cost': 100, 'sales': 10}], 't')
+        st = {'mp_scope': 'AVITO', 'tax_regime': 'custom', 'tax_pct': 0,
+              'avito': {'commission_pct': 0, 'logistics': 0}, 'pack': 0}
+        result = E.whatif_catalog(self.conn, st, st, scenario_inputs=[
+            {'article': 'P', 'brand': 'B', 'price': 1200, 'eff_price': 1200, 'sales': 20}])
+        self.assertEqual(result['delta'], 200)
+        row = self.conn.execute('SELECT price,sales FROM products').fetchone()
+        self.assertEqual(tuple(row), (1000, 10))
+
+    def test_expense_detail_is_persisted_with_result(self):
+        import json
+        E.import_rows(self.conn, [{'article': 'P', 'brand': 'B', 'price': 1000,
+                                  'cost': 100, 'sales': 3}], 't')
+        st = {'mp_scope': 'AVITO', 'tax_regime': 'custom', 'tax_pct': 0,
+              'avito': {'commission_pct': 6, 'listing_fee': 2}, 'pack': 10}
+        E.recalc_catalog(self.conn, st)
+        row = self.conn.execute('SELECT profit,fields_json FROM eco_results').fetchone()
+        fields = json.loads(row['fields_json'])
+        self.assertEqual(fields['commission'], 60)
+        self.assertEqual(fields['packaging'], 10)
+        self.assertEqual(fields['listing'], 2)
+        self.assertEqual(fields['mRevenue'], 3000)
+        self.assertEqual(fields['mCommission'], 180)
+        self.assertEqual(fields['mNetProfit'], row['profit'] * 3)
+        self.assertEqual(fields['costPerUnit'] + row['profit'], 1000)
+
+    def test_hvc_snapshot_roundtrip_and_sources(self):
+        import json
+        E.import_rows(self.conn, [{'article':'P','brand':'B','oe_numbers':'OE1',
+            'dimension_context':{'oeNorm':'OE1'}}], 't')
+        reference = {'parts':[['P|B',{'artikul':'P','brand':'B','name':'pair',
+            '_dimensionEvidence':{'weight':1,'length':10,'width':10,'height':10}}]],
+            'oe':[['OE1',{'name':'registry'}]], 'byArt':[['P|B',['OE1']]], 'byOe':[['OE1',['P|B']]]}
+        first = E.enrich_hvc(self.conn, reference)
+        self.assertEqual(first['rows'][0]['name'], 'registry')
+        row = dict(self.conn.execute('SELECT * FROM products').fetchone())
+        self.assertEqual(row['weight'], 1)
+        self.assertEqual(json.loads(row['dimension_context'])['sources']['name']['file'], 'Каталог V (OE): OE-реестр')
+        review = json.loads(row['dimension_review'])
+        self.assertEqual(review['before']['weight'], 0)
+        # A second call uses the persisted graph and preserves the original review.
+        E.enrich_hvc(self.conn)
+        self.assertEqual(json.loads(self.conn.execute('SELECT dimension_review FROM products').fetchone()[0]), review)
+
     def test_wb_billable_from_volume(self):
         st = {'tax_regime': 'usn_income_6', 'tax_pct': 6, 'pack': 0, 'transit': 0,
               'wb': {'fulfillment': 'FBS', 'commission_pct': 0, 'acquiring_pct': 0, 'sc_per_kg': 10, 'vol_divisor': 5000},
@@ -1001,3 +1185,29 @@ class TestExcluded153(unittest.TestCase):
         self.assertEqual(arts, ['E2'])
         rows, _y = E._ozon_rows_data(conn)
         self.assertEqual([r[1] for r in rows], ['E2'])
+
+class TestAllMarketplaces155(unittest.TestCase):
+    BASE = {'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20, 'pack': 18, 'transit': 30}
+    def test_mm_hand_calc(self):
+        st = dict(self.BASE, mp_scope='MM', mm={'fulfillment': 'FBS', 'commission_pct': 12, 'acquiring_pct': 1.5,
+                                                'fbs_logistics': 50, 'sc_per_kg': 0, 'failed_manual': -1})
+        r = E.calc_row({'article': 'M', 'price': 1000, 'cost': 500, 'sales': 10, 'weight': 1}, st)
+        # comm 120 + transfer 15 + logistics 50 + pack 18 + transit 30 + cost 500 = 733; tax 60 -> 793
+        self.assertAlmostEqual(r['total'], 793, delta=0.011)
+    def test_avito_min_commission(self):
+        st = dict(self.BASE, mp_scope='AVITO', avito={'commission_pct': 6, 'pro_min_enabled': True, 'failed_manual': -1})
+        r = E.calc_row({'article': 'A', 'price': 10, 'cost': 5, 'sales': 10}, st)
+        self.assertAlmostEqual(r['commission'], 1, delta=0.011)  # минимум 1 ₽ профи
+    def test_ym_cheap_and_normal(self):
+        st = dict(self.BASE, mp_scope='YM', ym={'fulfillment': 'FBS', 'cheap_enabled': True, 'processing_manual': -1,
+                                                'failed_manual': -1, 'sc_per_kg': 0, 'payout_pct': 2.8})
+        cheap = E.calc_row({'article': 'Y', 'price': 200, 'cost': 100, 'sales': 10,
+                            'weight': 0.5, 'length': 10, 'width': 10, 'height': 10}, st)
+        # спецтариф: special 84 (42%), placement 0, middle/lastMile 0, processing 25, pack 18, transit 30,
+        # transfer 5.6, agency .12, failed=(0+15)=15*rate0=0; parts=100+84+25+18+30+5.6+.12=262.72>price -> profit<0 ok
+        self.assertLess(cheap['profit'], 0)
+        normal = E.calc_row({'article': 'Y', 'price': 1000, 'cost': 500, 'sales': 10,
+                             'weight': 0.5, 'length': 10, 'width': 10, 'height': 10, 'ym_placement_pct': 20}, st)
+        # placement 200, middle 92 (1л), lastMile 50, transfer 28, agency .12, processing 25, pack 18, transit 30
+        # parts=500+200+92+50+28+.12+25+18+30=943.12; tax 60 -> total 1003.12
+        self.assertAlmostEqual(normal['total'], 1003.12, delta=0.02)
