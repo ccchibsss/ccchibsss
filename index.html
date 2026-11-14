@@ -13581,7 +13581,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.154-client+export-fallback';
+const APP_VERSION = '12.9.155-client+all-mp-sql';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26682,6 +26682,29 @@ const PyEngine = {
           acceptance: g('wbAcceptanceFee', 0), storage_per_l: g('wbStoragePerLDay', 0.15), storage_coeff: g('wbStorageCoeff', 1),
           storage_days: g('wbStorageDaysPerUnit', 30), return_extra: g('wbReturnExtraFixed', 0),
           failed_manual: g('wbFailedCostManual', 0), sc_per_kg: g('fbsScKg', 12), vol_divisor: g('volDivisor', 5000) }; })(),
+      /* v12.9.155: Мегамаркет, Авито и Яндекс Маркет для движка */
+      mm: (() => { let scheme = 'FBS'; try { scheme = commonFulfillment(cfg); } catch (e) { }
+        const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
+        return { fulfillment: scheme, commission_pct: g('mmCommissionPct', 12), acquiring_pct: g('mmAcquiringPct', 1.5),
+          loyalty_pct: g('mmAdditionalLoyaltyPct', 0), boost_pct: g('mmBoostPct', 0), fbs_logistics: g('mmFbsLogisticsPerUnit', 0),
+          storage_per_unit: g('mmStoragePerUnit', 0), failed_manual: cfg.mmFailedCostManual == null || cfg.mmFailedCostManual === '' ? -1 : num(cfg.mmFailedCostManual),
+          return_fee: g('mmReturnFeeManual', 0), sc_per_kg: g('fbsScKg', 12) }; })(),
+      avito: (() => { const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
+        return { commission_pct: g('avitoCommissionPct', 6), logistics: g('avitoSellerDeliveryDiscount', 0),
+          listing_fee: g('avitoListingFeePerUnit', 0), boost_pct: g('avitoBoostPct', 0), cofin_pct: 0,
+          failed_manual: cfg.avitoFailedCostManual == null || cfg.avitoFailedCostManual === '' ? -1 : num(cfg.avitoFailedCostManual),
+          return_fee: g('avitoReturnFeeManual', 0), pro_min_enabled: cfg.avitoProMinEnabled === true }; })(),
+      ym: (() => { let scheme = 'FBS'; try { scheme = commonFulfillment(cfg); } catch (e) { }
+        const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
+        let payout = 2.8; try { payout = num(currentPayoutSettings(cfg).pct) || 2.8; } catch (e) { }
+        return { fulfillment: scheme, processing_manual: cfg.ymProcessingPerUnit == null || cfg.ymProcessingPerUnit === '' ? -1 : num(cfg.ymProcessingPerUnit),
+          failed_manual: cfg.ymFailedCostManual == null || cfg.ymFailedCostManual === '' ? -1 : num(cfg.ymFailedCostManual),
+          same_city_pct: g('sameCityReturnPct', 0), return_handling: g('returnHandlingFeePerSku', 15),
+          return_fixed: g('return_fixed_fee', 0), extra_return_per_kg: g('ymExtraReturnPerKg', 0),
+          return_storage_days: g('returnStorageDays', 0), return_storage_per_day: g('returnStoragePerDay', 25),
+          penalties: g('slaPenaltyPerUnit', 0), storage_per_sale: g('ymStoragePerSale', 0),
+          fallback_placement: g('autoPartsFallbackPct', 47), payout_pct: payout, agency_default: g('agencyFeePerSku', 0.12),
+          cheap_enabled: cfg.cheapFbsEnabled !== false, sc_per_kg: g('fbsScKg', 12), vol_divisor: g('volDivisor', 5000) }; })(),
       /* v12.9.146: полная браузерная модель Ozon для движка (evaluateOzon) */
       ozon: (() => { let scheme = 'FBS'; try { scheme = ozonActiveScheme(cfg); } catch (e) { }
         const g = (k, d) => num(cfg[k] == null ? d : cfg[k]);
@@ -26774,11 +26797,10 @@ const PyEngine = {
      «Пересчёт на движке», и отложенным полным расчётом ensureEconomics(). */
   async recalcAndApply(prog) {
       if (!S.rows.length) return { applied: 0, recalculated: 0 };
-      /* v12.9.149: движок считает Ozon и WB. Для ЯМ/ММ/Avito он раньше молча
-         подставлял ozon-цифры в netProfit — теперь честный отказ, и вызывающий
-         код досчитывает браузерным пайплайном. */
+      /* v12.9.155: движок считает все пять площадок (Ozon, WB, ЯМ, ММ, Авито)
+         браузерными формулами; unsupported оставлен на случай неизвестного кода. */
       const _scope = String((S.settings && S.settings.activeMarketplace) || 'OZON').toUpperCase();
-      if (!['OZON', 'WB', 'ALL'].includes(_scope)) return { applied: 0, recalculated: 0, unsupported: _scope };
+      if (!['OZON', 'WB', 'YM', 'MM', 'AVITO', 'ALL'].includes(_scope)) return { applied: 0, recalculated: 0, unsupported: _scope };
       const CH = 5000;
       /* A6 (аудит v12.9.133): единая полная синхронизация (~30 полей, как у
          экспортов), а не узкий набор — иначе движок считал по устаревшим
@@ -26929,6 +26951,13 @@ const PyEngine = {
       ozon_description_category_id: p.ozon_description_category_id || '', ozon_type_id: p.ozon_type_id || '',
       mark_status: p.markStatus || '', mark_code: p.markCode || '', dimensions_str: p.dimensions_str || '',
       currency: p.currency || '', ozon_commission: num(p.ozon_commission || 0), ozon_logistics: num(p.ozon_logistics || 0),
+      /* v12.9.155: тарифный снимок ЯМ этой строки (tariffFor браузера) — движок
+         сам тарифы кабинета не знает, получает готовые ставки строки */
+      ...(() => { try { const t = (typeof tariffFor === 'function') ? tariffFor(p) : null;
+        if (!t) return {};
+        return { ym_placement_pct: num(t.commission_pct ?? t.commission ?? 0), ym_transfer_pct: num(t.payment_transfer_pct || 0),
+          ym_agency_fee: num(t.agency_fee_per_sku || 0), ym_boost_pct: num(t.boost_pct || 0),
+          ym_return_pct: num(t.return_pct || 0), ym_found: t.found ? 1 : 0 }; } catch (e) { return {}; } })(),
       ozon_realfbs_delivery: num(p.ozon_realfbs_delivery || 0), ozon_failed_cost: num(p.ozon_failed_cost || 0),
       min_stock: num(p.minStock || 0), no_buy_pct: num(p.noBuyPct || 0), fixed_cost: num(p.fixed || 0) });
     for (let i = 0; i < S.rows.length; i += CH) {

@@ -1001,3 +1001,29 @@ class TestExcluded153(unittest.TestCase):
         self.assertEqual(arts, ['E2'])
         rows, _y = E._ozon_rows_data(conn)
         self.assertEqual([r[1] for r in rows], ['E2'])
+
+class TestAllMarketplaces155(unittest.TestCase):
+    BASE = {'tax_regime': 'usn_income_6', 'tax_pct': 6, 'target_margin': 20, 'pack': 18, 'transit': 30}
+    def test_mm_hand_calc(self):
+        st = dict(self.BASE, mp_scope='MM', mm={'fulfillment': 'FBS', 'commission_pct': 12, 'acquiring_pct': 1.5,
+                                                'fbs_logistics': 50, 'sc_per_kg': 0, 'failed_manual': -1})
+        r = E.calc_row({'article': 'M', 'price': 1000, 'cost': 500, 'sales': 10, 'weight': 1}, st)
+        # comm 120 + transfer 15 + logistics 50 + pack 18 + transit 30 + cost 500 = 733; tax 60 -> 793
+        self.assertAlmostEqual(r['total'], 793, delta=0.011)
+    def test_avito_min_commission(self):
+        st = dict(self.BASE, mp_scope='AVITO', avito={'commission_pct': 6, 'pro_min_enabled': True, 'failed_manual': -1})
+        r = E.calc_row({'article': 'A', 'price': 10, 'cost': 5, 'sales': 10}, st)
+        self.assertAlmostEqual(r['commission'], 1, delta=0.011)  # минимум 1 ₽ профи
+    def test_ym_cheap_and_normal(self):
+        st = dict(self.BASE, mp_scope='YM', ym={'fulfillment': 'FBS', 'cheap_enabled': True, 'processing_manual': -1,
+                                                'failed_manual': -1, 'sc_per_kg': 0, 'payout_pct': 2.8})
+        cheap = E.calc_row({'article': 'Y', 'price': 200, 'cost': 100, 'sales': 10,
+                            'weight': 0.5, 'length': 10, 'width': 10, 'height': 10}, st)
+        # спецтариф: special 84 (42%), placement 0, middle/lastMile 0, processing 25, pack 18, transit 30,
+        # transfer 5.6, agency .12, failed=(0+15)=15*rate0=0; parts=100+84+25+18+30+5.6+.12=262.72>price -> profit<0 ok
+        self.assertLess(cheap['profit'], 0)
+        normal = E.calc_row({'article': 'Y', 'price': 1000, 'cost': 500, 'sales': 10,
+                             'weight': 0.5, 'length': 10, 'width': 10, 'height': 10, 'ym_placement_pct': 20}, st)
+        # placement 200, middle 92 (1л), lastMile 50, transfer 28, agency .12, processing 25, pack 18, transit 30
+        # parts=500+200+92+50+28+.12+25+18+30=943.12; tax 60 -> total 1003.12
+        self.assertAlmostEqual(normal['total'], 1003.12, delta=0.02)

@@ -34,7 +34,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.153-pyengine-38'
+VERSION = '12.9.155-pyengine-39'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -233,6 +233,99 @@ def wb_unit(price, cost, st):
     return {'total': rnd(sum(parts) + tax), 'commission': comm, 'transfer': transfer, 'tax': tax,
             'returns': rnd(returns), 'storage': storage}
 
+def _billable(st):
+    dims = st.get('_dims') or (0, 0, 0); v = num(st.get('_volume', 0))
+    div = num((st.get('wb') or {}).get('vol_divisor')) or num((st.get('ym') or {}).get('vol_divisor')) or 5000
+    vol_kg = (dims[0] * dims[1] * dims[2] / div) if all(d > 0 for d in dims) else (v * 1000 / div if v > 0 else 0.0)
+    return max(num(st.get('_weight', 0)), vol_kg), vol_kg
+
+def mm_unit(price, cost, st):
+    """Мегамаркет (evaluateMm): комиссия, эквайринг, лояльность, реклама;
+       FBS — ручная логистика и СЦ, FBO — логистика в комиссии, хранение за единицу."""
+    mm = st.get('mm') or {}
+    scheme = str(mm.get('fulfillment') or 'FBS').upper()
+    comm = rnd(price * num(mm.get('commission_pct', 12)) / 100)
+    transfer = rnd(price * num(mm.get('acquiring_pct', 1.5)) / 100)
+    cofin = rnd(price * num(mm.get('loyalty_pct')) / 100)
+    ads = rnd(price * num(mm.get('boost_pct')) / 100)
+    logistics = rnd(num(mm.get('fbs_logistics')) ) if scheme == 'FBS' else 0.0
+    billable, _vk = _billable(st)
+    sc = rnd(num(mm.get('sc_per_kg', 12)) * billable) if scheme == 'FBS' else 0.0
+    storage = num(mm.get('storage_per_unit')) if scheme == 'FBO' else 0.0
+    rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
+    failed = num(mm.get('failed_manual')) if num(mm.get('failed_manual', -1)) >= 0 else num(mm.get('return_fee'))
+    returns = rnd(failed * rate / (100 - rate), 6) if rate < 100 else 0.0
+    parts = [cost, comm, transfer, logistics, sc, num(st.get('pack', 18)),
+             num(st.get('transit', 30)) if scheme == 'FBS' else 0.0, returns, storage, ads, cofin,
+             num(st.get('fixed_per_unit', 0))]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    return {'total': rnd(sum(parts) + tax), 'commission': comm, 'transfer': transfer, 'tax': tax,
+            'returns': rnd(returns), 'storage': storage}
+
+def avito_unit(price, cost, st):
+    """Авито (evaluateAvito): комиссия (с минимумом 1 ₽ при включённом профи),
+       доставка/скидка продавца, размещение, невыкуп от расхода случая, реклама/софин."""
+    av = st.get('avito') or {}
+    nominal = rnd(price * num(av.get('commission_pct', 6)) / 100)
+    comm = max(1.0, nominal) if av.get('pro_min_enabled') and price > 0 else nominal
+    rate = min(100.0, max(0.0, num(st.get('no_buy_pct', 0))))
+    failed = num(av.get('failed_manual')) if num(av.get('failed_manual', -1)) >= 0 else num(av.get('return_fee'))
+    returns = rnd(failed * rate / (100 - rate), 6) if rate < 100 else 0.0
+    ads = rnd(price * num(av.get('boost_pct')) / 100); cofin = rnd(price * num(av.get('cofin_pct')) / 100)
+    parts = [cost, comm, num(av.get('logistics')), num(st.get('pack', 18)), num(av.get('listing_fee')),
+             returns, ads, cofin, num(st.get('fixed_per_unit', 0))]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    return {'total': rnd(sum(parts) + tax), 'commission': comm, 'transfer': 0.0, 'tax': tax,
+            'returns': rnd(returns), 'storage': 0.0}
+
+def _fbs_middle_mile(volume_liters):
+    import math as _m
+    liters = int(_m.ceil(max(0.0, num(volume_liters))))
+    if not liters: return 0.0
+    return rnd(min(5500.0, 92 + min(max(liters - 1, 0), 199) * 8 + max(liters - 200, 0) * 5))
+
+def ym_unit(price, cost, st):
+    """Яндекс Маркет (evaluateYm): размещение из тарифного снимка строки,
+       средняя миля по объёму, последняя миля 5% с капом 1000, спецтариф 42%
+       (<=300 ₽ и <=5 л до конца 2026), обработка FBS, невыкуп с хранением возврата."""
+    ym = st.get('ym') or {}
+    scheme = 'FBY' if str(ym.get('fulfillment') or 'FBS').upper() == 'FBO' else 'FBS'
+    v = num(st.get('_volume', 0)); dims = st.get('_dims') or (0, 0, 0)
+    billable, vol_kg = _billable(st)
+    import datetime as _dt
+    cheap = bool(ym.get('cheap_enabled', True)) and price > 0 and price <= 300 and v > 0 \
+        and int(-(-v // 1)) <= 5 and _dt.date.today() <= _dt.date(2026, 12, 31) \
+        and (all(d > 0 for d in dims) or v > 0)
+    placement_pct = num(st.get('_ym_placement_pct')) or num(ym.get('fallback_placement', 47))
+    placement = 0.0 if cheap else rnd(price * placement_pct / 100)
+    special = rnd(price * 42 / 100) if cheap else 0.0
+    middle = 0.0 if cheap else _fbs_middle_mile(v)
+    last_mile = 0.0 if cheap else rnd(min(price * 0.05, 1000))
+    transfer = rnd(price * (num(st.get('_ym_transfer_pct')) or num(ym.get('payout_pct', 2.8))) / 100)
+    agency = num(st.get('_ym_agency_fee')) or num(ym.get('agency_default', 0.12))
+    ads = rnd(price * num(st.get('_ym_boost_pct')) / 100); cofin = rnd(price * num(ym.get('cofin_pct')) / 100)
+    is_kgt = num(st.get('_weight', 0)) >= 15 or max(dims) >= 70
+    if scheme == 'FBS':
+        processing = num(ym.get('processing_manual')) if num(ym.get('processing_manual', -1)) >= 0 else (rnd(vol_kg * 10) if is_kgt else 25.0)
+    else: processing = 0.0
+    sc = rnd(num(ym.get('sc_per_kg', 12)) * billable) if scheme == 'FBS' else 0.0
+    pack = 0.0 if scheme == 'FBY' else num(st.get('pack', 18))
+    transit = num(st.get('transit', 30)) if scheme == 'FBS' else 0.0
+    rate = min(100.0, max(0.0, num(st.get('_ym_no_buy_pct', st.get('no_buy_pct', 0)))))
+    share = max(0.0, min(100.0, num(ym.get('same_city_pct')))) / 100 if scheme == 'FBS' else 0.0
+    extra = num(ym.get('return_fixed')) + num(ym.get('extra_return_per_kg')) * billable
+    failed_manual = num(ym.get('failed_manual', -1)) >= 0
+    failed = num(ym.get('failed_manual')) if failed_manual else ((0.0 if cheap else middle * (1 - share) + num(ym.get('return_handling', 15))) + extra)
+    returns = rnd(failed * rate / (100 - rate), 6) if rate < 100 else 0.0
+    return_storage = 0.0 if failed_manual else rnd(num(ym.get('return_storage_days')) * num(ym.get('return_storage_per_day', 25)) * (rate / (100 - rate) if rate < 100 else 0.0), 6)
+    storage = num(ym.get('storage_per_sale')) if scheme == 'FBY' else 0.0
+    penalties = num(ym.get('penalties'))
+    parts = [cost, placement, special, agency, transfer, last_mile, middle, sc, pack, transit,
+             processing, returns, return_storage, storage, penalties, ads, cofin, num(st.get('fixed_per_unit', 0))]
+    tax = calc_tax(price, sum(parts), st.get('tax_regime', 'usn_income_6'), num(st.get('tax_pct', 6)), num(st.get('tax_osno_share', 0)))
+    return {'total': rnd(sum(parts) + tax), 'commission': placement, 'transfer': transfer, 'tax': tax,
+            'returns': rnd(returns + return_storage), 'storage': storage}
+
 def solve_prices(price, cost, st, target_margin=20.0, sales=1, unit=None):
     """Целочисленный решатель: первое целое с прибылью >= 0 и >= целевой маржи.
        Как в приложении: при продажах 0 безубыток не выдумывается (0)."""
@@ -291,8 +384,13 @@ def calc_row(row, st):
         # заданный маршрут SKU заменяет усреднённую пару «последняя миля + сдача»
         st2['last_mile'] = num(row.get('ozon_logistics')) + num(row.get('ozon_realfbs_delivery'))
         st2['handover'] = 0
-    _is_wb = str(st.get('mp_scope') or '').upper() == 'WB'
-    _unit = wb_unit if _is_wb else ozon_unit
+    _scope = str(st.get('mp_scope') or '').upper()
+    if num(row.get('ym_placement_pct')) > 0: st2['_ym_placement_pct'] = num(row.get('ym_placement_pct'))
+    if num(row.get('ym_transfer_pct')) > 0: st2['_ym_transfer_pct'] = num(row.get('ym_transfer_pct'))
+    if num(row.get('ym_agency_fee')) > 0: st2['_ym_agency_fee'] = num(row.get('ym_agency_fee'))
+    if num(row.get('ym_boost_pct')) > 0: st2['_ym_boost_pct'] = num(row.get('ym_boost_pct'))
+    if num(row.get('ym_return_pct')) > 0: st2['_ym_no_buy_pct'] = num(row.get('ym_return_pct'))
+    _unit = {'WB': wb_unit, 'MM': mm_unit, 'AVITO': avito_unit, 'YM': ym_unit}.get(_scope, ozon_unit)
     u = _unit(price, cost, st2)
     profit = rnd(price - u['total'])
     solved = solve_prices(price, cost, st2, num(st.get('target_margin', 20)), row.get('sales', 1), unit=_unit)
@@ -398,6 +496,11 @@ def db():
         conn.execute("ALTER TABLE products ADD COLUMN visible TEXT DEFAULT '1'")
     if 'excluded' not in cols:
         conn.execute("ALTER TABLE products ADD COLUMN excluded TEXT DEFAULT '0'")
+    for col in ('ym_placement_pct', 'ym_transfer_pct', 'ym_agency_fee', 'ym_boost_pct', 'ym_return_pct'):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} REAL DEFAULT 0")
+    if 'ym_found' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN ym_found REAL DEFAULT 1")
     dcols = {r[1] for r in conn.execute('PRAGMA table_info(donors)')}
     for col, typ, dflt in (('barcode', 'TEXT', "''"), ('image_url', 'TEXT', "''"), ('multiplicity', 'REAL', '0')):
         if col not in dcols:
@@ -767,6 +870,10 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         if 'excluded' in r:
             conn.execute('UPDATE products SET excluded=? WHERE article=? AND brand=?',
                          ('1' if str(r.get('excluded')).lower() in ('1', 'true', 'да') else '0', art, brand))
+        for _ymf in ('ym_placement_pct', 'ym_transfer_pct', 'ym_agency_fee', 'ym_boost_pct', 'ym_return_pct', 'ym_found'):
+            if _ymf in r:
+                conn.execute(f'UPDATE products SET {_ymf}=? WHERE article=? AND brand=?',
+                             (num(r.get(_ymf)), art, brand))
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
@@ -864,7 +971,7 @@ def _calc_all(rows, st):
     except Exception:
         return seq(), False
 
-_ECO_FIELDS = ('price', 'eff_price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category',
+_ECO_FIELDS = ('price', 'eff_price', 'cost', 'sales', 'weight', 'length', 'width', 'height', 'volume', 'category', 'ym_placement_pct', 'ym_return_pct',
                'multiplicity', 'ozon_commission', 'ozon_logistics', 'ozon_realfbs_delivery',
                'ozon_failed_cost', 'no_buy_pct', 'fixed_cost')
 
@@ -879,8 +986,11 @@ def recalc_catalog(conn, st, force=False):
        если изменились её расчётные входы или настройки экономики (хэш в
        eco_results.inputs_hash). force=True — полный пересчёт как раньше.
        Итоги ответа считаются по всей таблице результатов, семантика та же."""
-    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost,excluded FROM products').fetchall()]
+    rows = [dict(r) for r in conn.execute('SELECT article,brand,price,eff_price,cost,sales,weight,length,width,height,volume,category,multiplicity,ozon_commission,ozon_logistics,ozon_realfbs_delivery,ozon_failed_cost,no_buy_pct,fixed_cost,excluded,ym_placement_pct,ym_transfer_pct,ym_agency_fee,ym_boost_pct,ym_return_pct,ym_found FROM products').fetchall()]
     rows = [r for r in rows if str(r.get('excluded', '0')).lower() not in ('1', 'true', 'да')]  # как пайплайн браузера
+    if str(st.get('mp_scope') or '').upper() == 'YM':
+        # браузер: нет совместимого тарифа ЯМ — экономика строки не считается
+        rows = [r for r in rows if num(r.get('ym_found', 1)) > 0]
     old = {(r['article'], r['brand']): r['inputs_hash'] for r in
            conn.execute('SELECT article,brand,inputs_hash FROM eco_results')}
     todo, hashes = [], {}
