@@ -1,0 +1,16 @@
+const fs=require('fs'),vm=require('vm'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
+const input=JSON.parse(fs.readFileSync(0,'utf8')),ctx={};vm.createContext(ctx);
+const la=h.indexOf('const OzonNameLexicon = (() => {');
+vm.runInContext(h.slice(la,h.indexOf('\nif (typeof globalThis',la))+';globalThis.OzonNameLexicon=OzonNameLexicon;',ctx);
+vm.runInContext(h.slice(h.indexOf('const OzonAuto = {'),h.indexOf("if (typeof globalThis !== 'undefined') globalThis.OzonAuto = OzonAuto;"))+'globalThis.OzonAuto=OzonAuto;',ctx);
+const extract=name=>h.match(new RegExp('const '+name+' = \\{[\\s\\S]*?\\n\\};\\n'))[0];
+ctx.CATEGORY_TNVED_ROWS=input.categoryRows;ctx.OZON_NAME_RULES_VERSION='keyword-v6-csv-name|';
+ctx.S={settings:{autoCategoryByName:input.enabled!==false,ozonReferenceScope:input.scope||'auto'}};
+ctx.HVC={identityUnsafe:()=>false,identityUnsafeOeFor:()=>false};
+const start=h.indexOf('(function (root) {'),end="})(typeof globalThis !== 'undefined' ? globalThis : this);";
+vm.runInContext(h.slice(start,h.indexOf(end,start)+end.length),ctx);
+vm.runInContext(h.match(/const OzonReference = \{[\s\S]*?\n\};\n/)[0]+';globalThis.OzonReference=OzonReference;',ctx);
+if(input.tree)ctx.OzonReference._ref=input.tree;
+const apply=ctx.OzonCat.apply;ctx.OzonCat.apply=(p,o)=>apply(p,{...o,registry:input.registry});
+vm.runInContext(extract('NameCategory')+'\n'+extract('CategoryTnved')+'\n'+extract('CategoryKindAuto')+'\n'+extract('CsvNameMatcher')+'\nCategoryTnved.revision="test";CategoryKindAuto.version="csv-kind-name-v1|test";',ctx);
+process.stdout.write(JSON.stringify({pairs:ctx.OzonCat.TYPES.map(x=>[x.cat,x.name]),results:input.rows.map(p=>{ctx.OzonCat.clearCache();const result=ctx.OzonAuto.applyPreferred(p,{force:input.force});return {row:p,result};})}));

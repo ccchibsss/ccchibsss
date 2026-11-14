@@ -292,7 +292,7 @@ assert(app.includes('12.9.156-client+dual-processing'), 'версия клиен
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
-assert(app.includes('if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
+assert(app.includes('if (changedRows && !isChangedRow(p)) { if (!sqlEnrichment && typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
 assert(app.includes('12.9.156-client+dual-processing'), 'версия клиента обновлена');
 
@@ -844,3 +844,5 @@ assert(app.includes('данные на месте, пуста только вы�
 assert(app.includes('if (!skipEcon && !sqlEconomics)'), 'pipeline skips browser economics in SQLite mode');
 assert(app.includes('if (sqlEconomics) {\n      const result = await PyEngine.recalcAndApply(prog);'), 'pipeline awaits server economics');
 assert(app.includes('if (r.fields_json) Object.assign(p,'), 'server expense fields are applied to client rows');
+
+assert(app.includes('if (sqlEnrichment) await PyEngine.quarantineDimensions(S.rows);'), 'SQL: карантин всех строк перед экономикой, включая неизменённые');

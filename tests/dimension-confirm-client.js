@@ -1,0 +1,20 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
+const a=h.indexOf('  async enrichSavedProduct('),b=h.indexOf('  async quarantineDimensions(',a);
+const ctx={AnomalyDetector:{limits:[]},oeMode:()=> 'auto'};vm.createContext(ctx);vm.runInContext('globalThis.P={'+h.slice(a,b)+'};',ctx);
+const P=ctx.P;P.processingAvailable=async()=>{};
+(async()=>{
+ const p={article:'A',brand:'B',dimensionAnomalyAck:{signature:'old'}};const before=JSON.stringify(p);
+ P._fetch=async()=>({article:'WRONG',brand:'B',fields:{dimensionAnomalyBlocked:false},removed:[],result:{status:'confirmed'}});
+ await assert.rejects(()=>P.confirmDimensions(p));assert.equal(JSON.stringify(p),before);
+ P._fetch=async()=>{throw Error('offline')};await assert.rejects(()=>P.confirmDimensions(p));assert.equal(JSON.stringify(p),before);
+ P._fetch=async(url,o)=>{const body=JSON.parse(o.body);assert.equal(body.expected_signature,'sig');assert.equal(body.approved,true);return {article:'A',brand:'B',fields:{dimensionAnomalyBlocked:true},removed:['dimensionAnomalyAck'],result:{status:'stale'}}};
+ assert.equal((await P.confirmDimensions(p,true,'sig')).status,'stale');assert(!('dimensionAnomalyAck' in p));
+ const calls=[];
+ for(const k of ['enrichNameCategories','enrichCategoryKinds','enrichOzonPreferred','enrichCategoryTnved','quarantineDimensions'])P[k]=async()=>{calls.push(k)};
+ P.recalcAndApply=async()=>{calls.push('economics');return {}};
+ await P.enrichSavedProduct(p,{},true);
+ assert.deepEqual(calls,['enrichNameCategories','enrichCategoryKinds','enrichOzonPreferred','enrichCategoryTnved','quarantineDimensions','economics']);
+ calls.length=0;P.enrichCategoryKinds=async()=>{throw Error('offline')};await assert.rejects(()=>P.enrichSavedProduct(p,{},true));assert.deepEqual(calls,['enrichNameCategories']);
+ assert(h.includes("if(PyEngine.processingMode()==='sql')return this.confirmSql(p);"));
+ console.log('OK: SQL confirmation and product-save routing');
+})().catch(e=>{console.error(e);process.exitCode=1});

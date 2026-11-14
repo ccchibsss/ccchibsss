@@ -17575,6 +17575,19 @@ const ALL_CATS = BASE_CATS.map(c => c[0]);
     setApplicabilityReference: setApplicabilityReference,
     registerApplicability: registerApplicability,
     clearApplicabilityReference: clearApplicabilityReference,
+    processingSnapshot: function () {
+      const plain = v => v instanceof Map ? Object.fromEntries([...v].map(([k,x])=>[k,plain(x)])) :
+        Array.isArray(v) ? v.map(plain) : v && typeof v==='object' ? Object.fromEntries(Object.entries(v).filter(([,x])=>typeof x!=='function').map(([k,x])=>[k,plain(x)])) : v;
+      const raw=getRegistry(), registry=raw ? {} : null;
+      if(raw) {
+        const fields=['oe','oeRegistry','oe_registry','registry','ozonRevision','revision','size','ozonApplicability','applicabilityReference','applicabilityMap','applicabilityDirectory'];
+        if(raw instanceof Map) { Object.assign(registry,plain(raw)); registry.size=raw.size; }
+        else for(const k of fields) if(raw[k]!==undefined) registry[k]=plain(raw[k]);
+        if(!fields.some(k=>raw[k]!==undefined)) Object.assign(registry,plain(raw));
+        if(raw.oe instanceof Map) registry.size=raw.oe.size;
+      }
+      return {pairs:TYPES.map(t=>[t.cat,t.name]),registry,applicability:plain(APPLICABILITY),reference_version:REF_VERSION};
+    },
     clearCache: clearCache
   };
   root.OzonCat = api;
@@ -17649,10 +17662,10 @@ const OzonCatUI = {
     return S.rows;
   },
 
-  recount() {
+  async recount() {
     const rows = OzonCatUI.rows();
     if (!rows.length) return Toast.warn('Каталог пуст', 'Импортируйте прайс и OE-реестр — категории и типы OZON проставятся только по точным связям');
-    const res = OzonAuto.applyPreferredAll(rows, { force: true });
+    const res = PyEngine.processingMode()==='sql' ? await PyEngine.enrichOzonPreferred(rows,{force:true}) : OzonAuto.applyPreferredAll(rows, { force: true });
     bumpVersion();
     applyFilter(); Table.paint(); Dash.render();
     if (typeof persistSoon === 'function') persistSoon();
@@ -17663,11 +17676,17 @@ const OzonCatUI = {
 
   /* v12.9.11: черновой подбор типа по названию — заполняет только пустые (не ручные и не
      определённые по OE) типы, чтобы в массовой загрузке не осталось «Без категории». */
-  keywordFill() {
+  async keywordFill() {
     if (typeof OzonAuto === 'undefined') return Toast.err('Модуль не загружен', 'OzonAuto недоступен');
     const rows = OzonCatUI.rows();
     if (!rows.length) return Toast.warn('Каталог пуст', 'импортируйте прайс');
-    const st = OzonAuto.apply(rows, {});
+    let st;
+    if(PyEngine.processingMode()==='sql') {
+      const before=rows.map(p=>({was:!!(p.ozon_category||p.ozon_type),src:p.ozon_type_src}));
+      await PyEngine.enrichOzonPreferred(rows,{forceName:true});
+      st={total:rows.length,filled:0,kept:0,none:0,byCat:{}};
+      rows.forEach((p,i)=>{const b=before[i];if(p.ozon_type_src==='keyword' && (!b.was||b.src==='none'||!b.src)){st.filled++;st.byCat[p.ozon_category]=(st.byCat[p.ozon_category]||0)+1;}else if(p.ozon_type||p.ozon_category)st.kept++;else st.none++;});
+    } else st = OzonAuto.apply(rows, {});
     bumpVersion(); applyFilter(); Table.paint(); Dash.render();
     if (typeof persistSoon === 'function') persistSoon();
     OzonCatUI.render();
@@ -17677,11 +17696,16 @@ const OzonCatUI = {
       `заполнено ${fmt(st.filled)} · уже было ${fmt(st.kept)} · без совпадений ${fmt(st.none)}${top ? ' · ' + top : ''}. Проверьте категории перед загрузкой.`);
   },
 
-  resetManual() {
-    const rows = OzonCatUI.rows();
+  async resetManual() {
+    const targets=OzonCatUI.rows(), sql=PyEngine.processingMode()==='sql';
+    const rows=sql ? targets.map(p=>({...p})) : targets;
     let n = 0;
     rows.forEach(p => { if (p.ozon_type_src === 'manual') { p.ozon_category = ''; p.ozon_type = ''; p.ozon_type_src = ''; p.ozon_sig = ''; delete p.ozon_description_category_id; delete p.ozon_type_id; n++; } });
-    OzonAuto.applyPreferredAll(rows, { force: true });
+    if(sql) {
+      await PyEngine.enrichOzonPreferred(rows,{force:true});
+      rows.forEach((row,i)=>{for(const k of Object.keys(targets[i])) if((k.startsWith('ozon_')||k.startsWith('_ozonName')) && !(k in row))delete targets[i][k];for(const [k,v] of Object.entries(row))if(k.startsWith('ozon_')||k.startsWith('_ozonName'))targets[i][k]=v;});
+    }
+    else OzonAuto.applyPreferredAll(rows, { force: true });
     bumpVersion(); applyFilter(); Table.paint();
     if (typeof persistSoon === 'function') persistSoon();
     Toast.ok('Ручные значения сброшены', `Пересчитано автоматически: ${fmt(n)} SKU`);
@@ -21435,7 +21459,11 @@ function runPipeline(full, options) {
     const nameCategoryContext = full && nameAutoEnabled ? NameCategory.prepare() : null;
     const sqlEnrichment = typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql';
     if (full && sqlEnrichment) await PyEngine.enrichNameCategories(nameCategoryContext, nameAutoEnabled, changedRows ? S.rows.filter(p => changedRows.has(p)) : S.rows);
+    if (full && sqlEnrichment) await PyEngine.enrichCategoryKinds(nameCategoryContext, nameAutoEnabled, changedRows ? S.rows.filter(p => changedRows.has(p)) : S.rows);
 
+    const ozonSqlReference=full && sqlEnrichment ? PyEngine.ozonProcessingReference() : null;
+    const tnvedServerRows = [];
+    const markStatusServerRows = [];
     let econErr = 0, firstErr = '';
     try { MarkStatus.reset(); } catch (e) { }
     /* v12.9.46: чанк меньше — прогресс и отрисовка обновляются чаще; на 94k SKU
@@ -21501,13 +21529,19 @@ function runPipeline(full, options) {
           S.rows[i] = compact;
         }
       }
+      if(full && sqlEnrichment) {
+        const batch=S.rows.slice(start,end).filter(p=>!changedRows || isChangedRow(p));
+        for(const p of batch) { p.article_norm=normArticle(p.article); HVC.ensureNorm(p); }
+        await PyEngine.enrichOzonPreferred(batch,{reference:ozonSqlReference});
+      }
+      if(sqlEnrichment) await PyEngine.applyProductPolicies(S.rows.slice(start,end).filter(p=>!changedRows || isChangedRow(p)),ex);
       for (let idx = start; idx < end; idx++) {
         const p = S.rows[idx];
         if (deltaFast && !isChangedRow(p)) continue;
         /* v12.9.76: неизменённая строка — только карантинная проверка, без
            повторной нормализации артикула/OE и гварда дат: её поля не менялись
            с прошлого прохода, где это уже сделано. */
-        if (changedRows && !isChangedRow(p)) { if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p); continue; }
+        if (changedRows && !isChangedRow(p)) { if (!sqlEnrichment && typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p); continue; }
         try {
           /* Только дешёвая нормализация ключевых колонок. Тяжёлое HVC-обогащение
              выполняется один раз после импорта или по кнопке «Обогатить сейчас»,
@@ -21519,18 +21553,20 @@ function runPipeline(full, options) {
            * при следующем сохранении в IndexedDB. */
           for (const nk of NUMERIC_DATE_GUARD) { if (p[nk] instanceof Date) p[nk] = 0; }
           if (typeof HVC !== 'undefined') HVC.ensureNorm(p);
+          if(!sqlEnrichment) {
           p.excluded = false;
           p.deletePending = false;
           p.policyAction = '';
           p.policyReason = '';
+          }
           /* Сначала определяем категории, чтобы политики по категории видели актуальное значение. */
           if (full) {
             if (!sqlEnrichment) NameCategory.apply(p, nameCategoryContext, nameAutoEnabled);
-            CategoryKindAuto.apply(p, nameCategoryContext, nameAutoEnabled);
-            if (typeof OzonCat !== 'undefined') OzonAuto.applyPreferred(p);
+            if (!sqlEnrichment) CategoryKindAuto.apply(p, nameCategoryContext, nameAutoEnabled);
+            if (!sqlEnrichment && typeof OzonCat !== 'undefined') OzonAuto.applyPreferred(p);
           }
           /* Политики применяются по приоритету. Автоматическое удаление запрещено: только безопасная метка. */
-          for (const e of ex) {
+          if(!sqlEnrichment) for (const e of ex) {
             if (!matchCond(p, e.field, e.op, e.value)) continue;
             const action = e.action || 'exclude';
             p.policyAction = POLICY_ACTIONS[action] || action;
@@ -21539,7 +21575,8 @@ function runPipeline(full, options) {
             if (action === 'hide') { p.visible = false; p.visibleReason = 'товарная_политика'; }
             if (action === 'delete_mark') { p.deletePending = true; p.visible = false; p.visibleReason = 'ожидает_удаления'; }
           }
-          for (const r of enrichRules) {
+          if(sqlEnrichment && enrichRules.length) await PyEngine.enrichRules([p],enrichRules,nameCategoryContext);
+          else for (const r of enrichRules) {
             /* Явную категорию из файла/карточки нельзя заменить косвенно при пересчёте. */
             if (r.target_val === 'category' && (p._categoryNameExplicit ||
               (p.category && !NameCategory.blank(p.category) && p.category !== p._categoryNameAutoValue))) continue;
@@ -21565,17 +21602,23 @@ function runPipeline(full, options) {
           }
           /* Правило обогащения могло изменить рабочую категорию: заново проверить
              черновой вид, не перезаписывая само правило и ручные данные. */
-          if (full && nameAutoEnabled && p._categoryKindAuto && !CategoryKindAuto.current(p))
-            CategoryKindAuto.apply(p, nameCategoryContext, true);
+          if (full && nameAutoEnabled && p._categoryKindAuto && !CategoryKindAuto.current(p)) {
+            if (sqlEnrichment) await PyEngine.enrichCategoryKinds(nameCategoryContext, true, [p]);
+            else CategoryKindAuto.apply(p, nameCategoryContext, true);
+          }
           /* Код — только по паре словаря и только в пустое поле. */
-          CategoryTnved.apply(p);
+          if (sqlEnrichment) tnvedServerRows.push(p); else CategoryTnved.apply(p);
           /* Если правило обогащения изменило внутреннюю категорию ПОСЛЕ первого
              подбора, пересчитать только затронутый черновик Ozon. */
           if (full && nameAutoEnabled && !['manual','import','auto'].includes(p.ozon_type_src) &&
               !['oe_conflict','oe_invalid'].includes(p._ozonNameStatus) &&
-              p._ozonNameCategorySignature !== OzonAuto.categorySignature(p)) OzonAuto.applyPreferred(p);
+              (sqlEnrichment ? enrichRules.length>0 : p._ozonNameCategorySignature !== OzonAuto.categorySignature(p))) {
+            if(sqlEnrichment) await PyEngine.enrichOzonPreferred([p],{reference:ozonSqlReference}); else OzonAuto.applyPreferred(p);
+          }
           /* Контроль Честного знака после категоризации и обогащения (v10.8.6:
              чёрный список + пользовательские списки вместо жёсткого белого). */
+          if (sqlEnrichment) markStatusServerRows.push(p);
+          else {
           const mc = MarkStatus.check(p.markStatus, p.markCode, !!p.markRequired, S.settings);
           if (mc.kind === 'unknown') MarkStatus.unknown.add(String(p.markStatus || '').trim());
           p.markCompliant = mc.ok;
@@ -21585,9 +21628,10 @@ function runPipeline(full, options) {
             p.policyAction = 'Скрыть с витрины';
             p.policyReason = mc.reason;
           }
+          }
           /* Обязательный барьер перед любыми производными полями.  Выполняется
              для каждого SKU при каждом полном и частичном запуске пайплайна. */
-          if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p);
+          if (!sqlEnrichment && typeof AnomalyDetector !== 'undefined') AnomalyDetector.quarantineRow(p);
           if (!skipEcon && !sqlEconomics) {
             if (!econSkipFresh) {
               computeEconomics(p);
@@ -21599,6 +21643,7 @@ function runPipeline(full, options) {
           /* v12.9.6-mem: строка уже изменена на месте; клонирование через spread
              удваивало живые объекты каталога на каждом проходе (источник OOM). */
         } catch (e) {
+          if (sqlEnrichment) throw e; // No hidden browser fallback or partially successful SQL enrichment.
           econErr++;
           if (!firstErr) firstErr = String(e.message || e);
           if (econErr <= 3) console.warn('[UC] экономика SKU', p && p.article, e);
@@ -21609,6 +21654,9 @@ function runPipeline(full, options) {
       await _pipelineYield();
       /* Пик памяти ограничен чанком: упаковка уже выполнена выше, до расчёта. */
     }
+    if (sqlEnrichment && tnvedServerRows.length) await PyEngine.enrichCategoryTnved(tnvedServerRows);
+    if (sqlEnrichment && markStatusServerRows.length) await PyEngine.checkMarkStatus(markStatusServerRows);
+    if (sqlEnrichment) await PyEngine.quarantineDimensions(S.rows);
     if (sqlEconomics) {
       const result = await PyEngine.recalcAndApply(prog);
       if (result.unsupported) throw new Error('SQLite не поддерживает выбранную площадку: ' + result.unsupported);
@@ -26610,7 +26658,7 @@ const PyEngine = {
     el.title = sql ? 'Серверный движок Python + SQLite. Нажмите для обработки браузером.' : 'Встроенная обработка браузером. Нажмите для SQL-движка.';
   },
   async toggleProcessingMode() {
-    if (typeof _econEnsureJob !== 'undefined' && _econEnsureJob) {
+    if (S._pipeActive || (typeof _econEnsureJob !== 'undefined' && _econEnsureJob)) {
       Toast.warn('Дождитесь расчёта', 'Режим можно переключить после завершения текущей операции.'); return;
     }
     const next = this.processingMode() === 'sql' ? 'browser' : 'sql';
@@ -26926,7 +26974,10 @@ const PyEngine = {
       const p = byKey.get(normArticle(r.article) + '|' + normArticle(r.brand || ''));
       if (!p) {
         if (!onlyEmpty) {
-          S.rows.push({ article: r.article, brand: r.brand || '', name: r.name || '', price: num(r.price), cost: num(r.cost),
+          S.rows.push({ ...r, markRequired: r.mark_required === 'Да' || r.mark_required === true || r.mark_required === 1,
+            markStatus: r.mark_status || '', markCode: r.mark_code || '',
+            visible: !(r.visible === false || r.visible === 0 || r.visible === '0'),
+            visibleReason: r.visible_reason || '', article: r.article, brand: r.brand || '', name: r.name || '', price: num(r.price), cost: num(r.cost),
             stock: num(r.stock), sales: num(r.sales), weight: num(r.weight), length: num(r.length), width: num(r.width),
             height: num(r.height), volume: num(r.volume), oe_numbers: r.oe_numbers || '', analog_list: r.analog_list || '',
             category: r.category || '', tnved: r.tnved || '', applicability: r.applicability || '',
@@ -27062,7 +27113,7 @@ const PyEngine = {
       try {
         const st = this._settingsSnapshot();
         await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: st }) });
-      } catch (e) { /* экспорт возможен и без пересчёта: колонки экономики останутся от прошлого */ }
+      } catch (e) { throw new Error('Экспорт остановлен: не удалось обновить расчёты SQLite. ' + (e.message || e)); }
       const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 600000);
       try {
         const r = await fetch(this.base() + '/export/catalog.xlsx', { signal: ctl.signal, headers: { 'X-UC-Token': this.token() } });
@@ -27144,14 +27195,60 @@ const PyEngine = {
   },
   async exportCatalogFormat(fmt, articles) {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Экспорт на движке недоступен — используйте обычный экспорт приложения.'); return false; }
+    await ensureEconomics();
+    const selectedColumns=exportCatalog().filter(c=>Exp.pick && Exp.pick[c.k] && !exportColumnExcluded(c,Exp.activeMps()));
+    if(!selectedColumns.length) throw new Error('Колонки не выбраны');
     const isXlsx = fmt !== 'csv';
     await withProgress('Python: экспорт каталога', 'файл собирает движок из SQLite', async () => {
       await this._syncCatalog('app-export-fmt');
-      try { await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: this._settingsSnapshot() }) }); } catch (e) { }
+      await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: this._settingsSnapshot() }) });
+      const requested=articles ? new Set(articles.map(p=>JSON.stringify([p.article,p.brand || '']))) : null;
+      const exportRows=S.rows.filter(p=>!requested || requested.has(JSON.stringify([p.article,p.brand || ''])));
+      const useFormulas=isXlsx && (!$('#expFormulas') || $('#expFormulas').classList.contains('on'));
+      const inputKeys=exportInputSheetKeys();
+      const mainCols=selectedColumns.map((c,i)=>({c,i})).filter(x=>!inputKeys.has(x.c.k));
+      const inputCols=selectedColumns.map((c,i)=>({c,i})).filter(x=>inputKeys.has(x.c.k));
+      const articleIndex=selectedColumns.findIndex(c=>c.k==='article');
+      if(articleIndex>=0 && !inputCols.some(x=>x.c.k==='article')) inputCols.unshift({c:selectedColumns[articleIndex],i:articleIndex});
+      const sheets=isXlsx ? [{name:'Юнит-экономика',indices:mainCols.map(x=>x.i)},
+        {name:'Вводы и ставки',indices:inputCols.map(x=>x.i)}] : null;
+      const refs={};
+      if(isXlsx) {
+        mainCols.forEach((x,i)=>refs[x.c.k]=COL_LET(i));
+        inputCols.forEach((x,i)=>{if(x.c.k!=='article' || !mainCols.some(y=>y.c.k==='article'))
+          refs[x.c.k]="'Вводы и ставки'!"+COL_LET(i);});
+      } else selectedColumns.forEach((c,i)=>refs[c.k]=COL_LET(i));
+      refs.__ymAbsent=k=>YM_ONLY_EXPORT_FIELDS.has(k) && !Object.prototype.hasOwnProperty.call(refs,k);
+      const strictRefs=new Proxy(refs,{get(t,k){
+        if(typeof k==='symbol' || k==='then' || k==='toJSON') return undefined;
+        if(!Object.prototype.hasOwnProperty.call(t,k)) throw new Error('Отсутствует колонка '+String(k));
+        return t[k];}});
+      const skippedFormulas=new Set();
+      // Shared presentation semantics: src/custom, unavailable values, text codes and numeric formats.
+      const cells=exportRows.map((p,rowIndex)=>({article:p.article,brand:p.brand || '',
+        values:selectedColumns.map(c=>exportCatalogCellValue(c,p)),
+        formulas:selectedColumns.map(c=>{
+          if(!useFormulas || !c.xl || exportCellUnavailable(p,c.k,c.g)) return null;
+          try {
+            const raw=c.xl(rowIndex+2,strictRefs);
+            let f=raw ? Exp._sanitizeFormula(raw) : null;
+            if(raw && !f) skippedFormulas.add(c.n);
+            const value=exportCatalogCellValue(c,p);
+            if(f && typeof value==='number' && isFinite(value) && !/^IFERROR\(/i.test(f)) f=`IFERROR(${f},"")`;
+            return f;
+          }
+          catch(e) { skippedFormulas.add(c.n); return null; }
+        })}));
+      if(skippedFormulas.size) Toast.warn('Часть формул заменена значениями',
+        'Не выбраны необходимые колонки: '+[...skippedFormulas].join(', '));
       await this._download('/export/catalog' + (isXlsx ? '.xlsx' : '.csv'),
-        { articles: articles || null }, isXlsx ? 'UC_catalog_engine.xlsx' : 'UC_catalog_engine.csv');
+        { articles: articles || null, columns: selectedColumns.map((c,i) => ['__export_'+i,c.n]),
+          export_cells:cells, sheets,
+          column_meta:selectedColumns.map(c=>({key:c.k,width:c.w || 14,format:c.txt ? '@' : c.f || ''})),
+          protect:!$('#expProtect') || $('#expProtect').classList.contains('on'),
+          enc: $('#expEnc') ? $('#expEnc').value : 'utf-8', delimiter: $('#expDelim') ? $('#expDelim').value : ';' }, isXlsx ? 'UC_catalog_engine.xlsx' : 'UC_catalog_engine.csv');
       Toast.ok('Каталог экспортирован на Python-движке (SQL)',
-        'Файл собран движком из SQLite без сохранения в IndexedDB и без построения XLSX во вкладке. Колонки — стандартный набор движка (20), объём: ' +
+        'Файл собран движком из SQLite без сохранения в IndexedDB и без построения XLSX во вкладке. Колонки — выбранные поля, объём: ' +
         fmt(articles ? articles.length : S.rows.length) + ' SKU.');
     });
     return true;
@@ -27208,6 +27305,183 @@ const PyEngine = {
       }
       return out;
     } finally { clearTimeout(to); }
+  },
+  async checkMarkStatus(rows) {
+    await this.processingAvailable();
+    const cfg=S.settings || {}, settings=Object.fromEntries(['markRequireCode','markInvalidStatuses','markValidStatuses','autoHideMark']
+      .filter(k=>cfg[k]!==undefined).map(k=>[k,cfg[k]]));
+    const keys=['article','brand','markStatus','markCode','markRequired','visible','visibleReason','policyAction','policyReason'];
+    for(let offset=0;offset<rows.length;offset+=1000) {
+      const batch=rows.slice(offset,offset+1000);
+      const result=await this._fetch('/catalog/check-mark-status',{method:'POST',timeout:120000,
+        body:JSON.stringify({settings,rows:batch.map(p=>Object.fromEntries(keys.filter(k=>p[k]!==undefined).map(k=>[k,p[k]])))})});
+      if(!result.rows || result.rows.length!==batch.length) throw new Error('Неполный ответ проверки маркировки SQLite');
+      batch.forEach((p,i)=>{const r=result.rows[i];
+        if(p.article!==r.article || (p.brand || '')!==r.brand) throw new Error('Порядок строк маркировки изменился');
+        Object.assign(p,r.fields);});
+      for(const status of result.unknown || []) MarkStatus.unknown.add(status);
+    }
+  },
+  async enrichCategoryTnved(rows) {
+    await this.processingAvailable();
+    const fields=['article','brand','name','category','category_type','categoryType','sub_category','custom','enriched','attributes',
+      'tnved','tnved_eaes','tnvedEaes','hs_code','hsCode','ТН ВЭД код ЕАЭС','ТН ВЭД коды ЕАЭС','ТН ВЭД','Код ТН ВЭД','ТНВД',
+      '_sources','_categoryKindAuto','_categoryTnvedAuto','_categoryTypeCleared','_tnvedNoAutofill'];
+    const reference={rows:CATEGORY_TNVED_ROWS,revision:CategoryTnved.revision,source:CategoryTnved.source};
+    for(let offset=0;offset<rows.length;offset+=1000) {
+      const batch=rows.slice(offset,offset+1000);
+      const result=await this._fetch('/catalog/enrich-category-tnved',{method:'POST',timeout:120000,
+        body:JSON.stringify({reference,enabled:S.settings.autoCategoryByName!==false,
+          rows:batch.map(p=>Object.fromEntries([...new Set([...fields,...Object.keys(p).filter(k=>CategoryTnved.codeKey(k))])]
+            .filter(k=>p[k]!==undefined).map(k=>[k,p[k]])))})});
+      if(!result.rows || result.rows.length!==batch.length) throw new Error('Неполный ответ обогащения ТН ВЭД SQLite');
+      batch.forEach((p,i)=>{const r=result.rows[i];
+        if(p.article!==r.article || (p.brand || '')!==r.brand) throw new Error('Порядок строк ТН ВЭД изменился');
+        for(const k of r.removed || []) delete p[k]; Object.assign(p,r.fields);});
+    }
+  },
+  ozonProcessingReference() {
+    return {...OzonCat.processingSnapshot(),tree:OzonReference.hasData()?OzonReference._ref:null,
+      scope:OzonReference.scope(),category_rows:CATEGORY_TNVED_ROWS,category_revision:CategoryTnved.revision,
+      identity:{rows:S.rows.map(p=>({article:p.article,brand:p.brand})),parts:[...HVC.parts],
+        byArt:[...HVC.byArt].map(([k,v])=>[k,[...v]]),oe_mode:oeMode()}};
+  },
+  async enrichOzonPreferred(rows, options={}) {
+    if(!rows.length) return;
+    await this.processingAvailable();
+    const reference=options.reference || this.ozonProcessingReference();
+    const stats={total:0,auto:0,oe:0,applicability:0,manual:0,keyword:0,none:0,conflict:0};
+    for(let offset=0;offset<rows.length;offset+=1000) {
+      const batch=rows.slice(offset,offset+1000);
+      const result=await this._fetch('/catalog/enrich-ozon-preferred',{method:'POST',timeout:120000,
+        body:JSON.stringify({rows:batch,reference,enabled:S.settings.autoCategoryByName!==false,
+          force:options.force===true,force_name:options.forceName===true})});
+      if(!Array.isArray(result.rows)||result.rows.length!==batch.length) throw new Error('Неполный ответ Ozon SQLite');
+      result.rows.forEach((r,i)=>{if(!r || r.article!==batch[i].article || r.brand!==(batch[i].brand||'') || !r.fields || !Array.isArray(r.removed)) throw new Error('Неверный порядок или формат ответа Ozon SQLite');
+        if([...Object.keys(r.fields),...r.removed].some(k=>!k.startsWith('ozon_')&&!k.startsWith('_ozonName'))) throw new Error('Недопустимые поля Ozon SQLite');});
+      result.rows.forEach((r,i)=>{for(const k of r.removed) delete batch[i][k];Object.assign(batch[i],r.fields);});
+      result.rows.forEach((r,i)=>{const p=batch[i];stats.total++;if(['manual','import'].includes(p.ozon_type_src))stats.manual++;else if(p.ozon_type_src==='keyword')stats.keyword++;else if(p.ozon_type_src==='auto'){stats.auto++;if(p.ozon_type_basis==='oe')stats.oe++;else if(p.ozon_type_basis==='applicability')stats.applicability++;}else{stats.none++;if(r.result && /conflict/i.test(r.result.reason||''))stats.conflict++;}});
+    }
+    return stats;
+  },
+  async fixDimensionUnits(entries, approved=false) {
+    await this.processingAvailable();
+    const rows=entries.map(e=>e.p);
+    const result=await this._fetch('/catalog/fix-dimension-units',{method:'POST',timeout:120000,
+      body:JSON.stringify({items:entries.map(e=>({row:e.p,signature:e.signature})),limits:AnomalyDetector.limits,oe_mode:oeMode(),approved,
+        labels:Object.fromEntries(STD.map(s=>[s.k,s.n]))},(k,v)=>typeof v==='number'&&!Number.isFinite(v)?String(v):v)});
+    const allowed=new Set(['weight','length','width','height','volume','_volumeExplicit','_sources','_dimensionOeReview','dimensionAnomalyAck']);
+    if(!Array.isArray(result.rows)||result.rows.length!==rows.length)throw new Error('Неполный ответ исправления единиц SQL');
+    result.rows.forEach((r,i)=>{if(!r || r.article!==rows[i].article || r.brand!==(rows[i].brand||'') || !r.fields || !Array.isArray(r.removed) ||
+      [...Object.keys(r.fields),...r.removed].some(k=>!allowed.has(k)) || !['ready','skipped','applied'].includes(r.result?.status))throw new Error('Неверный ответ исправления единиц SQL');});
+    if(approved)result.rows.forEach((r,i)=>{if(r.result.status==='applied'){for(const k of r.removed)delete rows[i][k];Object.assign(rows[i],r.fields);}});
+    return result.rows;
+  },
+  async enrichSavedProduct(p, context, enabled) {
+    await this.processingAvailable();
+    await this.enrichNameCategories(context,enabled,[p]);
+    await this.enrichCategoryKinds(context,enabled,[p]);
+    await this.enrichOzonPreferred([p]);
+    await this.enrichCategoryTnved([p]);
+    await this.quarantineDimensions([p]);
+    const result=await this.recalcAndApply();
+    if(result?.unsupported)throw new Error('SQL не поддерживает выбранную площадку');
+  },
+  async confirmDimensions(p, approved=false, expectedSignature) {
+    await this.processingAvailable();
+    const result=await this._fetch('/catalog/confirm-dimensions',{method:'POST',timeout:120000,
+      body:JSON.stringify({row:p,limits:AnomalyDetector.limits,oe_mode:oeMode(),approved,expected_signature:expectedSignature},
+        (k,v)=>typeof v==='number'&&!Number.isFinite(v)?String(v):v)});
+    const allowed=new Set(['dimensionAnomalyBlocked','dimensionAnomalySignature','dimensionAnomalyIssues',
+      'dimensionAnomalyLimit','dimensionAnomalyAck','dimensionAnomalyAt','_volumeExplicit','_dimensionOeReview']);
+    if(!result || result.article!==p.article || result.brand!==(p.brand||'') || !result.fields || !Array.isArray(result.removed) ||
+       [...Object.keys(result.fields),...result.removed].some(k=>!allowed.has(k)) ||
+       !['clean','hard','stale','ready','confirmed'].includes(result.result?.status))throw new Error('Неверный ответ подтверждения ОВХ SQL');
+    for(const k of result.removed)delete p[k];Object.assign(p,result.fields);
+    return result.result;
+  },
+  async quarantineDimensions(rows) {
+    if(!rows.length)return;
+    await this.processingAvailable();
+    const allowed=new Set(['dimensionAnomalyBlocked','dimensionAnomalySignature','dimensionAnomalyIssues',
+      'dimensionAnomalyLimit','dimensionAnomalyAck','dimensionAnomalyAt','_volumeExplicit']);
+    const fields=['article','brand','category','weight','net_weight','length','width','height','volume','excluded',
+      '_sources','_volumeExplicit','_dimensionImportIssues','_dimensionOeReview','_dimensionAutoOeEvidence',
+      'oe_numbers','oe_list','oe_norm','oeSource',...allowed];
+    for(let offset=0;offset<rows.length;offset+=1000){
+      const batch=rows.slice(offset,offset+1000);
+      const result=await this._fetch('/catalog/quarantine-dimensions',{method:'POST',timeout:120000,
+        body:JSON.stringify({rows:batch.map(p=>Object.fromEntries(fields.filter(k=>p[k]!==undefined).map(k=>[k,p[k]]))),
+          limits:AnomalyDetector.limits,oe_mode:oeMode()},(k,v)=>typeof v==='number'&&!Number.isFinite(v)?String(v):v)});
+      if(!Array.isArray(result.rows)||result.rows.length!==batch.length)throw new Error('Неполный ответ карантина SQL');
+      result.rows.forEach((r,i)=>{if(!r || r.article!==batch[i].article || r.brand!==(batch[i].brand||'') || !r.fields || !Array.isArray(r.removed) || [...Object.keys(r.fields),...r.removed].some(k=>!allowed.has(k)))throw new Error('Неверный ответ карантина SQL');});
+      result.rows.forEach((r,i)=>{for(const k of r.removed)delete batch[i][k];Object.assign(batch[i],r.fields);});
+    }
+  },
+  async applyProductPolicies(rows,rules) {
+    if(!rows.length) return;
+    await this.processingAvailable();
+    for(let offset=0;offset<rows.length;offset+=1000) {
+      const batch=rows.slice(offset,offset+1000);
+      const result=await this._fetch('/catalog/apply-policies',{method:'POST',timeout:120000,body:JSON.stringify({rows:batch,rules})});
+      const allowed=new Set(['excluded','deletePending','policyAction','policyReason','visible','visibleReason']);
+      if(!Array.isArray(result.rows)||result.rows.length!==batch.length)throw new Error('Неполный ответ политик SQL');
+      result.rows.forEach((r,i)=>{if(!r || r.article!==batch[i].article || r.brand!==(batch[i].brand||'') || !r.fields || Object.keys(r.fields).some(k=>!allowed.has(k)))throw new Error('Неверный ответ политик SQL');});
+      result.rows.forEach((r,i)=>Object.assign(batch[i],r.fields));
+    }
+  },
+  async enrichRules(rows,rules,context) {
+    await this.processingAvailable();
+    for(let offset=0;offset<rows.length;offset+=1000) {
+      const batch=rows.slice(offset,offset+1000);
+      const result=await this._fetch('/catalog/enrich-rules',{method:'POST',timeout:120000,
+        body:JSON.stringify({rows:batch,rules,context:{version:context ? context.version : ''}})});
+      if(!result.rows || result.rows.length!==batch.length) throw new Error('Неполный ответ правил обогащения SQLite');
+      batch.forEach((p,i)=>{const r=result.rows[i];
+        if(!r || p.article!==r.article || (p.brand || '')!==r.brand) throw new Error('Порядок правил обогащения изменился');});
+      batch.forEach((p,i)=>{const r=result.rows[i];for(const k of r.removed || []) delete p[k];Object.assign(p,r.fields);
+        for(const [k,v] of Object.entries(r.nonfinite || {})) p[k]=v==='positive' ? Infinity : v==='negative' ? -Infinity : NaN;});
+    }
+  },
+  async enrichCategoryKinds(context, enabled, rows, operation='apply', categoryConfirmed=false) {
+    const changed=new Set();
+    if (!rows.length) return changed;
+    await this.processingAvailable();
+    const reference={rows:CATEGORY_TNVED_ROWS,revision:CategoryTnved.revision,base_categories:BASE_CATS.map(c=>c[0])};
+    const ctx={version:context ? context.version : '',categories:S.cats || [],rules:S.rules || [],
+      heads:enabled ? [...OzonAuto._index().heads] : []};
+    const keys=['article','brand','name','category','category_type','categoryType','sub_category','custom','enriched','attributes','_sources'];
+    for(let offset=0;offset<rows.length;offset+=1000) {
+      const batch=rows.slice(offset,offset+1000);
+      const result=await this._fetch('/catalog/enrich-category-kind',{method:'POST',timeout:120000,
+        body:JSON.stringify({reference,context:ctx,enabled,operation,category_confirmed:categoryConfirmed,rows:batch.map(p=>({
+          ...Object.fromEntries([...new Set([...keys,...Object.keys(p).filter(k=>k.startsWith('_category'))])]
+            .filter(k=>p[k]!==undefined).map(k=>[k,p[k]])),
+          _categoryExplicitSource:NameCategory.hasExplicitCategorySource(p)}))})});
+      if(!result.rows || result.rows.length!==batch.length) throw new Error('Неполный ответ назначения вида SQLite');
+      batch.forEach((p,i)=>{const r=result.rows[i];
+        if(!r || p.article!==r.article || (p.brand || '')!==r.brand || !r.fields || typeof r.fields!=='object')
+          throw new Error('Порядок строк назначения вида изменился');});
+      batch.forEach((p,i)=>{const r=result.rows[i];
+        for(const k of r.removed || []) delete p[k]; Object.assign(p,r.fields);
+        if(r.changed) changed.add(p);});
+    }
+    return changed;
+  },
+  async confirmCategoryKind(p, internal=false) {
+    const draft={...p};
+    const categoryConfirmed=internal ? NameCategory.confirm(draft) : false;
+    const changed=await this.enrichCategoryKinds(null,false,[draft],'confirm',categoryConfirmed);
+    // The original row stays untouched until the server operation has succeeded.
+    for(const k of Object.keys(p)) if(k.startsWith('_category') && !(k in draft)) delete p[k];
+    for(const k of Object.keys(draft)) if(k.startsWith('_category') || k==='category' || k==='category_type' || k==='_sources') p[k]=draft[k];
+    return changed.has(draft) || categoryConfirmed;
+  },
+  async importCategoryKind(p,value,source) {
+    const draft={...p,category_type:value,_sources:{...ozonSourceMap(p),category_type:source}};
+    await this.enrichCategoryKinds(null,false,[draft],'explicit_import');
+    for(const k of Object.keys(p)) if(k.startsWith('_category') && !(k in draft)) delete p[k];
+    for(const k of Object.keys(draft)) if(k.startsWith('_category') || k==='category_type' || k==='_sources') p[k]=draft[k];
   },
   async enrichNameCategories(context, enabled, rows) {
     rows = rows || S.rows;
@@ -28493,7 +28767,11 @@ const Import = {
               p[cm.target] = val;
               if (cm.target === 'category_type' && String(val == null ? '' : val).trim()) {
                 if (p._categoryTypeCleared) { delete p._categoryTypeCleared; rowChanged = true; }
-                if (p._categoryKindAuto) { CategoryKindAuto.explicitImport(p,val,importSource); rowChanged = true; }
+                if (p._categoryKindAuto) {
+                  if(PyEngine.processingMode()==='sql') await PyEngine.importCategoryKind(p,val,importSource);
+                  else CategoryKindAuto.explicitImport(p,val,importSource);
+                  rowChanged = true;
+                }
               }
               if (cm.target === 'tnved' && String(val == null ? '' : val).trim()) {
                 /* Явно импортированный код становится исходным даже при совпадении
@@ -29644,13 +29922,14 @@ const CategoryTnved = {
       return x;
     } catch(e) { return null; }
   },
-  hydrateCloud(p, raw) {
+  hydrateCloud(p, raw, deferKind=false) {
     const x=this.decodeCloud(raw); if (!x || !p) return false;
     p.category_type=x.category_type; p.tnved=x.tnved;
     if (x.auto) p._categoryTnvedAuto={revision:x.auto.revision,categoryKey:x.auto.categoryKey,typeKey:x.auto.typeKey,code:x.auto.code}; else delete p._categoryTnvedAuto;
     if (x.disabled) p._tnvedNoAutofill=true; else delete p._tnvedNoAutofill;
     if (x.type_cleared) p._categoryTypeCleared=true; else delete p._categoryTypeCleared;
-    CategoryKindAuto.hydrate(p,x.kind_auto || null);
+    if(deferKind) { if(x.kind_auto) p._categoryKindAuto={...x.kind_auto}; else delete p._categoryKindAuto; }
+    else CategoryKindAuto.hydrate(p,x.kind_auto || null);
     if (x.sources && typeof x.sources==='object' && !Array.isArray(x.sources)) for (const name of ['custom','enriched','attributes']) {
       const fields=x.sources[name]; if(!Array.isArray(fields)) continue;
       if(!p[name] || typeof p[name]!=='object' || Array.isArray(p[name])) p[name]={};
@@ -35910,8 +36189,10 @@ const Products = {
     $('#mpMeta').innerHTML = `обновлён: ${p._sources?.article?.date ? new Date(p._sources.article.date).toLocaleString('ru-RU') : '—'} · ставка: ${esc(p.tariffSourceUsed || 'нет')}`;
     modal('#mProduct');
   },
-  save() {
+  async save() {
     const p = S.openProduct; if (!p) return;
+    const sqlSave=PyEngine.processingMode()==='sql';
+    if(sqlSave)await PyEngine.processingAvailable();
     const ozOptional = ['ozon_commission','ozon_logistics','ozon_realfbs_delivery','ozon_failed_cost','noBuyPct'];
     for (const i of $$('[data-p]')) {
       if (!ozOptional.includes(i.dataset.p) || String(i.value).trim() === '') continue;
@@ -36008,12 +36289,17 @@ const Products = {
     HVC._identityCache=null; // brand/original identity may have changed before bumpVersion
     rebuildCatalogOeIndexes();
     const nameEnabled=S.settings.autoCategoryByName !== false, nameContext=nameEnabled ? NameCategory.prepare() : null;
+    if(sqlSave) {
+      await PyEngine.enrichSavedProduct(p,nameContext,nameEnabled);
+      if(typeof AnomalyDetector!=='undefined')AnomalyDetector.finishQuarantine();
+    } else {
     NameCategory.apply(p, nameContext, nameEnabled);
     CategoryKindAuto.apply(p, nameContext, nameEnabled);
     if (typeof OzonCat !== 'undefined') OzonAuto.applyPreferred(p);
     CategoryTnved.apply(p);
     if (typeof AnomalyDetector !== 'undefined') { AnomalyDetector.quarantineRow(p); AnomalyDetector.finishQuarantine(); }
     computeEconomics(p);
+    }
     persistSoon(); bumpVersion(); applyFilter(); Table.paint(); Dash.render(); UE.render(); $('#mProduct').classList.remove('on');
     Toast.ok('Сохранено', p.article + ' · пересчитано');
     if ((location.hash.slice(1) || 'dashboard') === 'cats') NameCategoryUI.render();
@@ -37276,13 +37562,16 @@ const Api = {
             const missingNet = S.rows.some(p=>num(p.net_weight)>0 && remote.has(normArticle(p.article)) && !Object.prototype.hasOwnProperty.call(remote.get(normArticle(p.article)),'net_weight'));
             if (missingNet) {Toast.warn('Загрузка отменена','Сервер не вернул вес нетто: локальные данные не заменены. Проверьте схему сервера и сохраните резервную копию.');return;}
           }
-          S.rows = AnomalyOE.carryPullAudit(oeAuditPlan,items.map(item=>{
+          const sqlKindHydration=PyEngine.processingMode()==='sql';
+          const pulledRows = AnomalyOE.carryPullAudit(oeAuditPlan,items.map(item=>{
             const p=Object.assign({},item);
-            if (CategoryTnved.hydrateCloud(p,item._uc_category_tnved_v1)) delete p._uc_category_tnved_v1;
+            if (CategoryTnved.hydrateCloud(p,item._uc_category_tnved_v1,sqlKindHydration)) delete p._uc_category_tnved_v1;
             if (OzonAssignmentCloud.hydrate(p,item[OzonAssignmentCloud.key])) delete p[OzonAssignmentCloud.key];
             if (RecommendedPrice.hydrate(p,item[RecommendedPrice.cloudKey])) delete p[RecommendedPrice.cloudKey];
             return p;
           }));
+          if(sqlKindHydration) await PyEngine.enrichCategoryKinds(null,false,pulledRows,'hydrate');
+          S.rows=pulledRows;
           await runPipeline(true, { persist: true });
           Table.paint();
           Dash.render();
@@ -39587,12 +39876,14 @@ const NameCategoryUI = {
     else if (p.ozon_type_src === 'import') out.push('Ozon: из файла, сверьте');
     return out;
   },
-  confirmCurrentDrafts() {
+  async confirmCurrentDrafts() {
     const changed=[];
     for(const p of S.rows){
       const internal=!!(p._categoryNameAutoValue&&p.category===p._categoryNameAutoValue&&p._categoryNameStatus==='auto');
-      const categoryConfirmed=internal?NameCategory.confirm(p):false;
-      let rowChanged=CategoryKindAuto.confirm(p,categoryConfirmed)||categoryConfirmed;
+      let rowChanged;
+      if(PyEngine.processingMode()==='sql') rowChanged=(internal || (CategoryKindAuto.isDraft(p) && CategoryKindAuto.current(p))) ? await PyEngine.confirmCategoryKind(p,internal) : false;
+      else { const categoryConfirmed=internal?NameCategory.confirm(p):false;
+        rowChanged=CategoryKindAuto.confirm(p,categoryConfirmed)||categoryConfirmed; }
       if(p.ozon_type_src==='keyword'&&p._ozonNameStatus==='auto'&&p.ozon_category&&p.ozon_type){
         OzonCat.manual(p,p.ozon_category,p.ozon_type);
         delete p._ozonNameSourceName;delete p._ozonNameSourceBrand;delete p._ozonNameVersion;delete p._ozonNameStatus;delete p._ozonNameChoices;delete p._ozonNameSuggestedType;
@@ -39676,8 +39967,11 @@ const NameCategoryUI = {
     });
     table.querySelectorAll('[data-autocat-confirm]').forEach(el => el.onclick = async () => {
       const p = this.shown[+el.dataset.autocatConfirm]; if (!p) return;
-      let categoryConfirmed=NameCategory.confirm(p), confirmedOzon = false;
-      let changed=CategoryKindAuto.confirm(p,categoryConfirmed) || categoryConfirmed;
+      let changed, confirmedOzon = false;
+      try {
+        if(PyEngine.processingMode()==='sql') changed=await PyEngine.confirmCategoryKind(p,true);
+        else {const categoryConfirmed=NameCategory.confirm(p); changed=CategoryKindAuto.confirm(p,categoryConfirmed) || categoryConfirmed;}
+      } catch(e) { Toast.err('Подтверждение не выполнено',String(e.message || e)); return; }
       if (p.ozon_type_src === 'keyword' && p.ozon_category && p.ozon_type) {
         OzonCat.manual(p,p.ozon_category,p.ozon_type);
         delete p._ozonNameSourceName; delete p._ozonNameSourceBrand; delete p._ozonNameVersion; delete p._ozonNameStatus; delete p._ozonNameChoices; delete p._ozonNameSuggestedType;
@@ -39734,7 +40028,7 @@ const BulkAutoApply = {
         }
         prog('Пересчёт категорий, ТН ВЭД и экономики…');
         await runPipeline(true, { onProgress:prog });
-        const confirmedRows = NameCategoryUI.confirmCurrentDrafts();
+        const confirmedRows = await NameCategoryUI.confirmCurrentDrafts();
         confirmed = confirmedRows.length;
         if (confirmedRows.length) { bumpVersion(); await persistNow(confirmedRows); }
         applyFilter(); Table.paint(); Dash.render(); UE.render(); Cats.render(); NameCategoryUI.render();
@@ -39803,6 +40097,21 @@ function normalizedOeForExport(p) {
  * v10.4 ИНВАРИАНТ: формулы xl сведены с computeEconomics (JS). Если пользователь снял колонку,
  * на которую ссылается формула, ссылка даёт 'undefined' и райтер пишет JS-значение вместо
  * формулы — расхождений нет ни в одном сочетании колонок. */
+function exportInputSheetKeys() { return new Set(['weight','length','width','height','stock','minStock',
+      'commPct','acqPct','agencyFeePerSku','boostPct','taxPct','cofinPct','promoCofin','cheapFbsApplied','cheapFbsRate','cheapFbsBaseRate','cheapFbsVolumeRounded','cheapFbsReason','cheapFbsAmount','cheapFbsFlag','tariffLastMileP','buyerDeliveryUnit','uLog','uSc','uPack','uTransitPack','uRet','storageUnit','returnStorageUnit','nonStdUnit','lateShipUnit','taxUnit','listingUnit','lastMileP','returnPct','noBuyPct','returnLogK','returnPerKg','returnFixed','returnStorageDays','returnStoragePerDay','slaPenaltyPerUnit','lgKg','stL','prUnit','days',
+      'visible','visibleReason','excluded','deletePending','markRequired','markCompliant','multUsed','multiplicity','stdDimsExport','autoFillNote',
+      'commWB','logWB','retWB','ozonScheme','ozonIsKgt','ozonLiters','commOzon','dropoffOzon','midMileOzon','lastMileOzon','logOzon','realFbsServiceOzon','retOzon','handOverOzon','nonStdOzon','ozonRateConf','lateShipOzon','shipDiscOzon','retStoreOzon','nonStdWhyOzon','commYM','logYM','retYM','commMM','logMM','retMM','commAvito','logAvito','retAvito']); }
+
+function exportCatalogCellValue(c, p) {
+      let v = c.src ? c.src(p) : c.custom ? (p.custom || {})[c.custom] : (p[c.k] ?? '');
+      if (exportCellUnavailable(p, c.k, c.g)) v = '';
+      if (c.txt) return (v == null ? '' : String(v)); /* кодовые колонки — только текст */
+      if (v instanceof Date) v = num(v);
+      else if (c.f && v !== '' && v !== null && v !== undefined) v = num(v);
+      return v;
+}
+
+
 function exportCatalog() {
   const chzRulesSnapshot=ChzTnved.rules(); // one consistent rule set for a chunked export
   const C = [
@@ -40530,7 +40839,7 @@ const Exp = {
         try { modal('#mExport', false); } catch (e) { }
         return;
       }
-    } catch (e) { console.warn('[UC] Exp via engine:', e); }
+    } catch (e) { if (PyEngine.processingMode() === 'sql') throw e; console.warn('[UC] Exp via engine:', e); }
     return exportGuard('Экспорт', () => this._runImpl(forceRows));
   },
   /* v12.9.87: лёгкий режим — после успешной выгрузки расчётные данные
@@ -40663,10 +40972,7 @@ const Exp = {
        цена/закупка и результаты по всем маркетплейсам), а детальные вводы
        (габариты, ставки %, расходы ₽/ед и разбивка по площадкам) живут на листе
        «Вводы и ставки». Формулы главного листа ссылаются на него через ref. */
-    const INPUT_SHEET_KEYS = new Set(['weight','length','width','height','stock','minStock',
-      'commPct','acqPct','agencyFeePerSku','boostPct','taxPct','cofinPct','promoCofin','cheapFbsApplied','cheapFbsRate','cheapFbsBaseRate','cheapFbsVolumeRounded','cheapFbsReason','cheapFbsAmount','cheapFbsFlag','tariffLastMileP','buyerDeliveryUnit','uLog','uSc','uPack','uTransitPack','uRet','storageUnit','returnStorageUnit','nonStdUnit','lateShipUnit','taxUnit','listingUnit','lastMileP','returnPct','noBuyPct','returnLogK','returnPerKg','returnFixed','returnStorageDays','returnStoragePerDay','slaPenaltyPerUnit','lgKg','stL','prUnit','days',
-      'visible','visibleReason','excluded','deletePending','markRequired','markCompliant','multUsed','multiplicity','stdDimsExport','autoFillNote',
-      'commWB','logWB','retWB','ozonScheme','ozonIsKgt','ozonLiters','commOzon','dropoffOzon','midMileOzon','lastMileOzon','logOzon','realFbsServiceOzon','retOzon','handOverOzon','nonStdOzon','ozonRateConf','lateShipOzon','shipDiscOzon','retStoreOzon','nonStdWhyOzon','commYM','logYM','retYM','commMM','logMM','retMM','commAvito','logAvito','retAvito']);
+    const INPUT_SHEET_KEYS = exportInputSheetKeys();
     const mainCat = [], inCat = [];
     cat.forEach(c => { (INPUT_SHEET_KEYS.has(c.k) ? inCat : mainCat).push(c); });
     /* На листе вводов первая колонка — артикул, чтобы строки читались без главного листа. */
@@ -41213,14 +41519,7 @@ const Exp = {
     /* Тот же фикс, что и в XLSX: значение может оказаться JS Date (мусор из cellDates:true
      * при чтении .xlsx с исходным «датным» форматом ячейки) — без защиты String(date)
      * даёт нечитаемую строку "Mon Jul 22 2024 00:00:00 GMT+0300…" вместо числа. */
-    const cellVal = (c, p) => {
-      let v = c.src ? c.src(p) : c.custom ? (p.custom || {})[c.custom] : (p[c.k] ?? '');
-      if (exportCellUnavailable(p, c.k, c.g)) v = '';
-      if (c.txt) return (v == null ? '' : String(v)); /* кодовые колонки — только текст */
-      if (v instanceof Date) v = num(v);
-      else if (c.f && v !== '' && v !== null && v !== undefined) v = num(v);
-      return v;
-    };
+    const cellVal = exportCatalogCellValue;
     const from = sliceFrom || 0, to = sliceTo === undefined ? rows.length : sliceTo;
     /* КЛЮЧ К ПАМЯТИ: каждый чанк СРАЗУ кодируется в байты (Uint8Array) и строка-чанк
        освобождается. Иначе 580k строк жили бы как JS-строки UTF-16 (~1.2 ГБ) плюс
@@ -43371,7 +43670,23 @@ const AnomalyDetector = {
     this.finishQuarantine();
     Toast.info('Сканирование завершено', `Найдено ${this.found.length} аномалий · заблокировано ${this.blockedRows().length} SKU`);
   },
+  async applyFixSql(selectedOnly) {
+    const selected=(selectedOnly?this.found.filter(f=>f._sel):this.found).filter(f=>f.p);
+    if(!selected.length){Toast.warn('Отметьте SKU','Эвристика применяется только к выбранным строкам.');return;}
+    const preview=await PyEngine.fixDimensionUnits(selected);
+    const entries=selected.filter((f,i)=>preview[i].result.status==='ready');
+    if(!entries.length){Toast.info('Нет подходящих предположений','Проверьте выбранные значения вручную или найдите данные по OE.');return;}
+    if(!confirm(`Применить предположения об единицах к ${entries.length} отмеченным SKU? Это не измерение товара: проверьте исходные единицы и упаковку. Сохранить резервную копию перед массовым изменением.`))return;
+    const results=await PyEngine.fixDimensionUnits(entries,true),changed=[];
+    results.forEach((r,i)=>{if(r.result.status==='applied'){changed.push(entries[i].p);if(r.result.log)this.log.push(r.result.log);}});
+    this.save();
+    const small=changed.length<Math.max(50,S.rows.length*0.02);
+    await runPipeline(true,{changedRows:new WeakSet(changed),smallDelta:small,persistChangedOnly:small,changedList:changed});
+    this.renderLog();
+    Toast.warn('Предположения применены',`${changed.length} SKU · проверьте реальные единицы и упаковку. В карантине осталось ${this.blockedRows().length} SKU.`);
+  },
   async applyFix(selectedOnly) {
+    if(PyEngine.processingMode()==='sql')return this.applyFixSql(selectedOnly);
     const selected = selectedOnly ? this.found.filter(f => f._sel) : this.found;
     if (!selected.length) { Toast.warn('Отметьте SKU', 'Эвристика применяется только к выбранным строкам.'); return; }
     const targets = selected.filter(f => f.p && f.p.dimensionAnomalyBlocked && f.signature === this.signature(f.p) && f.fix && Object.keys(f.fix).length);
@@ -43404,8 +43719,35 @@ const AnomalyDetector = {
     this.renderLog();
     Toast.warn('Предположения применены', `${changed.length} SKU · проверьте реальные единицы и упаковку. В карантине осталось ${this.blockedRows().length} SKU.`);
   },
+  async confirmSql(p) {
+    let r=await PyEngine.confirmDimensions(p);
+    const rejected=()=>{
+      this.finishQuarantine();
+      Toast.warn(r.status==='hard'?'Сначала исправьте значения':'Значения изменились',
+        r.status==='hard'?'Такие ошибки ОВХ нельзя подтвердить. Исправьте значения в карточке.':'Повторная проверка выполнена: подтвердите актуальную аномалию.');
+    };
+    if(r.status==='clean'){await runPipeline(true);return;}
+    if(r.status!=='ready'){rejected();return;}
+    const v=r.values;
+    const message=`Подтвердить аномальные габариты SKU «${p.article}»?\n\n`+
+      `Вес брутто: ${fmt(v.weight,6)} кг; нетто: ${v.net_weight>0?fmt(v.net_weight,6)+' кг':'не указан'}; Д/Ш/В: ${fmt(v.length,2)}×${fmt(v.width,2)}×${fmt(v.height,2)} см; объём: ${fmt(r.volume,4)} л.\n`+
+      (p._dimensionOeReview?`Источник: ${p._dimensionOeReview.source||'данные по OE'}. Сверили именно упаковку этого SKU?\n`:'')+
+      (r.issues.some(x=>x.type==='import_rejected')?'Некоторые ячейки последнего импорта отклонены. Сверили сохранённые измерения?\n':'')+
+      'SKU будет допущен к расчётам и выгрузкам. При изменении значений или лимитов подтверждение потребуется снова.';
+    if(!confirm(message))return;
+    r=await PyEngine.confirmDimensions(p,true,r.signature);
+    if(r.status!=='confirmed'){if(r.status==='clean')await runPipeline(true);else rejected();return;}
+    if(r.log)this.log.push(r.log);
+    this.save();
+    const result=await PyEngine.recalcAndApply();
+    if(result?.unsupported)throw new Error('SQL не поддерживает выбранную площадку');
+    this.finishQuarantine();bumpVersion();applyFilter();Table.paint();Dash.render();UE.render();
+    await persistNow();
+    Toast.ok('Аномалия подтверждена',`${p.article} допущен к расчётам и выгрузкам до изменения значений или лимитов`);
+  },
   async confirm(p) {
     if (!p) return;
+    if(PyEngine.processingMode()==='sql')return this.confirmSql(p);
     const e = this.evaluate(p);
     if (!e.issues.length) { await runPipeline(true); return; }
     if (this.hasHardIssues(e.issues)) {

@@ -1,0 +1,10 @@
+const fs=require('fs'),vm=require('vm'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
+const input=JSON.parse(fs.readFileSync(0,'utf8')),ctx={};vm.createContext(ctx);
+const la=h.indexOf('const OzonNameLexicon = (() => {');
+vm.runInContext(h.slice(la,h.indexOf('\nif (typeof globalThis',la))+';globalThis.OzonNameLexicon=OzonNameLexicon;',ctx);
+vm.runInContext(h.slice(h.indexOf('const OzonAuto = {'),h.indexOf("if (typeof globalThis !== 'undefined') globalThis.OzonAuto = OzonAuto;"))+'globalThis.OzonAuto=OzonAuto;',ctx);
+ctx.OzonReference={strictKey:v=>String(v||'').normalize('NFC').trim().toLowerCase().replace(/\s+/g,' '),version:()=> 'test'};
+const extract=name=>h.match(new RegExp('const '+name+' = \\{[\\s\\S]*?\\n\\};\\n'))[0];
+ctx.CATEGORY_TNVED_ROWS=input.categoryRows;ctx.OZON_NAME_RULES_VERSION='test';ctx.OzonCat={TYPES:input.types};
+vm.runInContext(extract('NameCategory')+'\n'+extract('CategoryTnved')+'\n'+extract('CategoryKindAuto')+'\n'+extract('CsvNameMatcher')+'\nCategoryTnved.revision="test";CategoryKindAuto.version="csv-kind-name-v1|test";',ctx);
+process.stdout.write(JSON.stringify(input.rows.map(p=>ctx.OzonAuto.detailWithCategory(p))));

@@ -308,3 +308,563 @@ JS OK, diff --check OK.
 ещё выполняются клиентом. Regex-оператор правил использует Python re;
 полная эквивалентность всех RegExp JS (в частности Unicode/специальных
 конструкций) не доказана и остаётся отдельным ограничением.
+
+## Продолжение в ветке после v12.9.156: CategoryTnved
+
+Добавлен `engine/category_tnved.py`: NFKC-нормализация, конфликтные пары
+категория/вид, поиск видов и явных кодов в custom/enriched/attributes,
+приоритет пользовательского кода, актуальность CategoryKindAuto-маркера,
+переход через referenceCategory, отключение автоподстановки и снятие только
+собственного устаревшего кода/источника. Неизвестный revision-маркер не меняется.
+
+Маршрут `/catalog/enrich-category-tnved` сохраняет справочник и выполняет
+подстановку на сервере. SQL-pipeline собирает изменённые строки и вызывает
+его пакетно перед серверным пересчётом вместо CategoryTnved.apply в браузере.
+Тип товара пока определяется прежним клиентским CategoryKindAuto; перенос
+самого определения типа — отдельный незакрытый пункт.
+
+Тест исполняет настоящий CategoryTnved.apply и CategoryKindAuto.current из
+index.html в Node: 16 случаев при включённой и выключенной автокатегоризации
+(32 сравнения), включая stale/confirmed тип, provenance и импортные коды.
+117 Python-тестов OK; JS OK; diff --check OK.
+
+## Следующий серверный этап: MarkStatus и скрытие по маркировке
+
+Добавлен engine/mark_status.py и /catalog/check-mark-status. SQL-pipeline
+передаёт статус, код, необходимость маркировки, текущую видимость и четыре
+настройки маркировки. Проверка и решение autoHideMark выполняются сервером;
+клиент применяет поля и пополняет список неизвестных статусов. Скрытие
+сохраняется в SQLite; настройки проверки хранятся отдельно.
+
+Сохранены приоритет отсутствующего кода/статуса, приоритет чёрного списка
+над белым, безопасное поведение неизвестного статуса и отсутствие
+автоматического возврата видимости у ранее скрытого SKU. Длина кода
+считается в UTF-16, как String.length браузера.
+
+tests/mark-status-reference.js извлекает реальный MarkStatus и реальный
+фрагмент действия pipeline из index.html. 15 строк x 4 набора настроек
+(60 сравнений) совпали по полям и результату check. Всего 118 Python-тестов
+OK; JS OK; diff --check OK.
+
+CategoryKindAuto/CsvNameMatcher, назначение Ozon-типа, пользовательские
+формулы и остальные товарные политики пока не перенесены полностью.
+Проверка маркировки — не правовое определение необходимости маркирования.
+
+## SQL-экспорт пользовательских и вычисляемых колонок
+
+Выбранные колонки больше не отклоняются из-за src/custom. Общая функция
+exportCatalogCellValue используется браузерным CSV и подготовкой снимка
+SQL-экспорта (src/custom, text, числовые форматы, unavailable). Снимок ячеек
+сохраняется во временную SQLite-таблицу; Python сериализует CSV/XLSX.
+Это совместная реализация представления, НЕ независимый Python-порт всех
+src-функций. XLSX остаётся одно-листовым: стили, сводки и разнесение на
+«Вводы и ставки» браузерной книги ещё не воспроизведены.
+
+Добавлены Excel-формулы c.xl: ссылки строятся для фактических колонок
+SQL-листа и каждой строки, учитываются переключатель формул и unavailable.
+Недостающие зависимости дают сохранённое значение с предупреждением,
+как fallback браузерного шаблона. Python пишет <f> и кэш <v>, не выполняя
+переданную формулу. Пользовательский текст не становится формулой.
+CSV использует только значения независимо от формульного снимка.
+
+Исправлен порядок строк снимка: раньше SQL сортировка article/brand могла
+переставить строки и сломать ссылки. Посторонние строки SQLite не попадают
+в снимок, пустой снимок даёт пустые данные. Проверены cached values,
+ссылки A2/A3, фильтрация бренда, ведущие нули, CSV safety и неверные payload.
+125 Python-тестов, JS и diff --check проходят.
+
+## Двухлистовый SQL XLSX
+
+Список полей листа «Вводы и ставки» вынесен в exportInputSheetKeys —
+один и тот же список используется streamXlsx браузера и SQL-экспортом.
+SQL-книга получает листы «Юнит-экономика» и «Вводы и ставки», артикул
+дублируется на листе вводов. Формулы генерируются с учётом новой карты
+колонок и ссылок 'Вводы и ставки'!; CSV не меняет плоскую структуру.
+Python собирает многолистовый OOXML с отдельными sheetId/relationships
+и Content_Types. Сервер проверяет имена листов и индексы колонок.
+
+Тест проверяет части ZIP, связи, формулы, cached values и (при наличии
+openpyxl) открытие книги в формульном и data_only режимах.
+126 Python-тестов + JS OK. Полного оформления, выбранных сводных листов,
+Excel-валидаций и защиты листов браузерной книги пока нет.
+
+## Форматы SQL XLSX и защита
+
+SQL-путь передаёт width и f/txt каждой выбранной колонки. Python формирует
+общий styles.xml для обоих листов: числовые форматы, @ для кодов, выделенная
+шапка; ширины колонок, freeze A2, автофильтр. expProtect включает защиту
+основного листа; лист вводов остаётся редактируемым, как streamXlsx.
+Формулы SQL-снимка теперь проходят реальный Exp._sanitizeFormula и numeric
+IFERROR wrapper браузерного райтера, вместо записи сырого результата xl.
+Тест читает книгу через XML и при наличии openpyxl проверяет number_format,
+freeze, protection и ведущие нули. 127 Python-тестов и JS OK.
+
+Это базовое оформление, а не полный визуальный паритет: палитра и стили
+браузерной книги, conditional formatting, сводки и Excel validations ещё
+не перенесены полностью. SQL serializer по-прежнему получает подготовленные
+JS экспортные значения/формулы; независимое серверное вычисление src не готово.
+
+## Финансовое условное форматирование SQL XLSX
+
+column_meta содержит key исходной колонки. На сервере добавлены шкалы
+margin [0,15,30], roi [0,50,100], deficit [-20,0,20] с цветами браузера;
+полосы цен, продаж, выручки, остатков и статей расходов; cellIs >0/<0
+для netProfit/perUnitNet/fcProfit. Ссылки строятся по реальному положению
+колонок на каждом листе, при пустых данных правила не создаются.
+Общие dxf содержат зеленую/красную финансовую подсветку.
+Тест проверяет перестановку колонок, диапазоны, пороги, цвета, dxf и
+чтение правил openpyxl. 128 Python-тестов и JS OK.
+Не перенесены все прочие правила аномалий/статусов, validations и сводки.
+
+## Начало переноса CsvNameMatcher
+
+engine/csv_kind_lexicon.py реализует words/stem/head/variant/index:
+NFKC, русские/английские aliases, специальные основы, стоп-слова,
+полные и shared-варианты составных видов. Residual-виды не назначаются,
+но добавляют признаки для защиты от слишком общего совпадения.
+Сохраняются дубли exact labels по разным категориям.
+Дифференциальный тест исполняет настоящий CsvNameMatcher и OzonAuto:
+22 лексических входа и индекс из 7 строк совпали (порядок Set несущественен).
+129 Python-тестов + JS OK. Модуль пока НЕ подключён к pipeline:
+candidates/guess, переписывание названий и CategoryKindAuto.apply ещё
+требуют переноса. SQL-классификация вида от этого шага не стала завершённой.
+
+## CsvNameMatcher candidates/guess
+
+Добавлен engine/csv_kind_matcher.py и снимок упорядоченных правил
+OzonNameLexicon (csv_kind_rewrites.json). Перенесены texts/nameLead,
+защита unsafe English head, exact-first, ранжирование по обязательным
+основам/исходному тексту, ambiguous для нескольких товаров, защита
+слишком общего вида и generic ремкомплекта, near-кандидаты, явная
+категория и разрешение одинаковых видов по контексту категории.
+
+23 строки сравниваются с реальными JS texts/candidates/guess, включая
+английский housing, NFKC, бренд, составной товар, остаточные категории,
+синонимы, явную/автоматическую категорию. По проверенным входам совпали
+списки, порядок, причины и результаты. 130 Python-тестов + JS OK.
+Модуль ещё не подключён: CategoryKindAuto.apply и его lifecycle не готов,
+не заменять его преждевременно этим matcher. Полный словарь и широкая
+корпусная проверка ещё нужны; Python re не эквивалентен JS RegExp вообще.
+
+## CategoryKindAuto.apply lifecycle
+
+engine/category_kind.py портирует apply: foreign marker, ручная правка вида,
+confirmed, type cleared, explicit aliases/conflicts, disabled/stale,
+актуальный draft, повторный guess, совместимость категорий, csv/name/rule
+categoryMode, provenance. Неуспешный повторный подбор снимает только свой
+черновик; csv_auto категория возвращается через NameCategory.
+16 случаев x enabled/disabled сравнены с реальным JS apply (32 сравнения).
+131 Python-тест + JS OK. Добавлен /catalog/enrich-category-kind с записью
+справочника, категории/вида и состояния маркеров в SQLite.
+Клиентский pipeline пока НЕ переключён на этот маршрут. Нужны интеграционные
+проверки повторного прохода после enrich-правил и stale csv_auto снятия,
+а также confirm/hydrate/import lifecycle вне apply.
+
+## Подключение CategoryKindAuto в SQL pipeline
+
+runPipeline в SQL-режиме после серверного NameCategory пакетно вызывает
+/catalog/enrich-category-kind (до политик и OzonAuto). Браузерный apply
+в этом месте отключён только для SQL. Если enrich-правило сделало draft
+неактуальным, выполняется повторный серверный apply до TNVED/Ozon.
+Ошибка SQL обогащения прерывает проход без скрытого браузерного fallback.
+Клиент передаёт исходные поля/маркеры, словарь, base categories и контекст
+NameCategory; возвращаемая позиционная пачка проверяет article/brand.
+Helper explicit-source verdict не переносится в результирующие метаданные.
+
+Добавлены stale csv_auto снятие с настоящим NameCategory.prepare/apply в
+Node, confirmed с изменённой категорией, rule_auto и SQLite state persistence.
+19 случаев x enabled/disabled (38 сравнений); всего 132 Python tests и JS OK.
+Повторный проход после правила сейчас делает запрос на каждый stale SKU:
+корректность приоритетнее скорости, для массовых правил нужна батчизация.
+Прямые действия карточки/confirm/import/hydrate пока остаются браузерными;
+полный набор обогащений и OzonAuto всё ещё не портирован.
+
+## Остальные операции CategoryKind lifecycle
+
+CategoryKind реализует confirm, explicit_import, hydrate, marker_for_cloud.
+Дифференциальные проверки реальных браузерных операций: current/stale,
+редактированный/пустой вид, confirmed, foreign version, null marker,
+с подтверждением категории и без (56 сравнений). Проверены причины отказа
+markerForCloud. Маршрут enrich-category-kind принимает operation apply,
+confirm, hydrate, explicit_import; confirm возвращает changed и пишет
+результат в SQLite state. Неизвестная операция отклоняется.
+133 Python-теста + JS OK. UI-кнопки подтверждения, облачная гидратация и
+импортные обработчики пока не переключены на новые серверные операции.
+
+## Подключение UI подтверждения вида
+
+Одиночная кнопка NameCategoryUI и confirmCurrentDrafts в SQL-режиме
+вызывают серверный operation=confirm. Категория подтверждается на
+временной копии; исходный SKU получает метки только после успешного
+ответа. Ошибка одиночного действия показывается пользователю без
+браузерного fallback. Browser mode сохраняет прежний CategoryKindAuto.confirm.
+confirmCurrentDrafts стал async, BulkAutoApply ожидает его завершения;
+запросы идут только для актуальных черновиков/подтверждаемой категории.
+Пачка ответа полностью проверяется перед изменением любой её строки.
+Реальные клиентские методы исполняются в Node с mock HTTP: operation,
+category_confirmed, успех, offline без изменения исходной строки,
+неверный article. 134 Python-теста + JS OK.
+
+Массовое подтверждение пока последовательное, не транзакция всего каталога.
+Импорт и cloud hydrate ещё не используют серверные lifecycle операции.
+
+## Импорт вида и cloud hydrate: клиентские точки входа
+
+При импорте явного category_type SQL-режим вызывает operation=explicit_import
+вместо CategoryKindAuto.explicitImport; источник передаётся вместе со снимком.
+Helper применяет ответ только после успеха. Остальная обработка импортной
+строки по-прежнему мутирует каталог: это НЕ атомарность всего импорта.
+
+При получении каталога с сервера hydrateCloud умеет отложить kind lifecycle:
+декодирует поля/маркер без браузерного hydrate. Новые строки проходят серверный
+operation=hydrate пакетами, затем присваиваются S.rows. Ошибка восстановления
+оставляет прежний массив S.rows, без fallback. Синхронный нормализатор локальных
+строк пока использует прежний hydrateCloud без defer.
+Реальные клиентские методы протестированы с mock HTTP для explicit_import,
+source preservation, offline без изменения helper-строки, hydrate dispatch.
+134 Python-теста + JS OK. В build_exe.bat добавлен csv_kind_rewrites.json,
+без него frozen engine не смог бы импортировать CsvKindMatcher.
+
+## Пользовательские формулы обогащения: первый серверный проход
+
+engine/enrichment_formula.py — restricted recursive-descent parser, без eval/exec:
+арифметика, сравнения, &&/||, ленивые if/тернарник, p.field, whitelist функций.
+Сохранён запрет reflection/prototype и лимит 400 символов. В частности,
+текущий JS tokenizer отвергает одиночный !, хотя unary-код его содержит;
+порт воспроизводит реально исполняемую грамматику, а не комментарий.
+
+engine/enrichment_rules.py выполняет enabled enrich rules по порядку,
+защищает явную категорию, обновляет category provenance, пропускает
+ошибочную формулу. /catalog/enrich-rules пишет patch/state в SQLite.
+В SQL runPipeline правила теперь исполняются сервером, на прежнем месте
+после политик и до повторного CategoryKindAuto. Nonfinite результаты
+передаются отдельным тегом (JSON null не должен молча подменять Infinity).
+
+39 формул сравнены с настоящим safeEvalFormula, 4 строки — с настоящим
+фрагментом браузерного pipeline; тест persistence/nonfinite. Всего 137
+Python-тестов и JS OK. Это проверенный начальный набор, НЕ доказательство
+полного JS numeric/coercion parity: нужны object/list inputs, NaN-domain
+math, extreme exponents, даты и более широкий корпус выражений.
+Запрос правил пока на SKU, нужна пакетная оптимизация. OzonAuto и другие
+блоки полного обогащения остаются незавершёнными.
+
+## Строгая Ozon-классификация по OE/применимости
+
+engine/ozon_classifier.py переносит resolve: oeTokens, нормализацию OE/HVC,
+поиск в OE registry, историческую readPair, nested mapping, declared invalid,
+конфликты прямых пар и применимости, приоритет composite OE+app над app,
+результаты reason/score/basis/confidence. Канонические пары передаются как
+исходный словарь, а не готовые вердикты браузера.
+/catalog/classify-ozon хранит reference в SQLite и возвращает классификацию.
+16 сравнений с настоящим OzonCat.classify на историческом справочнике и
+тест сохранения reference: 139 Python tests + JS OK.
+
+Это ещё НЕ OzonAuto.applyPreferred. Клиентский pipeline пока не переключён:
+нужно портировать поддержку загруженного OzonReference (strict pairs/IDs),
+signature/cache/manual/import lifecycle и name/detailWithCategory слой.
+Пока нельзя подменять весь OzonAuto одной этой строгой классификацией.
+
+## Загруженное дерево Ozon: строгая проверка пар
+
+engine/ozon_reference.py переносит strictKey/looseKey, selected items,
+index/uniqueType/findPair над разобранным snapshot. Учитываются IDs,
+небезопасные numeric IDs, disabled/unknown/conflict/out_of_scope, exact →
+strict → loose, неоднозначность текстов и уточнение IDs. Парсер исходного
+Seller API JSON не переносился: вход — сохранённый snapshot items/allItems.
+OzonClassifier принимает tree/scope и не откатывается к историческим
+парам при отказе активного дерева. Тот же путь доступен classify-ozon API.
+24 сравнения findPair (auto/all) и 4 сравнения реального OzonCat.classify
+с активным деревом совпали. 142 Python tests + JS OK.
+Пайплайн OzonAuto пока браузерный; applyPreferred/name matching ещё нужны.
+
+## OzonCat.apply: применение строгого результата
+
+OzonClassifier.apply переносит приоритет manual/import, legacy→import,
+force поведение, проверку signature актуального auto, запись category/type,
+source/confidence/score/basis/OE/applicability/error/signature. Внешний cache
+не переносился: результат вычисляется заново, кроме собственного current auto.
+Signature поддерживает raw object registry stamp и загруженное дерево.
+Для Map registry в будущем transport должен передавать его размер явно.
+
+/catalog/classify-ozon operation=apply_strict обновляет SQLite category/type
+и сохраняет все ozon_ метаданные в отдельной state таблице. Семь сравнений
+с реальным OzonCat.apply (включая force, manual/import и очистку старого auto)
+и persistence/защита manual при force проверены. 144 Python tests + JS OK.
+
+Это НЕ полный applyPreferred: name keyword fallback, identity guards,
+name marker lifecycle, категории по внутреннему виду и запись ID по name
+ещё не перенесены. Клиент намеренно не переключён на частичный strict apply,
+иначе существующие keyword назначения были бы потеряны. Требование полного
+независимого серверного обогащения остаётся открытым.
+
+## OzonAuto preferred lifecycle (промежуточный этап)
+
+engine/ozon_auto.py независимо реализует управляющий цикл applyPreferred:
+приоритет strict OE/manual/import, сброс name provenance, блокирование name
+при invalid/conflict, сохранение/устаревание keyword при выключенной настройке,
+восстановление актуального keyword, category_ambiguous, IDs, choices/reason.
+Обработка неоднозначной identity пока принимает вердикт вызывающего кода.
+Name detail, index version и category signature пока передаются отдельными
+аргументами: самостоятельного name inference здесь ещё нет. API и браузерный
+pipeline на этот промежуточный модуль не переключены.
+
+48 lifecycle сценариев сравниваются с извлечённым реальным OzonAuto.applyPreferred,
+с подставленным detailWithCategory и индексом — это тест lifecycle, не тест
+полноты lexical classifier. Каждый JS кейс получает свежий VM (иначе общий
+OzonCat cache загрязняет разные registry с одинаковыми stamp). Проверяется
+также отсутствие мутаций входного row. Полный прогон: 145 Python tests, JS OK.
+
+## OzonAuto.detail: независимый подбор по названию
+
+engine/ozon_name.py строит индекс canonical типов без JS: raw/alias/literal
+токены, 22 последовательных замен и три условных расширения, stem/head,
+защита английских accessory голов, специальных generic типов и мототехники,
+отказ при нескольких изделиях, ранжирование specificity/literal/score,
+разделение ambiguous type/category, сохранение Seller IDs в единственной паре.
+JSON правил добавлен в Windows PyInstaller bundle.
+
+Differential harness выполняет реальный OzonAuto.detail и OzonNameLexicon,
+без подстановки detail. 1761 названий: все 1718 исторических типов,
+18 edge cases и 25 unknown-head примеров. Добавлены две дублирующие водяные
+помпы с разными ID/категориями. Все сравнения проходят; 146 Python tests + JS OK.
+
+Остаётся detailWithCategory (включая resolveCategoryByInternal, полную проверку
+внутреннего вида и противоречий), построение canonical entries из выбранного
+дерева на сервере, index/category signature, identity guards и API/client
+интеграция preferred lifecycle. Наличие detail НЕ означает готовности полного
+серверного Ozon enrichment. Остальные ранее описанные ограничения сохраняются.
+
+## OzonAuto.detailWithCategory и resolveCategoryByInternal
+
+engine/ozon_category.py независимо реализует обе стадии поверх OzonNameClassifier
+и существующего CategoryTnved. Перенесены: явный CATEGORY_PREFERENCE, проверка
+единственности пары (в том числе Seller IDs), kindCategories/byKind/csvWords,
+конфликт внутреннего вида, ambiguous discriminators, составные/общие группы,
+literal kind/head и alias head, противоречивые признаки названия и возврат
+точных browser reason/status/basis/choices. Выбор первого варианта при разных
+ID не допускается. Исходные карточки не изменяются.
+
+Сравнения выполняют реальный browser detailWithCategory, CategoryTnved,
+CategoryKindAuto и CsvNameMatcher, без подставленного name/detail результата:
+122 сценария с несколькими категориями, отсутствующим/противоречивым видом,
+слабым английским названием, duplicated Seller IDs; ещё 1718 исторических
+типов с внутренним видом. Полный прогон: 148 Python tests + JS OK.
+
+Пока не подключено к SQL pipeline: требуется согласованный server snapshot
+версий/categorySignature, выбранное дерево и HVC identity verdict, затем
+batch API preferred apply и клиентская интеграция обеих стадий pipeline.
+Полный parity всех enrichment/policy/quarantine пока не достигнут.
+
+## Составной OzonPreferred + реальные версии/сигнатуры
+
+engine/ozon_preferred.py объединяет strict apply, independent detailWithCategory
+и preferred lifecycle. При наличии дерева использует только отфильтрованные
+серверным OzonReference entries (не исторический fallback); без дерева берёт
+canonical pairs. Вычисляет keyword-v6-csv-name|tree/revision/scope либо
+historical:length и categorySignature с реальным CategoryKind marker state,
+current/draft/stale и discriminators. Строгая signature теперь может учитывать
+наличие OzonReference даже при historical reference (historical:1718 вместо
+historical без объекта), как реальный браузер.
+
+60 составных сравнений с реальным browser applyPreferred — без подставленного
+name/detail/index/categorySignature: исторический справочник и parsed tree,
+manual/import/OE, настройки включено/выключено, актуальный keyword, изменение
+name/category/version, kind draft/current/confirmed/cleared. Проверяются полные
+row/result, включая удалённые поля, status/reason/signature/IDs. 149 Python
+unit tests + JS OK. Эти сравнения проверяют составной цикл, а не только его
+изолированные стадии, и не требуют выполнения JS на сервере.
+
+Остаётся: HVC identity safety context (сейчас явный аргумент identity_unsafe),
+API с сохранением всего preferred state и removals, клиентская интеграция
+обеих стадий pipeline. API classify-ozon пока имеет только classify/apply_strict;
+новый preferred service намеренно ещё не выдаётся за подключённый SQL pipeline.
+
+## Подключение preferred Ozon к переключателю SQL (следующий этап)
+
+/catalog/enrich-ozon-preferred принимает сырые snapshots historical pairs,
+selected tree/scope, registry/applicability/ref revision, category rows/revision,
+identity catalogue+parts+byArt+delimiter. Python OzonPreferred рассчитывает полный
+результат; IdentityGuard проверяет HVC parts mismatch и OE от unsafe источников.
+В текущем HVC normalizeKey==normArticle, поэтому literal collision с отличающимся
+normArticle невозможен; отличие от некорректно ключеванного parts проверяется.
+Все результаты batch сначала вычисляются, затем SQLite transaction сохраняет
+reference, полный ozon_/_ozonName state и scalar category/type. Возвращаются
+fields/removals/result. Ошибка вычисления не оставляет частично сохранённый batch.
+
+OzonCat.processingSnapshot сериализует исходные Map и private applicability/
+REF_VERSION (не browser-computed assignments). Клиент валидирует весь ответ
+batch до применения и не запускает JS fallback при недоступности SQL.
+Первый Ozon проход pipeline пакетный, до политик; второй после enrich rules
+вызывает тот же server preferred. Для второго прохода запрос пока per-SKU;
+reference повторяется в transport: оптимизация snapshot ID ещё нужна.
+Кнопки Ozon «пересчитать», «черновой подбор» и «сброс ручных» также используют
+SQL preferred в SQL-режиме. Browser-ветки сохранены. Переключение запрещено
+во время активного pipeline, а не только экономики.
+
+Новые проверки: API persistence/removals/manual/identity/no partial write,
+клиент wrong identity/offline/no partial apply/allowed fields. 151 Python tests,
+JS tests и node --check всех inline scripts проходят.
+
+ВАЖНО: требование пользователя о полном одинаковом обогащении ещё не выполнено.
+Остаются browser-only policies/quarantine/часть lifecycle (в том числе product
+save и lazy export typization), ограничения formula/regex/import-export из
+предыдущих разделов. Переключатель существует и Ozon pipeline теперь реально
+серверный, но маркировать ВСЕ операции как независимый SQL parity пока нельзя.
+
+## Товарные политики в SQL pipeline
+
+engine/product_policies.py переносит ordered policy loop: сброс excluded,
+deletePending/action/reason, stable order_no sorting, exclude/hide/delete_mark/
+warn, накопление флагов и browser labels/reasons. visible=false не отменяется
+самопроизвольно при следующем проходе — это поведение существующего браузера.
+/catalog/apply-policies вычисляет batch и сохраняет rules/state в SQLite.
+Клиент получает только разрешённые поля, проверяет весь batch до изменения.
+В SQL pipeline политика больше не исполняется браузерным for loop: пакетный
+запрос выполняется после первой Ozon категоризации и до enrich rules.
+
+54 сравнения с извлечённым настоящим JS policy loop/matchCond/num проверяют
+missing/zero/localized numeric, порядок, warning после deletion, false/manual
+visibility, disabled rules, regex и boolean. В общем Python match_condition
+исправлено JS string coercion boolean/array/object/целого float (True != 'True').
+152 Python tests + JS OK; syntax check пяти исполняемых inline scripts OK.
+
+Ограничение сохраняется: Python re не полностью совместим с JS RegExp;
+экзотические выражения/Unicode boundaries не покрыты этим набором. Policies
+state хранится отдельно, как остальные metadata enrichment ports. Карантин и
+product save/lazy export lifecycle пока не перенесены; полный parity не заявлен.
+
+## SQL карантин ОВХ: решения и подписи
+
+engine/dimension_quarantine.py реализует независимые evaluate-риски, signature
+и quarantineRow: нормализованные лимиты с first-wins, канонические числа,
+negative/invalid/net>gross, импортные ошибки и missing, граничные вес/стороны/
+объём, density, overflow, explicit volume mismatch, legacy defaults и OE review.
+Сохраняет/сбрасывает ack при смене подписи; hard issues не разрешаются ack.
+Подпись включает proofVersion/direct OE и evidence/sourceCodeEntries, а также
+новые import/net/invalid риски. JS numeric notation учтена при сборке signature.
+Автоисправляющие heuristics (evaluate.fix) этим модулем НЕ выполняются.
+
+/catalog/quarantine-dimensions транзакционно сохраняет limits/mode и state,
+возвращает fields/removals. Клиент передаёт исходные данные (не computed
+вердикты), нечисловые NaN/Infinity как строки; проверяет batch до мутаций.
+SQL pipeline больше не вызывает browser quarantineRow, включая неизменённые
+строки. После rules/TNVED/mark серверный карантин всех строк выполняется ДО
+SQL economics. Browser finishQuarantine пока используется для построения UI
+отчёта и повторно вызывает evaluate для отображения; не назначает block/ack.
+
+29 сравнений реального browser quarantineRow с Python: ack/stale/hard,
+OE proof/source/evidence, дубли OE, invalid, import review, overflow, notation.
+Плюс API persistence/removals и клиент offline/wrong batch/nonfinite/order.
+154 Python tests, JS tests, syntax 5 executable inline scripts — OK.
+
+Остаются product save/lazy export lifecycle, действия ручной проверки/подтверждения
+и auto-correction ОВХ/OE вне основного pipeline, общая полнота regex/formula и
+описанные import/export отличия. Это не заявление о полном task parity.
+
+## Ручное подтверждение карантина и сохранение карточки: SQL routing
+
+DimensionQuarantine.confirm реализует двухфазное подтверждение: preview возвращает
+clean/hard/stale/ready с серверными значениями, approval повторно проверяет
+подпись и hard issues. При успехе сервер записывает ack/reviewedAt/reviewedValues,
+перепроверяет block и возвращает запись журнала, совпадающую с браузером.
+/catalog/confirm-dimensions требует expected_signature для approval и сохраняет
+полное состояние quarantine+review в SQLite. Проверка stale предотвращает
+применение согласия к значениям/лимитам, изменённым после показа диалога.
+
+AnomalyDetector.confirm в SQL режиме не вызывает browser signature/ack decision:
+показывает серверные значения, отправляет согласие, применяет fields/removals,
+запускает SQL economics. UI отчёт всё ещё может вычислять presentation evaluate.
+Products.save стал async: SQL ветка вызывает серверные name/category-kind/Ozon/
+TNVED/quarantine/economics в том же порядке, что browser save; browser-ветка
+сохранена. В случае ошибки SQL скрытого browser fallback нет. Ручной ввод
+полей и нормализация формы по-прежнему происходят в UI; весь save пока не
+атомарен относительно сети/SQLite/IndexedDB, частичные изменения возможны.
+
+12 actual-browser confirm сравнений (approve/decline, clean/hard/stale/current,
+OE review), expected-signature rejection и API persistence. VM клиентский тест
+проверяет offline/wrong identity/no partial apply и последовательность server
+операций product-save. 156 Python tests + JS tests + syntax 5 scripts OK.
+
+Остаются auto-fix/автосверка OE и прочие действия вне основного pipeline,
+lazy export typization и независимый экспорт/формулы с прежними ограничениями.
+Полный parity всех задач пока не заявлен.
+
+## SQL предположения о единицах ОВХ
+
+DimensionQuarantine.evaluate теперь рассчитывает также fix/heuristic: граммы
+/1000 только при совместимом нетто, все стороны /10 только при допустимых
+лимитах и согласованном явном объёме. fix_units повторно сверяет исходную
+signature и blocked; не доверяет вычисленным браузером fix. Preview не применяет
+исправлений. Approval обновляет исходные поля, производный объём только если
+он не explicit, source labels, bounded review history (20), сбрасывает ack и
+возвращает log. Последующий SQL pipeline снова назначает quarantine.
+
+/catalog/fix-dimension-units сохраняет одобренные поля/state в транзакции SQLite;
+пропущенные stale rows не записывает. AnomalyDetector.applyFix маршрутизирует
+SQL действие в двухфазный preview/approval API. В UI остаются выбор строк,
+диалог и показ отчёта, а не принятие решения об исправлении. Весь ответ batch
+проверяется до изменения карточек; offline/mismatched response не применяются.
+
+22 actual browser applyFix сравнения: approve/decline, совместимость нетто,
+explicit volume, отсутствие кандидата, stale подпись, снятый blocked, источники,
+совместный weight/dim fix, review history cap. API preview/no scalar write,
+stale/no write, approved persistence + VM client validation/preview tested.
+158 Python tests + JS tests + syntax 5 executable scripts OK.
+
+Остаётся независимая автосверка ОВХ по OE/AnomalyOE и отдельные export/lifecycle
+пути с прежними ограничениями. SQL UI found report по-прежнему использует
+browser evaluate для отображения; решения apply/confirm/quarantine серверные.
+Полный task parity не объявлен.
+
+## AnomalyOE: donor authorization, tuple ranking и evidence guards
+
+engine/dimension_policy.py независимо переносит DimPolicy: norm/loose/similar
+OE без fuzzy соседних номеров, cap 64 codes с import evidence, same SKU только
+при непустом бренде, проверку собственных OE донора, matched-code fallback
+только когда у донора нет своих OE; valid tuple, JS Number coercion/toFixed(6)
+dedup, ранжирование по volume/max side/weight/sum и pick/rejected counts.
+Категория не является источником ОВХ; она используется только в is_valid.
+
+engine/dimension_oe.py переносит autoEvidence, exact/full tuple, rotated tuple
+key, current/direct codes, issueFree и targetSig. Автоматический донор требует
+полный исходный ряд с file/identity и совпадающими значениями, без conflict,
+review и import errors. Найдено/исправлено различие JS truthiness пустого review
+{} в существующем карантине: оно тоже требует OE review, а не считается absent.
+
+Actual JS differential: 1464 sourceAllowed, 726 similarOe, 360 pick сравнений
+(6 delimiter modes), 36 evidence/current/direct/tuple/signature/issueFree
+сравнений. Все 160 Python tests и JS tests проходят.
+
+Это самостоятельные server building blocks, НЕ подключённая полная AnomalyOE
+автосверка. Ещё нужны индекс доноров catalogue/HVC, owners/overflow/limits,
+выбор preview/status и live revalidation/apply lifecycle, затем API/client
+routing manual/automatic OE. Не переключаем клиента на усечённый поиск, чтобы
+не допустить перенос упаковки из непроверенного источника. Остальные открытые
+ограничения audit сохраняются.
+
+## Независимый AnomalyOE.find: каталог/HVC индекс и preview
+
+engine/dimension_oe_search.py строит search из сырых catalogue rows + HVC
+parts/byOe/oe. Перенесены targeted donor keys, need codes, catalogue owners,
+64-entry bucket overflow, max 8 entries per identity, max 240 target candidates,
+row/HVC evidence, целый snapshot упаковки, autoEligible, дедупликация tuple,
+sourceAllowed, target-category issueFree и deterministic minimum pick. Выдаёт
+полные status/signature/codes/choice/source/link (с donorIndex/partKey вместо
+JS object references). Входные catalogue/reference копируются, чтобы расчёт
+explicit-volume не мутировал исходный пользовательский snapshot.
+
+42 comparisons с реальным AnomalyOE.find (21 scenario × manual/automatic):
+empty donors, aggregate-only registry, row/HVC, evidence and absent evidence,
+multiple owners, pending/conflicting donors, partial tuples, denied own OE,
+same-SKU without OE, net/explicit-volume target rejection, multiple variants,
+66-donor overflow и несколько кодов на одного HVC донора. Проверяются точные
+строки status/source и полный choice, не только выбранные числа. В JS harness
+подменён только apply (после find automatic), чтобы отдельно проверять поиск.
+161 Python tests + JS OK.
+
+Пока service не подключён к API/client: остаются live повторная проверка,
+apply история/source/поля, revision/snapshot guards и manual/automatic UI routing.
+Caller должен передавать target indices уже по тем же selected/blocked/excluded/
+pending правилам: find пока является поисковым ядром, не полным UI lifecycle.
+При overflow поведение намеренно совпадает с браузером: status требует ручной
+проверки; choice может сохраниться, если есть отдельный admissible identity hit.
