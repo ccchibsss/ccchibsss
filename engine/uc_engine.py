@@ -20,6 +20,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from price_solver import stable_floor, js_round
 from hvc_enrichment import enrich_rows as hvc_enrich_rows
 from name_category import apply as apply_name_category, MARKERS as NAME_CATEGORY_MARKERS
+from category_tnved import CategoryTnved
+from category_kind import CategoryKind
+from ozon_classifier import OzonClassifier
+from enrichment_rules import apply_rules as apply_enrichment_rules
+from mark_status import apply as apply_mark_status
 from email.header import decode_header
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -752,7 +757,43 @@ def _apply_units(item, mp, headers):
                 if not num(item.get(f)) > 0: item[f] = v * k
     return item
 
-def rows_from_csv_bytes(data):
+def resolve_import_mapping(headers, mapping=None):
+    if mapping is None: return map_header(headers)
+    out={}
+    for entry in mapping:
+        if not entry.get('enabled',True) or not entry.get('field'): continue
+        if entry.get('src') not in headers: continue
+        field=entry['field']
+        if field in out: raise ValueError('Повторное назначение поля: '+field)
+        out[field]=headers.index(entry['src'])
+    return out
+
+def import_header_index(rows):
+    # Import.read: first plausible header among the first nine nonempty rows.
+    for i, row in enumerate(rows[:9]):
+        filled=sum(bool(str(c if c is not None else '').strip()) for c in row)
+        alpha=sum(bool(re.search('[а-яa-z]',str(c or ''),re.I)) for c in row)
+        if filled>=2 and alpha>=filled*.4: return i
+    return 0
+
+
+def safe_csv_text(value):
+    s='' if value is None else str(value)
+    s=re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]',' ',s)
+    if (re.match(r'^[\s\u00a0]*[=+@]',s) or re.match(r'^[ \u00a0]*[\t\r\n]',s) or
+        (re.match(r'^[\s\u00a0]*-',s) and not re.fullmatch(r'\s*-\d+(?:[.,]\d+)?\s*',s,flags=re.ASCII))):
+        s="'"+s
+    return s
+
+
+def encode_csv(text, enc):
+    if enc=='cp1251':
+        try: return text.replace('₽','руб.').encode('cp1251')
+        except UnicodeEncodeError as exc:
+            raise ValueError('Windows-1251 не содержит часть символов. Выберите CSV UTF-8 или XLSX: подмена символов запрещена.') from exc
+    return ('\ufeff'+text).encode('utf-8')
+
+def rows_from_csv_bytes(data, mapping=None):
     text = data.decode('utf-8-sig', errors='replace')
     if '\ufffd' in text[:400]:
         # как браузерный импорт: российские прайсы часто в windows-1251
@@ -764,7 +805,10 @@ def rows_from_csv_bytes(data):
     except Exception: pass
     rows = list(csv.reader(io.StringIO(text), delimiter=delim))
     if not rows: return []
-    mp = map_header(rows[0])
+    rows=[r for r in rows if any(str(c if c is not None else '').strip() for c in r)]
+    if not rows: return []
+    rows=rows[import_header_index(rows):]
+    mp = resolve_import_mapping(rows[0], mapping)
     if 'article' not in mp: return []
     out = []
     for r in rows[1:]:
@@ -842,7 +886,7 @@ def _xlsx_sheet_rows(data):
             rows.append([cells.get(i, '') for i in range(maxc + 1)])
     return rows
 
-def rows_from_xlsx_bytes(data):
+def rows_from_xlsx_bytes(data, mapping=None):
     try:
         import openpyxl
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
@@ -851,7 +895,10 @@ def rows_from_xlsx_bytes(data):
     except ImportError:
         rows = _xlsx_sheet_rows(data)
     if not rows: return []
-    mp = map_header(rows[0])
+    rows=[r for r in rows if any(str(c if c is not None else '').strip() for c in r)]
+    if not rows: return []
+    rows=rows[import_header_index(rows):]
+    mp = resolve_import_mapping(rows[0], mapping)
     if 'article' not in mp: return []
     out = []
     for r in rows[1:]:
@@ -1157,7 +1204,7 @@ def recalc_catalog(conn, st, force=False):
             'avg_profit': rnd(agg['avgp'] or 0, 2) if n else 0, 'parallel': parallel}
 
 # ---------------- импорт файла целиком + обогащение OE (v12.9.105) ----------------
-def import_file_bytes(conn, filename, data, enrich_only=False):
+def import_file_bytes(conn, filename, data, enrich_only=False, mapping=None):
     """Файл разбирает движок, а не браузер: CSV/XLSX/ZIP -> строки -> каталог.
        enrich_only (v12.9.145): файл не первый (не прайс) — только обогащение
        уже существующих SKU, новые строки не вставляются."""
@@ -1172,7 +1219,7 @@ def import_file_bytes(conn, filename, data, enrich_only=False):
             for _c in _oe_codes(_oe): oe_to_key.setdefault(_c, set()).add((_a, _b))
     try:
         for fname, blob in files:
-            rows = rows_from_xlsx_bytes(blob) if fname.lower().endswith('.xlsx') else rows_from_csv_bytes(blob)
+            rows = rows_from_xlsx_bytes(blob,mapping) if fname.lower().endswith('.xlsx') else rows_from_csv_bytes(blob,mapping)
             if existing is not None:
                 kept = []
                 for r in rows:
@@ -1346,9 +1393,17 @@ def _dimension_candidate_allowed(product, dims, policy):
 def match_condition(row, field, op, value):
     v = row.get(field)
     if op == 'empty': return v is None or v == ''
-    t = str(value if value is not None else '').lower().strip()
+    def js_string(x):
+        if x is True: return 'true'
+        if x is False: return 'false'
+        if x is None: return ''
+        if isinstance(x,list): return ','.join(js_string(y) if not isinstance(y,dict) else '[object Object]' for y in x)
+        if isinstance(x,dict): return '[object Object]'
+        if isinstance(x,float) and math.isfinite(x) and x.is_integer(): return str(int(x))
+        return str(x)
+    t = js_string(value).lower().strip()
     if not t or v is None or v == '': return False
-    text = str(v).lower()
+    text = js_string(v).lower()
     if op == 'contains': return t in text
     if op == '!contains': return t not in text
     if op == 'eq': return text == t
@@ -1361,6 +1416,218 @@ def match_condition(row, field, op, value):
         except re.error: return False
     return False
 
+
+def check_mark_status_rows(conn, rows, settings):
+    conn.execute('CREATE TABLE IF NOT EXISTS mark_status_settings(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
+    conn.execute('INSERT OR REPLACE INTO mark_status_settings VALUES(1,?)',(json.dumps(settings,ensure_ascii=False),))
+    result=[]; unknown=[]
+    for source in rows:
+        output,outcome=apply_mark_status(source,settings)
+        fields={k:output[k] for k in ('markCompliant','visible','visibleReason','policyAction','policyReason') if k in output}
+        if outcome['kind']=='unknown' and str(source.get('markStatus') or '').strip() not in unknown:
+            unknown.append(str(source.get('markStatus') or '').strip())
+        if output.get('visible') is False:
+            conn.execute("UPDATE products SET visible='0',visible_reason=? WHERE article=? AND brand=?",
+                         (output.get('visibleReason',''),source.get('article',''),source.get('brand','')))
+        result.append({'article':source.get('article'),'brand':source.get('brand',''),'fields':fields,'result':outcome})
+    conn.commit()
+    return {'rows':result,'unknown':unknown}
+
+def enrich_category_tnved(conn, rows, reference, enabled=True):
+    conn.execute('CREATE TABLE IF NOT EXISTS category_tnved_reference(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
+    if reference is not None:
+        conn.execute('INSERT OR REPLACE INTO category_tnved_reference VALUES(1,?)',(json.dumps(reference,ensure_ascii=False),))
+    saved=conn.execute('SELECT data FROM category_tnved_reference WHERE id=1').fetchone()
+    if not saved: raise ValueError('Нет справочника категория/вид/ТН ВЭД')
+    ref=json.loads(saved[0]); model=CategoryTnved(ref.get('rows',[]),ref.get('revision',''),ref.get('source','Категории12131.csv'))
+    result=[]
+    timestamp=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
+    for source in rows:
+        output,status=model.apply(source,enabled,timestamp)
+        fields={k:output[k] for k in ('tnved','_categoryTnvedAuto','_sources') if k in output}
+        removed=[k for k in ('tnved','_categoryTnvedAuto') if k not in output]
+        conn.execute('UPDATE products SET tnved=? WHERE article=? AND brand=?',(output.get('tnved',''),source.get('article',''),source.get('brand','')))
+        result.append({'article':source.get('article'),'brand':source.get('brand',''),'fields':fields,'removed':removed,'result':status})
+    conn.commit()
+    return {'rows':result}
+
+def fix_dimension_units(conn, items, limits, mode='auto', approved=False, labels=None, timestamp=None):
+    import datetime
+    from dimension_quarantine import DimensionQuarantine, compact
+    model=DimensionQuarantine(limits,mode)
+    at=timestamp or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    keys=('weight','length','width','height','volume','_volumeExplicit','_sources','_dimensionOeReview','dimensionAnomalyAck')
+    results=[]
+    for item in items:
+        p=item['row']
+        output,verdict=model.fix_units(p,at,item.get('signature'),approved,labels)
+        results.append({'article':p.get('article',''),'brand':p.get('brand',''),
+            'fields':json.loads(compact({k:output[k] for k in keys if k in output})),
+            'removed':[k for k in keys if k not in output],'result':json.loads(compact(verdict))})
+    if approved:
+        with conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS dimension_unit_fix_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+            for r in results:
+                if r['result']['status']!='applied':continue
+                conn.execute('INSERT OR REPLACE INTO dimension_unit_fix_state VALUES(?,?,?)',(r['article'],r['brand'],json.dumps(r['fields'],ensure_ascii=False)))
+                f=r['fields']
+                conn.execute('UPDATE products SET weight=?,length=?,width=?,height=?,volume=? WHERE article=? AND brand=?',
+                    tuple(f.get(k,0) for k in ('weight','length','width','height','volume'))+(r['article'],r['brand']))
+    return {'rows':results}
+
+def confirm_dimension_row(conn, row, limits, mode='auto', approved=False, expected_signature=None, timestamp=None):
+    import datetime
+    from dimension_quarantine import DimensionQuarantine, FLAGS, compact
+    if approved and not isinstance(expected_signature,str):
+        raise ValueError('Не передана подпись подтверждаемой аномалии')
+    model=DimensionQuarantine(limits,mode)
+    at=timestamp or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    output,result=model.confirm(row,at,approved,expected_signature)
+    keys=FLAGS+('_volumeExplicit','_dimensionOeReview')
+    fields=json.loads(compact({k:output[k] for k in keys if k in output}))
+    with conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS dimension_quarantine_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+        conn.execute('INSERT OR REPLACE INTO dimension_quarantine_state VALUES(?,?,?)',(row.get('article',''),row.get('brand',''),json.dumps(fields,ensure_ascii=False)))
+    return {'article':row.get('article',''),'brand':row.get('brand',''),'fields':fields,
+            'removed':[k for k in keys if k not in output],'result':json.loads(compact(result))}
+
+def quarantine_dimension_rows(conn, rows, limits, mode='auto', timestamp=None):
+    import datetime
+    from dimension_quarantine import DimensionQuarantine, FLAGS, compact
+    model=DimensionQuarantine(limits,mode)
+    timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    results=[]
+    keys=FLAGS+('_volumeExplicit',)
+    for p in rows:
+        output=model.apply(p,timestamp)
+        results.append({'article':p.get('article',''),'brand':p.get('brand',''),
+            'fields':json.loads(compact({k:output[k] for k in keys if k in output})),'removed':[k for k in keys if k not in output]})
+    with conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS dimension_quarantine_settings(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)')
+        conn.execute('INSERT OR REPLACE INTO dimension_quarantine_settings VALUES(1,?)',(json.dumps({'limits':limits,'oe_mode':mode},ensure_ascii=False),))
+        conn.execute('CREATE TABLE IF NOT EXISTS dimension_quarantine_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+        for r in results:
+            conn.execute('INSERT OR REPLACE INTO dimension_quarantine_state VALUES(?,?,?)',(r['article'],r['brand'],json.dumps(r['fields'],ensure_ascii=False)))
+    return {'rows':results}
+
+def apply_product_policies(conn, rows, rules):
+    from product_policies import apply_policies
+    keys=('excluded','deletePending','policyAction','policyReason','visible','visibleReason')
+    results=[]
+    for p in rows:
+        output=apply_policies(p,rules,match_condition,num)
+        results.append({'article':p.get('article',''),'brand':p.get('brand',''),
+                        'fields':{k:output[k] for k in keys if k in output}})
+    with conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS product_policy_rules(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)')
+        conn.execute('INSERT OR REPLACE INTO product_policy_rules VALUES(1,?)',(json.dumps(rules,ensure_ascii=False),))
+        conn.execute('CREATE TABLE IF NOT EXISTS product_policy_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+        for r in results:
+            conn.execute('INSERT OR REPLACE INTO product_policy_state VALUES(?,?,?)',(r['article'],r['brand'],json.dumps(r['fields'],ensure_ascii=False)))
+    return {'rows':results}
+
+def enrich_ozon_preferred(conn, rows, reference, enabled=True, force=False, force_name=False):
+    from ozon_preferred import OzonPreferred
+    from ozon_identity import IdentityGuard
+    if not isinstance(reference,dict) or not isinstance(reference.get('pairs'),list) or not isinstance(reference.get('category_rows'),list) or not isinstance(reference.get('identity'),dict):
+        raise ValueError('Не передан полный исходный справочник Ozon/категорий/идентичностей')
+    model=OzonPreferred(reference)
+    identity=reference['identity']
+    guard=IdentityGuard(identity.get('rows',rows),identity)
+    results=[]
+    # Compute and validate the complete batch before any database mutation.
+    for p in rows:
+        output,verdict=model.apply(p,enabled=enabled,force=force,force_name=force_name,identity_unsafe=guard.unsafe_for(p))
+        keys={k for k in set(p)|set(output) if k.startswith(('ozon_','_ozonName'))}
+        results.append({'article':p.get('article',''),'brand':p.get('brand',''),
+            'fields':{k:output[k] for k in keys if k in output},'removed':sorted(keys-set(output)), 'result':verdict})
+    with conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS ozon_preferred_reference(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)')
+        conn.execute('INSERT OR REPLACE INTO ozon_preferred_reference VALUES(1,?)',(json.dumps(reference,ensure_ascii=False),))
+        conn.execute('CREATE TABLE IF NOT EXISTS ozon_preferred_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+        for r in results:
+            conn.execute('INSERT OR REPLACE INTO ozon_preferred_state VALUES(?,?,?)',(r['article'],r['brand'],json.dumps(r['fields'],ensure_ascii=False)))
+            if 'ozon_category' in r['fields'] or 'ozon_type' in r['fields']:
+                conn.execute('UPDATE products SET ozon_category=?,ozon_type=? WHERE article=? AND brand=?',(r['fields'].get('ozon_category',''),r['fields'].get('ozon_type',''),r['article'],r['brand']))
+    return {'rows':results}
+
+def classify_ozon_rows(conn, rows, reference, operation='classify', force=False):
+    if operation not in ('classify','apply_strict'): raise ValueError('Неизвестная операция Ozon')
+    if not isinstance(reference,dict) or not isinstance(reference.get('pairs'),list):
+        raise ValueError('Не передан канонический справочник Ozon')
+    conn.execute('CREATE TABLE IF NOT EXISTS ozon_classification_reference(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)')
+    conn.execute('INSERT OR REPLACE INTO ozon_classification_reference VALUES(1,?)',(json.dumps(reference,ensure_ascii=False),))
+    model=OzonClassifier(reference['pairs'],reference.get('tree'),reference.get('scope','auto'))
+    result=[]
+    if operation=='apply_strict':
+        conn.execute('CREATE TABLE IF NOT EXISTS ozon_classification_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+    for p in rows:
+        article,brand=p.get('article',''),p.get('brand','')
+        if operation=='apply_strict':
+            output,verdict=model.apply(p,reference.get('registry'),reference.get('applicability'),force,reference.get('reference_version',0))
+            fields={k:v for k,v in output.items() if k.startswith('ozon_')}
+            conn.execute('INSERT OR REPLACE INTO ozon_classification_state VALUES(?,?,?)',
+                (article,brand,json.dumps(fields,ensure_ascii=False)))
+            conn.execute('UPDATE products SET ozon_category=?,ozon_type=? WHERE article=? AND brand=?',
+                (output.get('ozon_category',''),output.get('ozon_type',''),article,brand))
+            result.append({'article':article,'brand':brand,'fields':fields,'result':verdict})
+        else:
+            result.append({'article':article,'brand':brand,'result':model.classify(p,reference.get('registry'),reference.get('applicability'))})
+    conn.commit()
+    return {'rows':result}
+
+def enrich_rule_rows(conn, rows, rules, context):
+    conn.execute('CREATE TABLE IF NOT EXISTS enrichment_rule_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+    result=[]
+    for row in rows:
+        output=apply_enrichment_rules(row,rules,context,match_condition)
+        keys=set(row)|set(output)
+        changed={k for k in keys if row.get(k)!=output.get(k) or (k in row)!=(k in output)}
+        fields={k:output[k] for k in changed if k in output}
+        # JSON has no Infinity/NaN; match browser JSON.stringify transport.
+        def clean(v):
+            if isinstance(v,float) and not math.isfinite(v): return None
+            if isinstance(v,dict): return {k:clean(x) for k,x in v.items()}
+            if isinstance(v,list): return [clean(x) for x in v]
+            return v
+        nonfinite={k:('nan' if math.isnan(v) else 'positive' if v>0 else 'negative') for k,v in fields.items() if isinstance(v,float) and not math.isfinite(v)}
+        fields=clean(fields);removed=[k for k in changed if k not in output]
+        article,brand=row.get('article',''),row.get('brand','')
+        conn.execute('INSERT OR REPLACE INTO enrichment_rule_state VALUES(?,?,?)',
+            (article,brand,json.dumps({'fields':fields,'removed':removed,'nonfinite':nonfinite},ensure_ascii=False)))
+        result.append({'article':article,'brand':brand,'fields':fields,'removed':removed,'nonfinite':nonfinite})
+    conn.commit()
+    return {'rows':result}
+
+def enrich_category_kinds(conn, rows, reference, context, enabled=True, operation='apply', category_confirmed=False):
+    if operation not in ('apply','confirm','hydrate','explicit_import'): raise ValueError('Неизвестная операция вида')
+    if not isinstance(reference,dict): raise ValueError('Не передан справочник видов')
+    context=dict(context or {})
+    context['categories']=sorted(context.get('categories',[]),key=lambda c:num(c.get('priority')))
+    model=CategoryKind(reference.get('rows',[]),reference.get('revision',''),reference.get('base_categories',[]))
+    conn.execute('CREATE TABLE IF NOT EXISTS category_kind_reference(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS category_kind_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+    conn.execute('INSERT OR REPLACE INTO category_kind_reference VALUES(1,?)',(json.dumps(reference,ensure_ascii=False),))
+    result=[]; at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
+    for row in rows:
+        changed=None
+        if operation=='confirm': output,changed=model.confirm(row,category_confirmed,at)
+        elif operation=='hydrate': output=model.hydrate(row,row.get('_categoryKindAuto'))
+        elif operation=='explicit_import':
+            sources=row.get('_sources')
+            output=model.explicit_import(row,row.get('category_type'),sources.get('category_type') if isinstance(sources,dict) else None)
+        else: output=model.apply(row,context,enabled,match_condition,at)
+        keys=set(row)|set(output)
+        touched={k for k in keys if (k.startswith('_category') and k!='_categoryExplicitSource') or k in ('category','category_type','_sources')}
+        fields={k:output[k] for k in touched if k in output}
+        removed=[k for k in touched if k not in output]
+        article,brand=row.get('article',''),row.get('brand','')
+        conn.execute('UPDATE products SET category=?,category_type=? WHERE article=? AND brand=?',
+            (output.get('category',''),output.get('category_type',''),article,brand))
+        conn.execute('INSERT OR REPLACE INTO category_kind_state VALUES(?,?,?)',(article,brand,json.dumps(fields,ensure_ascii=False)))
+        result.append({'article':article,'brand':brand,'fields':fields,'removed':removed,'changed':changed})
+    conn.commit()
+    return {'rows':result}
 
 def enrich_name_categories(conn, rows, context, enabled=True):
     context = dict(context or {})
@@ -1874,21 +2141,68 @@ def _filter_keys(rows, keys):
     ks = {(str(a), str(b)) for a, b in keys}
     return [r for r in rows if (str(r['article'] or ''), str(r['brand'] or '')) in ks]
 
-def export_catalog_csv_bytes(conn, enc='utf-8', keys=None):
+def export_catalog_csv_bytes(conn, enc='utf-8', keys=None, columns=None, delimiter=';'):
     import csv as _csv
-    buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
-    w.writerow([h for _, h in EXPORT_COLS])
-    for r in _filter_keys(conn.execute(_EXPORT_SQL).fetchall(), keys):
-        w.writerow(['' if r[k] is None else r[k] for k, _ in EXPORT_COLS])
-    text = buf.getvalue()
-    if enc == 'cp1251': return text.encode('cp1251', errors='replace')
-    return ('\ufeff' + text).encode('utf-8')
+    if delimiter not in (';',',','\t','|'): raise ValueError('Неверный разделитель CSV')
+    cols=columns if columns is not None else EXPORT_COLS
+    rows=export_catalog_records(conn,keys)
+    buf=io.StringIO(); w=_csv.writer(buf,delimiter=delimiter)
+    w.writerow([safe_csv_text(h) for _,h in cols])
+    for r in rows:
+        values=[]
+        for k,_ in cols:
+            value=r.get(k)
+            if isinstance(value,(int,float)) and not isinstance(value,bool) and delimiter==';': value=str(value).replace('.',',')
+            values.append(safe_csv_text(value))
+        w.writerow(values)
+    return encode_csv(buf.getvalue(),enc)
+
+
+def store_export_cells(conn, cells, columns):
+    """Persist a request-scoped presentation snapshot. No arbitrary Python/SQL execution."""
+    if not isinstance(columns,list) or any(not isinstance(c,list) or len(c)!=2 for c in columns):
+        raise ValueError('Неверное описание экспортных колонок')
+    conn.execute('CREATE TEMP TABLE IF NOT EXISTS export_cells(article TEXT,brand TEXT,data TEXT,PRIMARY KEY(article,brand))')
+    conn.execute('DELETE FROM export_cells')
+    for order,cell in enumerate(cells):
+        values=cell.get('values')
+        if not isinstance(values,list) or len(values)!=len(columns): raise ValueError('Неполная строка экспорта')
+        if any(isinstance(v,(list,dict)) for v in values): raise ValueError('Ячейка должна содержать скалярное значение')
+        formulas=cell.get('formulas') or [None]*len(columns)
+        if not isinstance(formulas,list) or len(formulas)!=len(columns): raise ValueError('Неполный набор формул')
+        if any(f is not None and not isinstance(f,str) for f in formulas): raise ValueError('Формула должна быть строкой')
+        data={c[0]:v for c,v in zip(columns,values)}
+        data['__export_formulas']={c[0]:f for c,f in zip(columns,formulas) if f}
+        data['__export_order']=order
+        conn.execute('INSERT OR REPLACE INTO export_cells VALUES(?,?,?)',
+            (str(cell.get('article','')),str(cell.get('brand','')),json.dumps(data,ensure_ascii=False,allow_nan=False)))
+
+
+def export_catalog_records(conn,keys=None):
+    rows=conn.execute('SELECT p.*,e.total,e.profit,e.margin,e.roi,e.break_even,e.target,e.fields_json '
+        'FROM products p LEFT JOIN eco_results e ON e.article=p.article AND e.brand=p.brand ORDER BY p.article,p.brand').fetchall()
+    result=[]
+    for raw in _filter_keys(rows,keys):
+        row=dict(raw)
+        try: extra=json.loads(row.pop('fields_json',None) or '{}')
+        except (ValueError,TypeError): extra={}
+        if isinstance(extra,dict):
+            for k,v in extra.items():
+                if k not in row: row[k]=v
+        if conn.execute("SELECT 1 FROM sqlite_temp_master WHERE name='export_cells'").fetchone():
+            saved=conn.execute('SELECT data FROM export_cells WHERE article=? AND brand=?',(row['article'],row['brand'])).fetchone()
+            if saved: row.update(json.loads(saved[0]))
+        result.append(row)
+    if conn.execute("SELECT 1 FROM sqlite_temp_master WHERE name='export_cells'").fetchone():
+        result=[r for r in result if '__export_order' in r]
+        result.sort(key=lambda r:r['__export_order'])
+    return result
 
 def _xml_esc(v):
     return (str(v).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             .replace('"', '&quot;'))
 
-def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None, yellow=None):
+def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None, yellow=None, formulas=None):
     """Общий XLSX-писатель без openpyxl: zip из XML (stdlib).
        header_rows — служебные строки перед шапкой (официальный шаблон Ozon);
        yellow — множество (строка_данных_0based, колонка_0based) для жёлтой заливки."""
@@ -1914,10 +2228,17 @@ def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None,
         rn += 1
         cells = []
         for i, v in enumerate(row):
-            if v is None or v == '': continue
+            formula=(formulas or {}).get((di,i))
+            if (v is None or v == '') and not formula: continue
             ref = f'{col_letter(i)}{rn}'
             st = ' s="1"' if (di, i) in yellow else ''
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
+            if formula:
+                f=_xml_esc(formula.lstrip('='))
+                numeric=isinstance(v,(int,float)) and not isinstance(v,bool)
+                typ='' if numeric else ' t="str"'
+                cached=_xml_esc('' if v is None else v)
+                cells.append(f'<c r="{ref}"{st}{typ}><f>{f}</f><v>{cached}</v></c>')
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
                 cells.append(f'<c r="{ref}"{st}><v>{v}</v></c>')
             else:
                 cells.append(f'<c r="{ref}"{st} t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>')
@@ -1960,10 +2281,149 @@ def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None,
         for name, content in parts.items(): z.writestr(name, content)
     return out.getvalue()
 
-def export_catalog_xlsx_bytes(conn, keys=None):
-    rows = _filter_keys(conn.execute(_EXPORT_SQL).fetchall(), keys)
-    return _xlsx_from_rows([h for _, h in EXPORT_COLS],
-                           [[r[k] for k, _ in EXPORT_COLS] for r in rows], 'Каталог')
+def _export_styles(meta):
+    import xml.etree.ElementTree as ET
+    ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    root=ET.Element('styleSheet',xmlns=ns)
+    fmts=ET.SubElement(root,'numFmts',count=str(len(meta)))
+    for i,c in enumerate(meta): ET.SubElement(fmts,'numFmt',numFmtId=str(164+i),formatCode=c.get('format') or 'General')
+    fonts=ET.SubElement(root,'fonts',count='2')
+    for bold in (False,True):
+        font=ET.SubElement(fonts,'font'); ET.SubElement(font,'sz',val='11'); ET.SubElement(font,'name',val='Calibri')
+        if bold: ET.SubElement(font,'b')
+    fills=ET.SubElement(root,'fills',count='3')
+    for kind in ('none','gray125','solid'):
+        fill=ET.SubElement(fills,'fill'); pattern=ET.SubElement(fill,'patternFill',patternType=kind)
+        if kind=='solid': ET.SubElement(pattern,'fgColor',rgb='FFE8F1FF')
+    borders=ET.SubElement(root,'borders',count='1'); ET.SubElement(borders,'border')
+    xfs=ET.SubElement(root,'cellXfs',count=str(len(meta)+2))
+    ET.SubElement(xfs,'xf',numFmtId='0',fontId='0',fillId='0',borderId='0')
+    ET.SubElement(xfs,'xf',numFmtId='0',fontId='1',fillId='2',borderId='0',applyFill='1')
+    for i in range(len(meta)): ET.SubElement(xfs,'xf',numFmtId=str(164+i),fontId='0',fillId='0',borderId='0',applyNumberFormat='1')
+    dxfs=ET.SubElement(root,'dxfs',count='2')
+    for bg,fg in [('FFE2F5EA','FF0E6B3A'),('FFFDE8EA','FF9E1B30')]:
+        dxf=ET.SubElement(dxfs,'dxf'); font=ET.SubElement(dxf,'font')
+        ET.SubElement(font,'b'); ET.SubElement(font,'color',rgb=fg)
+        fill=ET.SubElement(dxf,'fill'); pattern=ET.SubElement(fill,'patternFill',patternType='solid')
+        ET.SubElement(pattern,'fgColor',rgb=bg)
+    return ET.tostring(root,encoding='utf-8',xml_declaration=True)
+
+
+def _format_export_sheet(xml,sheet,meta,protect):
+    import xml.etree.ElementTree as ET
+    ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    q=lambda s:'{'+ns+'}'+s
+    root=ET.fromstring(xml); indices=sheet['indices']
+    views=ET.Element(q('sheetViews')); view=ET.SubElement(views,q('sheetView'),workbookViewId='0')
+    ET.SubElement(view,q('pane'),ySplit='1',topLeftCell='A2',activePane='bottomLeft',state='frozen')
+    root.insert(0,views)
+    cols=ET.Element(q('cols'))
+    for ci,index in enumerate(indices,1):
+        width=float(meta[index].get('width',14))
+        if not 0<width<=255: raise ValueError('Неверная ширина колонки')
+        ET.SubElement(cols,q('col'),min=str(ci),max=str(ci),width=str(width),customWidth='1')
+    root.insert(1,cols)
+    for row in root.findall(q('sheetData')+'/'+q('row')):
+        for cell in row:
+            letters=re.match('[A-Z]+',cell.get('r')).group(); ci=0
+            for letter in letters: ci=ci*26+ord(letter)-64
+            cell.set('s','1' if row.get('r')=='1' else str(indices[ci-1]+2))
+    if protect: ET.SubElement(root,q('sheetProtection'),sheet='1',objects='1',scenarios='1',formatColumns='0',insertRows='0',deleteRows='0',sort='1',autoFilter='1')
+    if indices:
+        n=len(indices); last=''
+        while n: n,r=divmod(n-1,26); last=chr(65+r)+last
+        ET.SubElement(root,q('autoFilter'),ref=f'A1:{last}{len(sheet["rows"])+1}')
+    # Browser financial rules: same thresholds/colors, resolved against this sheet's columns.
+    scales={'margin':[0,15,30],'roi':[0,50,100],'deficit':[-20,0,20]}
+    bars={'netProfit':'FF2FD6A3','specialFee':'FFFB923C','paymentTransfer':'FF38BDF8','acquiring':'FF5C9DFF',
+          'price':'FF5C9DFF','effPrice':'FF38BDF8','stock':'FF2FD6A3','minStock':'FF98A2B3',
+          'costPerUnit':'FFF7B32B','contribution':'FF8B7CFF','fixedTotal':'FF38BDF8','fcProfit':'FF8B7CFF',
+          'sales':'FF2FD6A3','revenue':'FF5C9DFF','stockValue':'FFF7B32B','daysCover':'FF5C9DFF'}
+    profit_keys={'netProfit','perUnitNet','fcProfit'}
+    priority=0
+    if sheet['rows']:
+        for ci,index in enumerate(indices,1):
+            key=meta[index].get('key'); n=ci; letter=''
+            while n: n,r=divmod(n-1,26); letter=chr(65+r)+letter
+            if key not in scales and key not in bars and key not in profit_keys: continue
+            cf=ET.SubElement(root,q('conditionalFormatting'),sqref=f'{letter}2:{letter}{len(sheet["rows"])+1}')
+            if key in scales:
+                priority+=1
+                rule=ET.SubElement(cf,q('cfRule'),type='colorScale',priority=str(priority)); scale=ET.SubElement(rule,q('colorScale'))
+                for value in scales[key]: ET.SubElement(scale,q('cfvo'),type='num',val=str(value))
+                for color in ['FFFF6B6B','FFFFD166','FF5FF0A6']: ET.SubElement(scale,q('color'),rgb=color)
+            if key in profit_keys:
+                for op,dxf in [('greaterThan',0),('lessThan',1)]:
+                    priority+=1
+                    rule=ET.SubElement(cf,q('cfRule'),type='cellIs',operator=op,dxfId=str(dxf),priority=str(priority))
+                    ET.SubElement(rule,q('formula')).text='0'
+            if key in bars:
+                priority+=1
+                rule=ET.SubElement(cf,q('cfRule'),type='dataBar',priority=str(priority)); bar=ET.SubElement(rule,q('dataBar'),showValue='1')
+                ET.SubElement(bar,q('cfvo'),type='min'); ET.SubElement(bar,q('cfvo'),type='max')
+                ET.SubElement(bar,q('color'),rgb=bars[key])
+    return ET.tostring(root,encoding='utf-8',xml_declaration=True)
+
+
+def _xlsx_workbook(sheets, column_meta=None, protect=False):
+    """Package worksheets produced by the common serializer into one workbook."""
+    import xml.etree.ElementTree as ET
+    main='http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    rel='http://schemas.openxmlformats.org/package/2006/relationships'
+    docrel='http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    content='http://schemas.openxmlformats.org/package/2006/content-types'
+    parts={}; sheet_xml=[]
+    for i,sheet in enumerate(sheets,1):
+        blob=_xlsx_from_rows(sheet['headers'],sheet['rows'],sheet['name'],formulas=sheet.get('formulas'))
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            if not parts: parts={n:archive.read(n) for n in archive.namelist()}
+            xml=archive.read('xl/worksheets/sheet1.xml')
+            if column_meta is not None:
+                xml=_format_export_sheet(xml,sheet,column_meta,protect and i==1)
+            sheet_xml.append(xml)
+    if column_meta is not None:
+        parts['xl/styles.xml']=_export_styles(column_meta)
+    workbook=ET.fromstring(parts['xl/workbook.xml'])
+    target=workbook.find('{'+main+'}sheets'); target.clear()
+    relationships=ET.Element('{'+rel+'}Relationships')
+    types=ET.fromstring(parts['[Content_Types].xml'])
+    for child in list(types):
+        if child.get('PartName','').startswith('/xl/worksheets/'): types.remove(child)
+    for i,(sheet,xml) in enumerate(zip(sheets,sheet_xml),1):
+        ET.SubElement(target,'{'+main+'}sheet',{'name':sheet['name'],'sheetId':str(i),'{'+docrel+'}id':'rId'+str(i)})
+        ET.SubElement(relationships,'{'+rel+'}Relationship',{'Id':'rId'+str(i),'Type':docrel+'/worksheet','Target':f'worksheets/sheet{i}.xml'})
+        ET.SubElement(types,'{'+content+'}Override',{'PartName':f'/xl/worksheets/sheet{i}.xml','ContentType':'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'})
+        parts[f'xl/worksheets/sheet{i}.xml']=xml
+    ET.SubElement(relationships,'{'+rel+'}Relationship',{'Id':'rIdStyles','Type':docrel+'/styles','Target':'styles.xml'})
+    for path,root in [('xl/workbook.xml',workbook),('xl/_rels/workbook.xml.rels',relationships),('[Content_Types].xml',types)]:
+        parts[path]=ET.tostring(root,encoding='utf-8',xml_declaration=True)
+    out=io.BytesIO()
+    with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as archive:
+        for path,data in parts.items(): archive.writestr(path,data)
+    return out.getvalue()
+
+
+def export_catalog_xlsx_bytes(conn, keys=None, columns=None, sheets=None, column_meta=None, protect=False):
+    cols=columns if columns is not None else EXPORT_COLS
+    rows=export_catalog_records(conn,keys)
+    formulas={(ri,ci):r['__export_formulas'][k] for ri,r in enumerate(rows) for ci,(k,_) in enumerate(cols)
+              if k in r.get('__export_formulas',{})}
+    if sheets is not None:
+        if not isinstance(sheets,list) or not 1<=len(sheets)<=10: raise ValueError('Неверный набор листов')
+        names=set(); book=[]
+        for sheet in sheets:
+            name=sheet.get('name',''); indices=sheet.get('indices')
+            if not isinstance(name,str) or not name or len(name)>31 or re.search(r'[\[\]:*?/\\]',name) or name.lower() in names:
+                raise ValueError('Неверное имя листа')
+            names.add(name.lower())
+            if not isinstance(indices,list) or any(type(i) is not int or not 0<=i<len(cols) for i in indices): raise ValueError('Неверные колонки листа')
+            book.append({'name':name,'indices':indices,'headers':[cols[i][1] for i in indices],
+                'rows':[[r.get(cols[i][0]) for i in indices] for r in rows],
+                'formulas':{(ri,ci):formulas[(ri,i)] for ri in range(len(rows)) for ci,i in enumerate(indices) if (ri,i) in formulas}})
+        if column_meta is not None and (not isinstance(column_meta,list) or len(column_meta)!=len(cols) or any(not isinstance(c,dict) for c in column_meta)):
+            raise ValueError('Неверные форматы колонок')
+        return _xlsx_workbook(book,column_meta,protect)
+    return _xlsx_from_rows([h for _,h in cols],[[r.get(k) for k,_ in cols] for r in rows],'Каталог',formulas=formulas)
 
 # ---------------- выгрузка Ozon, 46 колонок (этап 1, v12.9.115) ----------------
 OZON_HEADERS = ['№','Артикул*','Название товара','Предельная цена без акций, руб.*','Зачёркнутая цена, руб.',
@@ -2150,10 +2610,9 @@ def export_ozon_csv_bytes(conn, discount_pct=0, vat='Не облагается',
     buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
     w.writerow(OZON_HEADERS)
     for row in _ozon_rows_data(conn, keys, discount_pct, vat, chz_codes)[0]:
-        w.writerow(row)
+        w.writerow([safe_csv_text(v) for v in row])
     text = buf.getvalue()
-    if enc == 'cp1251': return text.encode('cp1251', errors='replace')
-    return ('\ufeff' + text).encode('utf-8')
+    return encode_csv(text,enc)
 
 def export_ozon_xlsx_bytes(conn, discount_pct=0, vat='Не облагается', keys=None, chz_codes=None):
     rows, yellow = _ozon_rows_data(conn, keys, discount_pct, vat, chz_codes)
@@ -2430,7 +2889,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(413, {'ok': False, 'error': 'файл больше 200 МБ'})
             data = self.rfile.read(ln) if ln else b''
             try:
-                return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data, enrich_only=(self.headers.get('X-Import-Mode', '') == 'enrich'))})
+                return self._send(200, {'ok': True, **import_file_bytes(db(), fname, data, enrich_only=(self.headers.get('X-Import-Mode', '') == 'enrich'),
+                    mapping=json.loads(unquote(self.headers['X-Import-Mapping'])) if self.headers.get('X-Import-Mapping') else None)})
             except Exception as e:
                 # v12.9.144: этот путь раньше возвращал сырой 'database or disk is full'
                 if isinstance(e, DiskFullError) or 'disk is full' in str(e) or 'database or disk' in str(e):
@@ -2468,6 +2928,30 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/donors/import':
                 n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
                 return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/catalog/check-mark-status':
+                return self._send(200, {'ok':True, **check_mark_status_rows(conn, body.get('rows') or [], body.get('settings') or {})})
+            if self.path == '/catalog/enrich-category-tnved':
+                return self._send(200, {'ok':True, **enrich_category_tnved(conn, body.get('rows') or [],
+                    body.get('reference'), body.get('enabled') is not False)})
+            if self.path == '/catalog/fix-dimension-units':
+                return self._send(200, {'ok':True, **fix_dimension_units(conn,body.get('items') or [],body.get('limits') or [],body.get('oe_mode','auto'),body.get('approved') is True,body.get('labels') or {})})
+            if self.path == '/catalog/confirm-dimensions':
+                return self._send(200, {'ok':True, **confirm_dimension_row(conn,body.get('row') or {},body.get('limits') or [],body.get('oe_mode','auto'),body.get('approved') is True,body.get('expected_signature'))})
+            if self.path == '/catalog/quarantine-dimensions':
+                return self._send(200, {'ok':True, **quarantine_dimension_rows(conn,body.get('rows') or [],body.get('limits') or [],body.get('oe_mode','auto'))})
+            if self.path == '/catalog/apply-policies':
+                return self._send(200, {'ok':True, **apply_product_policies(conn,body.get('rows') or [],body.get('rules') or [])})
+            if self.path == '/catalog/enrich-ozon-preferred':
+                return self._send(200, {'ok':True, **enrich_ozon_preferred(conn,body.get('rows') or [],body.get('reference'),body.get('enabled') is not False,body.get('force') is True,body.get('force_name') is True)})
+            if self.path == '/catalog/classify-ozon':
+                return self._send(200, {'ok':True, **classify_ozon_rows(conn,body.get('rows') or [],body.get('reference'),body.get('operation','classify'),body.get('force') is True)})
+            if self.path == '/catalog/enrich-rules':
+                return self._send(200, {'ok':True, **enrich_rule_rows(conn,body.get('rows') or [],
+                    body.get('rules') or [],body.get('context') or {})})
+            if self.path == '/catalog/enrich-category-kind':
+                return self._send(200, {'ok':True, **enrich_category_kinds(conn,body.get('rows') or [],
+                    body.get('reference'),body.get('context') or {},body.get('enabled') is not False,
+                    body.get('operation','apply'),body.get('category_confirmed') is True)})
             if self.path == '/catalog/enrich-name-category':
                 return self._send(200, {'ok': True, **enrich_name_categories(conn,
                     body.get('rows') or [], body.get('context') or {}, body.get('enabled') is not False)})
@@ -2509,13 +2993,17 @@ class Handler(BaseHTTPRequestHandler):
                     chz_codes=body.get('chz_codes')),
                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
             if self.path.startswith('/export/catalog'):
+                if body.get('export_cells') is not None:
+                    store_export_cells(conn,body['export_cells'],body.get('columns'))
+                else:
+                    conn.execute('DROP TABLE IF EXISTS temp.export_cells')
                 keys = None
                 if body.get('articles') is not None:
                     keys = [(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']]
                 if '.xlsx' in self.path:
-                    return self._send_bytes(200, export_catalog_xlsx_bytes(conn, keys=keys),
+                    return self._send_bytes(200, export_catalog_xlsx_bytes(conn, keys=keys, columns=body.get('columns'), sheets=body.get('sheets'), column_meta=body.get('column_meta'), protect=body.get('protect') is True),
                         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_catalog_engine.xlsx')
-                return self._send_bytes(200, export_catalog_csv_bytes(conn, body.get('enc') or 'utf-8', keys=keys),
+                return self._send_bytes(200, export_catalog_csv_bytes(conn, body.get('enc') or 'utf-8', keys=keys, columns=body.get('columns'), delimiter=body.get('delimiter',';')),
                     'text/csv; charset=utf-8', 'UC_catalog_engine.csv')
             if self.path == '/outbox':
                 n = enqueue(conn, body.get('kind', ''), body.get('marketplace', ''), body.get('items') or [])

@@ -1,0 +1,11 @@
+const fs=require('fs'),vm=require('vm'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));
+const start=h.indexOf('const ExprLang = (function () {'),end=h.indexOf('/* Поля, где встреченный JS Date',start);
+const condition=h.match(/function matchCond\(o, field, op, val\) \{[\s\S]*?\n\}/)[0];
+const name=h.match(/const NameCategory = \{[\s\S]*?\n\};\n/)[0];
+const a=h.indexOf('for (const r of enrichRules) {',h.indexOf('function runPipeline'));
+const b=h.indexOf('          /* Правило обогащения могло',a);
+const context={num:v=>Number(String(v??'').replace(',','.'))||0,round:(v,d=2)=>Math.round(v*10**d)/10**d};
+vm.createContext(context);
+vm.runInContext(h.slice(start,end)+'\n'+condition+'\n'+name+'\nthis.run=(p,enrichRules,nameCategoryContext)=>{'+h.slice(a,b)+';return p;};',context);
+process.stdout.write(JSON.stringify(input.rows.map(p=>context.run(p,input.rules,input.context))));

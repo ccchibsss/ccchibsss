@@ -1,0 +1,10 @@
+const fs=require('fs'),vm=require('vm');
+const html=fs.readFileSync(__dirname+'/../index.html','utf8');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));
+const start=html.indexOf('const MarkStatus = (function () {');
+const end=html.indexOf('\nfunction matchCond(',start);
+const action=html.match(/const mc = MarkStatus\.check\(p\.markStatus[\s\S]*?p\.policyReason = mc\.reason;\n\s*\}/)[0];
+const context={S:{settings:input.settings||{}}};
+vm.createContext(context);
+vm.runInContext(html.slice(start,end)+'\nthis.run=p=>{'+action+';return {row:p,result:mc};};',context);
+process.stdout.write(JSON.stringify(input.rows.map(p=>context.run(p))));

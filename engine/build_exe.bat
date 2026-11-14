@@ -10,7 +10,7 @@ rem ============================================================
 cd /d %~dp0
 python -m pip install --upgrade pyinstaller
 if errorlevel 1 goto err
-python -m PyInstaller --onefile --name "UNIT CONTROL" --add-data "..\index.html;." --add-data "ozon_template.json;." --add-data "std_dims.json;." uc_engine.py
+python -m PyInstaller --onefile --name "UNIT CONTROL" --add-data "..\index.html;." --add-data "ozon_template.json;." --add-data "std_dims.json;." --add-data "csv_kind_rewrites.json;." --add-data "ozon_name_expansions.json;." uc_engine.py
 if errorlevel 1 goto err
 echo.
 echo Готово: dist\UNIT CONTROL.exe
