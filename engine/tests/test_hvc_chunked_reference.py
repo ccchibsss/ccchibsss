@@ -62,4 +62,54 @@ class HvcChunked(unittest.TestCase):
                 post('/catalog/hvc-reference',{'action':'release','token':token})
             finally:srv.shutdown();srv.server_close();thread.join(timeout=5)
 
+    def test_indexed_read_only_decodes_requested_neighborhood(self):
+        n=10000
+        token=self.call('begin',total=n+2)['token']
+        for part,offset in enumerate(range(0,n,1000)):
+            self.call('chunk',token=token,part=part,field='parts',items=[[f'P{i}|B',{'name':f'name {i}'}] for i in range(offset,min(offset+1000,n))])
+        self.call('chunk',token=token,part=10,field='byArt',items=[['P1|B',['OE']]])
+        self.call('chunk',token=token,part=11,field='byOe',items=[['OE',['P1|B','P2|B']]])
+        self.call('commit',token=token)
+        loads=E.json.loads
+        with patch.object(E.json,'loads',wraps=loads) as decode:
+            graph=E._read_hvc_chunked_reference(self.c,token,[{'article':'P1','brand':'B'}])
+        self.assertEqual(set(graph['parts']),{'P1|B','P2|B'})
+        self.assertLess(decode.call_count,10)
+        self.call('release',token=token)
+        self.assertEqual(self.c.execute('SELECT COUNT(*) FROM hvc_ref_entries').fetchone()[0],0)
+    def test_upload_concurrency(self):
+        subprocess.check_call(['node',str(pathlib.Path(__file__).resolve().parents[2]/'tests/hvc-upload-concurrency-client.js')])
+    def test_legacy_chunk_reference_still_readable(self):
+        token=self.call('begin',total=1)['token']
+        self.c.execute('DELETE FROM hvc_ref_indexed WHERE id=?',(token,));self.c.commit()
+        self.call('chunk',token=token,part=0,field='parts',items=[['A|B',{'name':'legacy'}]])
+        self.call('commit',token=token)
+        graph=E._read_hvc_chunked_reference(self.c,token,[{'article':'A','brand':'B'}])
+        self.assertEqual(graph['parts'][0][1]['name'],'legacy')
+
+    def test_indexed_subset_parity_for_connected_graph(self):
+        ref={field:[] for field in E._HVC_REFERENCE_FIELDS}
+        ref['groupSeparator']=' ; '
+        rows=[]
+        for i in range(80):
+            key=f'P{i}|B';oe=f'OE{i%7}'
+            ref['parts'].append([key,{'artikul':f'P{i}','brand':'B','name':f'donor {i}','category':f'cat {i%3}',
+                '_dimensionEvidence':{'weight':1+i/100,'length':10,'width':10,'height':10}}])
+            ref['byArt'].append([key,[oe]])
+            rows.append({'article':f'P{i}','brand':'B','name':'','oe_norm':oe})
+        ref['byOe']=[[f'OE{g}',[f'P{i}|B' for i in range(80) if i%7==g]] for g in range(7)]
+        ref['oe']=[[f'OE{g}',{'name':f'OE donor {g}'}] for g in range(7)]
+        ref['unsafeKeys']=['P0|B','P13|B'];ref['unsafeOe']=['OE3']
+        token=self.call('begin',total=sum(len(ref[k]) for k in E._HVC_REFERENCE_FIELDS),groupSeparator=ref['groupSeparator'])['token']
+        for part,field in enumerate(E._HVC_REFERENCE_FIELDS):self.call('chunk',token=token,part=part,field=field,items=ref[field])
+        self.call('commit',token=token)
+        for mode in ['auto','artbrand','oe']:
+            for offset in range(0,len(rows),17):
+                batch=rows[offset:offset+17]
+                with patch.object(E.time,'strftime',return_value='2026-01-01T00:00:00Z'):
+                    full=E.enrich_hvc_input_rows(self.c,batch,ref,mode)
+                    indexed=E.enrich_hvc_input_rows(self.c,batch,mode=mode,reference_id=token)
+                self.assertEqual(full['rows'],indexed['rows'])
+
+
 del ImportExportAudit
