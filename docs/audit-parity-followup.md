@@ -1173,3 +1173,26 @@ dispatch, 1001-row second-chunk failure, stale Date mutation and forbidden outpu
 fields. Full verification: 193 Python tests, JS application tests, syntax of five
 executable HTML scripts, diff check passed. This closes the previously noted
 typed MARK route gap, not every other endpoint or global lifecycle atomicity.
+
+
+### Follow-up: SQL pipeline Date prelude ordering
+
+Confirmed a cross-stage bug not caught by per-route tests: browser runPipeline
+zeros Excel Date values in numeric fields before category/policy evaluation,
+whereas SQL policies saw the earlier JSON ISO string. With price=Date(2026-01-01)
+and price<50/exclude, browser excluded=true but SQL excluded=false.
+
+Moved SQL name/kind classification into the chunk prelude after article/HVC
+normalization and the same NUMERIC_DATE_GUARD used by the browser. Ozon preferred
+and product policies now follow that prelude. Changed-row filtering is preserved;
+unchanged rows do not receive the cleanup, matching the browser skip path.
+Browser row processing is unchanged. No browser classifier fallback is added.
+
+New test executes the actual SQL chunk source for full/partial runs with/without
+a changed-row set, checks all guarded fields before classifiers/policies, stage
+order and unchanged-row preservation. It compares SQLite policy results with
+the browser policy loop and explicitly asserts the price-Date exclusion case.
+
+Verification: 194 Python tests, JS application tests, five HTML script syntax
+checks and diff check passed. This closes the identified ordering discrepancy,
+not all documented typed transport/regex/global-transaction limitations.
