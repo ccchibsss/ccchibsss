@@ -1,14 +1,23 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
 const a=h.indexOf('        if(isPriceFile){',h.indexOf('const Import = {')),b=h.indexOf('}else await runPipeline',a);assert(a>0&&b>a);
 let saves=0;const ctx={S:{rows:[{article:'A'}]},isPriceFile:true,prog:()=>{},persistEconPending:()=>{},bumpVersion:()=>{},applyFilter:()=>{},Table:{paint:()=>{}},persistNow:async()=>{saves++;return true;}};
-vm.createContext(ctx);vm.runInContext('this.first=async()=>{'+h.slice(a,b)+'}};',ctx);
+ctx.S._bootReady=true;ctx.S.settings={};
+vm.createContext(ctx);
+vm.runInContext(h.slice(h.indexOf('async function persistImportOrThrow('),h.indexOf('async function storageFreeInfo(')),ctx);
+vm.runInContext('this.first=async()=>{'+h.slice(a,b)+'}};',ctx);
 (async()=>{
  await ctx.first();assert.equal(saves,1);assert(ctx.S._econPending);
  ctx.persistNow=async()=>false;await assert.rejects(()=>ctx.first(),/не сохранён/);
- const sqlImport=h.slice(h.indexOf('  importFile() {',h.indexOf('const PyEngine')),h.indexOf('async _syncCatalog('));
- assert(sqlImport.includes('if(isPriceFile){'));
- assert(sqlImport.includes("if(!await persistNow())throw new Error('Импорт не сохранён в SQLite')"));
- assert(!sqlImport.includes('catch (e) { try { Table.paint(); }'));
+ ctx.S._cacheWriteError='QuotaExceededError';
+ await assert.rejects(()=>ctx.first(),/QuotaExceededError/);
+ ctx.S._bootReady=false;await assert.rejects(()=>ctx.first(),/ещё не готово/);
+ ctx.S._bootReady=true;ctx.persistNow=async()=>{throw Error('HTTP 507')};
+ await assert.rejects(()=>ctx.first(),/HTTP 507/);
+ const sourceStart=h.indexOf('const Import = {');
+ assert(h.indexOf('body.length = 0',sourceStart)>h.indexOf("await persistImportOrThrow('Прайс не сохранён')",sourceStart));
+ const sqlImport=h.slice(h.indexOf('  async importFile() {',h.indexOf('const PyEngine')),h.indexOf('async _syncCatalog('));
+ assert(sqlImport.includes('return Import.pick();'));
+ assert(!sqlImport.includes('/import/file'));
  assert(h.includes('if (!isPriceFile && touched.length)'));
  assert(h.includes('if (!isPriceFile && S.settings.autoOeAnomalyOnImport !== false)'));
  const x=h.indexOf('  async enrichAsync(list, prog, mode) {'),y=h.indexOf('  _now()',x);

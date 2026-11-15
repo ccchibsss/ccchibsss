@@ -660,7 +660,7 @@ assert(app.includes('window.__UC_PY_TOKEN__ || lsGet'), 'авто-токен д�
 assert(app.includes('async recalcCatalog()'), 'полный пересчёт каталога на движке');
 assert(app.includes('/catalog/recalc') && app.includes('/catalog/results'), 'протокол пересчёта движка');
 assert(html.includes('id="btnPyRecalc"'), 'кнопка пересчёта каталога на Python');
-assert(app.includes('importFile() {') && app.includes("'/import/file'"), 'импорт файла на движке');
+assert(app.includes('importFile() {') && app.includes("'/parse/file'"), 'импорт файла на движке');
 assert(app.includes('async enrichOe()') && app.includes("'/catalog/enrich'"), 'обогащение OE на движке');
 assert(html.includes('id="btnPyImport"') && html.includes('id="btnPyEnrich"'), 'кнопки импорта и обогащения Python');
 
@@ -681,7 +681,7 @@ assert(app.includes("parts:[...HVC.parts]") && app.includes('btnPyEnrichFull'), 
 assert(app.includes("'category', 'tnved', 'applicability'"), 'слияние расширенных полей только в пустые');
 
 // v12.9.111: обобщённый разбор файлов на движке для прочих импортов
-assert(app.includes("'/parse/file'") && app.includes('async parseFile(f)'), 'разбор файла на движке');
+assert(app.includes("'/parse/file'") && app.includes('async parseFile(f, options)'), 'разбор файла на движке');
 assert(app.includes("'/parse/rows?parse_id='"), 'постраничная выдача разбора');
 assert(app.includes('rows = await PyEngine.parseFile(f)'), 'импорт конкурентов через движок с откатом');
 
@@ -712,7 +712,7 @@ assert(app.includes('инкрементальный пересчёт'), 'при�
 
 // v12.9.121: движок встроен в существующие кнопки, отдельной Python-строки нет
 assert(!app.includes('Python: пересчитать каталог') && !app.includes('>Python: '), 'отдельных Python-кнопок в интерфейсе нет');
-assert(app.includes("if (await PyEngine.processingAvailable()) PyEngine.importFile(); else Import.pick();"), 'импорт: движок первым, мастер — откат');
+assert(app.includes("await PyEngine.processingAvailable(); Import.pick();"), 'импорт: движок первым, мастер — откат');
 assert(app.includes("if (await PyEngine.processingAvailable()) PyEngine.exportOzon(); else OzonExport.open();"), 'экспорт OZON: движок первым, обычная выгрузка — откат');
 assert(html.includes('Локальный движок (SQLite) · операции с каталогом'), 'действия движка живут в окне Каталог V');
 
@@ -811,8 +811,8 @@ assert(app.includes('original_article: p.originalArticle') && app.includes('no_b
 // v12.9.143: обогащение — только прайс, только первый файл
 assert(app.includes('Import._priceFileDone') && app.includes('только обогащение прайса (первого файла)'), 'правило первого файла в импорте');
 
-assert(app.includes('X-Import-Mode'), 'движковый импорт: режим первого файла');
-assert(app.includes('app-import-enrich-ref'), 'перед обогащением движок получает прайс');
+assert(app.includes('return Import.pick();'), 'SQL import uses the shared mapping wizard');
+assert(app.includes("'/catalog/sync'"), 'normalized catalog sync uses atomic snapshot endpoint');
 
 assert(app.includes("'X-Import-Mode'") || app.includes('fulfillment: scheme'), 'паритет: настройки Ozon уходят движку');
 
