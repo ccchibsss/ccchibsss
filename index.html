@@ -21570,6 +21570,15 @@ function runPipeline(full, options) {
           await PyEngine.enrichOzonPreferred(sqlBatch,{reference:ozonSqlReference});
         }
         await PyEngine.applyProductPolicies(sqlBatch,ex);
+        if(enrichRules.length)await PyEngine.enrichRules(sqlBatch,enrichRules,nameCategoryContext);
+        if(full&&nameAutoEnabled){
+          const stale=sqlBatch.filter(p=>p._categoryKindAuto&&!CategoryKindAuto.current(p));
+          if(stale.length)await PyEngine.enrichCategoryKinds(nameCategoryContext,true,stale);
+          if(enrichRules.length){
+            const ozonRows=sqlBatch.filter(p=>!['manual','import','auto'].includes(p.ozon_type_src)&&!['oe_conflict','oe_invalid'].includes(p._ozonNameStatus));
+            if(ozonRows.length)await PyEngine.enrichOzonPreferred(ozonRows,{reference:ozonSqlReference});
+          }
+        }
       }
       for (let idx = start; idx < end; idx++) {
         const p = S.rows[idx];
@@ -21611,8 +21620,7 @@ function runPipeline(full, options) {
             if (action === 'hide') { p.visible = false; p.visibleReason = 'товарная_политика'; }
             if (action === 'delete_mark') { p.deletePending = true; p.visible = false; p.visibleReason = 'ожидает_удаления'; }
           }
-          if(sqlEnrichment && enrichRules.length) await PyEngine.enrichRules([p],enrichRules,nameCategoryContext);
-          else for (const r of enrichRules) {
+          if(!sqlEnrichment) for (const r of enrichRules) {
             /* Явную категорию из файла/карточки нельзя заменить косвенно при пересчёте. */
             if (r.target_val === 'category' && (p._categoryNameExplicit ||
               (p.category && !NameCategory.blank(p.category) && p.category !== p._categoryNameAutoValue))) continue;
@@ -21638,7 +21646,7 @@ function runPipeline(full, options) {
           }
           /* Правило обогащения могло изменить рабочую категорию: заново проверить
              черновой вид, не перезаписывая само правило и ручные данные. */
-          if (full && nameAutoEnabled && p._categoryKindAuto && !CategoryKindAuto.current(p)) {
+          if (!sqlEnrichment && full && nameAutoEnabled && p._categoryKindAuto && !CategoryKindAuto.current(p)) {
             if (sqlEnrichment) await PyEngine.enrichCategoryKinds(nameCategoryContext, true, [p]);
             else CategoryKindAuto.apply(p, nameCategoryContext, true);
           }
@@ -21646,7 +21654,7 @@ function runPipeline(full, options) {
           if (sqlEnrichment) tnvedServerRows.push(p); else CategoryTnved.apply(p);
           /* Если правило обогащения изменило внутреннюю категорию ПОСЛЕ первого
              подбора, пересчитать только затронутый черновик Ozon. */
-          if (full && nameAutoEnabled && !['manual','import','auto'].includes(p.ozon_type_src) &&
+          if (!sqlEnrichment && full && nameAutoEnabled && !['manual','import','auto'].includes(p.ozon_type_src) &&
               !['oe_conflict','oe_invalid'].includes(p._ozonNameStatus) &&
               (sqlEnrichment ? enrichRules.length>0 : p._ozonNameCategorySignature !== OzonAuto.categorySignature(p))) {
             if(sqlEnrichment) await PyEngine.enrichOzonPreferred([p],{reference:ozonSqlReference}); else OzonAuto.applyPreferred(p);
@@ -24644,8 +24652,9 @@ const HVC = {
     if (!catOnly && pt) { if (!p.multiplicity) p.multiplicity = pt.multiplicity; if (!p.image_url && pt.image_url) p.image_url = pt.image_url; if (HVC.enCol('barcode') && !p.barcode && pt.barcode) p.barcode = pt.barcode; }
     return true;
   },
-  enrich(list,mode) { const rows=list || S.rows, scope=HVC.identityScope(rows); let n = 0; rows.forEach(p => { if (HVC.enrichOne(p,scope,mode)) n++; }); return n; },
+  enrich(list,mode) { if(PyEngine.processingMode()==='sql')throw new Error('В SQL-режиме используйте асинхронное HVC.enrichAsync'); const rows=list || S.rows, scope=HVC.identityScope(rows); let n = 0; rows.forEach(p => { if (HVC.enrichOne(p,scope,mode)) n++; }); return n; },
   async enrichAsync(list, prog, mode) {
+    if(PyEngine.processingMode()==='sql')return PyEngine.enrichHvcRows(list||S.rows,prog,mode);
     const rows = list || S.rows, scope=HVC.identityScope(rows), CH = 1200; let n = 0;
     const _t0 = HVC._now();
     let fast = 0, oeRows = 0, abRows = 0;
@@ -26688,22 +26697,36 @@ const SettingsSnapshot = {
    Движок недоступен — приложение работает как раньше (встроенный расчёт). */
 const PyEngine = {
   async saveSqlCatalog() {
+    const revision=S.catalogVersion,rows=S.rows;
     const keys=['custom','settings','tariffs','cats','rules','excs','sups','orders','hist','imports','snaps','pnl','mprof','eprof'];
     const metadata=this.encodeRuleRows(Object.fromEntries(keys.map(k=>[k,S[k]])));
-    const start=await this._fetch('/app/catalog',{method:'POST',body:JSON.stringify({action:'begin',base:S._sqlCatalogRevision||'',total:S.rows.length,metadata})});
-    const revision=S.catalogVersion,rows=S.rows;
-    for(let offset=0;offset<rows.length;offset+=1000){
+    const start=await this._fetch('/app/catalog',{method:'POST',body:JSON.stringify({action:'begin',base:S._sqlCatalogRevision||'',total:rows.length,metadata})});
+    let nextPart=0,failure=null,uploaded=0;
+    const saveStarted=Date.now();
+    const parts=Math.ceil(rows.length/1000);
+    const upload=async()=>{while(!failure){
+      const part=nextPart++;if(part>=parts)return;
+      const offset=part*1000;
+      if(S.rows!==rows||S.catalogVersion!==revision){failure=new Error('Каталог изменился во время сохранения SQLite');return;}
+      try {
       const plain=rows.slice(offset,offset+1000).map(p=>{
         const {_t,_bw,mp,_stdDimsCalc,...row}=p;
         if(p.originalArticle!==undefined)row.originalArticle=p.originalArticle;
         if(productVolumeIsExplicit(p))row.volume=p.volume;
         return row;
       });
-      await this._fetch('/app/catalog',{method:'POST',timeout:120000,body:JSON.stringify({action:'chunk',token:start.token,part:offset/1000,chunk:this.encodeRuleRows(plain)})});
-    }
+      await this._fetch('/app/catalog',{method:'POST',timeout:120000,body:JSON.stringify({action:'chunk',token:start.token,part,chunk:this.encodeRuleRows(plain)})});
+      uploaded+=plain.length;
+      try{if(typeof Prog!=='undefined'&&Prog.n>0)Prog.msg('SQLite: сохранено '+uploaded+' из '+rows.length+' SKU');}catch(e){}
+      }catch(e){failure=e;return;}
+    }};
+    // Bound both in-flight JSON memory and concurrent HTTP/SQLite writes.
+    await Promise.all(Array.from({length:Math.min(3,parts)},()=>upload()));
+    if(failure)throw failure;
     if(S.rows!==rows||S.catalogVersion!==revision)throw new Error('Каталог изменился во время сохранения SQLite');
     const result=await this._fetch('/app/catalog',{method:'POST',timeout:120000,body:JSON.stringify({action:'commit',token:start.token})});
     S._sqlCatalogRevision=result.revision;
+    S._lastSqlSaveMs=Date.now()-saveStarted;
     _persistDirty=false;S._cacheWriteError='';
     return true;
   },
@@ -27167,11 +27190,15 @@ const PyEngine = {
             headers: { 'X-UC-Token': this.token(), 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream', 'X-Import-Mode': isPriceFile ? 'price' : 'enrich' }, body: f });
           const j = await r.json().catch(() => ({}));
           if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
-          if (typeof Import !== 'undefined') Import._priceFileDone = true;
           const products = await this._pullProducts();
           const m = this._mergeProducts(products, !isPriceFile);
           bumpVersion();
-          try { await runPipeline(true, { skipEconomics: true, persist: false }); } catch (e) { try { Table.paint(); } catch (e2) { } }
+          if(isPriceFile){
+            S._econPending=true;persistEconPending();
+            applyFilter();Table.paint();
+          }else await runPipeline(true, { skipEconomics: true, persist: false });
+          if(!await persistNow())throw new Error('Импорт не сохранён в SQLite');
+          if(typeof Import!=='undefined')Import._priceFileDone=true;
           Toast.ok('Файл импортирован на Python-движке',
             f.name + ': строк в движок ' + fmt(j.imported || 0) + ' · в таблицу добавлено ' + fmt(m.added) + ', дополнено ' + fmt(m.touched) +
             (j.oe_matched ? ' · по уникальному OE сопоставлено ' + fmt(j.oe_matched) : '') +
@@ -27729,6 +27756,32 @@ const PyEngine = {
         if (p.article !== r.article || (p.brand || '') !== r.brand) throw new Error('Порядок строк автокатегоризации изменился');
         for(const k of r.removed || []) delete p[k]; Object.assign(p,r.fields); });
     }
+  },
+  async enrichHvcRows(rows,prog,mode) {
+    if(!rows.length)return 0;
+    await this.processingAvailable();
+    const keys=new Set([...HVC.parts.keys(),...S.rows.map(p=>HVC.keyOf(p))]),scope=HVC.identityScope(S.rows);
+    const unsafe=new Set([...keys].filter(k=>HVC.identityUnsafeKey(k)));
+    for(const p of S.rows)if(HVC.identityUnsafe(p,scope))unsafe.add(HVC.keyOf(p));
+    const reference={parts:[...HVC.parts],oe:[...HVC.oe],byArt:[...HVC.byArt].map(([k,v])=>[k,[...v]]),byOe:[...HVC.byOe].map(([k,v])=>[k,[...v]]),unsafeKeys:[...unsafe],unsafeOe:[...HVC.oe.keys()].filter(k=>HVC.identityUnsafeOe(k)),groupSeparator:OE_DELIMITERS[oeMode()].join};
+    const before=rows.map(p=>JSON.stringify(p)),catalog=S.rows,staged=[];
+    let changed=0,referenceId;
+    for(let off=0;off<rows.length;off+=1000){
+      const batch=rows.slice(off,off+1000);
+      const result=await this._fetch('/catalog/enrich-hvc-rows',{method:'POST',timeout:120000,body:JSON.stringify({rows:batch,reference:off===0?reference:undefined,reference_id:referenceId,mode:mode||HVC.enrichMode(),cat_mode:HVC.enrichCatMode(),columns:Object.fromEntries(HVC.EN_COLS.map(k=>[k,HVC.enCol(k)])),policy:{limits:AnomalyDetector.limits||[]}})});
+      referenceId=result.reference_id;
+      if(!Array.isArray(result.rows)||result.rows.length!==batch.length)throw new Error('Неполный ответ HVC SQLite');
+      for(let i=0;i<batch.length;i++){
+        const p=batch[i],r=result.rows[i];
+        if(!r||p.article!==r.article||(p.brand||'')!==r.brand||!r.fields||!Array.isArray(r.removed)||[...Object.keys(r.fields),...r.removed].some(k=>['__proto__','constructor','prototype','article','brand'].includes(k)))throw new Error('Неверный ответ HVC SQLite');
+        staged.push({p,fields:this.decodeRuleFields(r.fields,r.special_values||[]),removed:r.removed});
+      }
+      changed+=result.changed||0;
+      if(prog)prog('SQL: обогащение '+Math.min(off+1000,rows.length)+' из '+rows.length);
+    }
+    if(S.rows!==catalog||this.processingMode()!=='sql'||rows.some((p,i)=>JSON.stringify(p)!==before[i]))throw new Error('Каталог изменился во время HVC-обогащения');
+    for(const {p,fields,removed} of staged){for(const k of removed)delete p[k];Object.assign(p,fields);}
+    return changed;
   },
   async enrichFull(modeOverride) {
     await this.processingAvailable();
@@ -29106,7 +29159,7 @@ const Import = {
         await Exp._yield();
       }
       oeAcc.clear();
-      Import._priceFileDone = true;  // v12.9.143: первый файл применён — дальше только обогащение
+      // Mark the first price completed only after its persistence succeeds.
       if (enrichOnlySkipped) {
         Prog.msg('обогащение только по текущему прайсу: ' + fmt(enrichOnlySkipped) + ' строк вне прайса пропущено, новых SKU не создавалось');
         console.info('[UC] обогащение по текущему прайсу: ' + fmt(enrichOnlySkipped) + ' строк вне прайса — новые SKU не создавались');
@@ -29161,7 +29214,7 @@ const Import = {
       const smallDelta = !nothingChanged && !dedup && changedTouched < Math.max(50, S.rows.length * 0.02);
       S.catalogVersion = (S.catalogVersion || 0) + 1; /* Worker перезагрузит строки */
       /* Каталог V: UPSERT в OE-реестр / кроссы / цены + обогащение габаритами и аналогами */
-      if (touched.length) {
+      if (!isPriceFile && touched.length) {
         if (prog) prog('Каталог V: обновление реестров…');
         const touchedUnique = [...new Set(touched)];
         const targets = enabled.map(m => m.target || '');
@@ -29205,7 +29258,7 @@ const Import = {
         /* Третий шаг правила ОВХ: типовые габариты по категории/виду. Только
            точное совпадение справочника, только пустые поля и только строки,
            которые не ждут проверки после подбора по OE. */
-        if (fileHasSources && S.settings.autoStdDims === true && typeof StdDims !== 'undefined') {
+        if (PyEngine.processingMode()!=='sql' && fileHasSources && S.settings.autoStdDims === true && typeof StdDims !== 'undefined') {
           let stdFilled = 0;
           const stdFields = StdDims.fields.map(f => f[0]);
           for (let i = 0; i < touchedUnique.length; i++) {
@@ -29240,7 +29293,7 @@ const Import = {
             if (prog) prog('обогащение связанных строк каталога: ' + fmt(relRows.length));
             await HVC.enrichAsync(relRows, prog);
             let relStd = 0;
-            if (S.settings.autoStdDims === true && typeof StdDims !== 'undefined') {
+            if (PyEngine.processingMode()!=='sql' && S.settings.autoStdDims === true && typeof StdDims !== 'undefined') {
               const relStdKeys = StdDims.fields.map(f => f[0]);
               for (let i = 0; i < relRows.length; i++) {
                 if ((i % 4000) === 0) await Exp._yield();
@@ -29274,17 +29327,17 @@ const Import = {
       /* Группировка OE по SKU выполняется ВСЕГДА: переключатель impOe управляет лишь
          транзитивным объединением групп артикулов, но сам OE-список через выбранный разделитель должен
          накапливаться независимо от него. */
-      if (prog) prog('группировка OE по связке Артикул+Бренд…');
+      if (!isPriceFile && prog) prog('группировка OE по связке Артикул+Бренд…');
       /* v12.9.75: полный syncOeByKey по каталогу здесь избыточен — его только что
          выполнил rebuildIndex(S.rows) выше (этап «индекс OE»), а после него OE
          могли измениться лишь у строк этого импорта и связанных (changedList).
          Распространение OE на остальные строки тех же связок доберёт таргетная
          группировка пайплайна. Раньше проход стоил Set+разбор OE на каждую
          строку каталога при любом, даже точечном, импорте. */
-      try { HVC.syncOeByKey(changedList); } catch (e) { console.warn('[UC] syncOeByKey:', e); }
+      try { if(!isPriceFile)HVC.syncOeByKey(changedList); } catch (e) { console.warn('[UC] syncOeByKey:', e); }
       _mark('OE по связке');
       /* v12.9.7-mem: без изменённых строк пересобирать OE-группы не нужно. */
-      if (changedTouched && $('#impOe').classList.contains('on') && (nothingChanged || smallDelta)) { if (prog) prog('группировка по OE-номерам…'); await rebuildGroups(); }
+      if (!isPriceFile && changedTouched && $('#impOe').classList.contains('on') && (nothingChanged || smallDelta)) { if (prog) prog('группировка по OE-номерам…'); await rebuildGroups(); }
       _mark('группы OE');
       Prog.step(78);
       touched.length = 0; visibilityUpdates.length = 0; idx.clear(); idxArt.clear();
@@ -29298,7 +29351,12 @@ const Import = {
       /* v12.9.7-mem: пересчитываем только изменённые строки — повторный импорт
          того же файла больше не раздувает память на полный проход по каталогу. */
       try {
-        await runPipeline(true, {
+        if(isPriceFile){
+          if(prog)prog('Прайс: сохранение без обогащения и расчёта экономики…');
+          S._econPending=true;persistEconPending();
+          bumpVersion();applyFilter();Table.paint();
+          if(!await persistNow())throw new Error('Прайс не сохранён');
+        }else await runPipeline(true, {
           changedRows, preserveView: nothingChanged, persist: !nothingChanged,
           /* v12.9.77: запись только изменённых строк — при любой доле дельты,
              а не только < 2 %. Полная перезапись нужна лишь при слиянии
@@ -29309,13 +29367,14 @@ const Import = {
           changedList, onProgress: prog, stepRange: [78, 97]
         });
       }
-      catch (ePipe) { console.error('[UC] pipeline после импорта:', ePipe); await persistNow(); throw ePipe; }
+      catch (ePipe) { console.error('[UC] pipeline после импорта:', ePipe); throw ePipe; }
+      Import._priceFileDone = true;
       _mark('пересчёт и запись');
       /* Автоматическая сверка работает независимо от общего режима обогащения.
          Проверяем и ранее загруженные аномальные SKU: донор мог появиться только
          в новом файле. Общий OE — лишь предложение; карантин не снимается. */
       S.lastOeAutoCheck=null;
-      if (S.settings.autoOeAnomalyOnImport !== false) {
+      if (!isPriceFile && S.settings.autoOeAnomalyOnImport !== false) {
         try {
           if (prog) prog('Аномалии: поиск непротиворечивых ОВХ по прямому OE…');
           S.lastOeAutoCheck=await AnomalyOE.find({automatic:true,onProgress:prog});
@@ -29335,8 +29394,8 @@ const Import = {
          сейчас на экране. Скрытый раздел всё равно перерисует UI.go при входе,
          а полный Dash.agg + UE.render по каталогу после каждого импорта —
          секунды впустую. */
-      if (document.getElementById('v-dashboard') && document.getElementById('v-dashboard').classList.contains('active')) Dash.render();
-      if (document.getElementById('v-unit') && document.getElementById('v-unit').classList.contains('active')) UE.render();
+      if (!isPriceFile && document.getElementById('v-dashboard') && document.getElementById('v-dashboard').classList.contains('active')) Dash.render();
+      if (!isPriceFile && document.getElementById('v-unit') && document.getElementById('v-unit').classList.contains('active')) UE.render();
       if (!changedTouched) { Table.paint(); }   /* v12.9.7-mem: вид не менялся */
       $('#mImport').classList.remove('on');
       /* Итог по времени: видно, какой этап «съел» минуты. */
@@ -29930,7 +29989,7 @@ const EnrichAudit = {
     if (k === 'ozon_category') return !String(p.ozon_category == null ? '' : p.ozon_category).trim();
     return !String(p[k] == null ? '' : p[k]).trim();
   },
-  scan() {
+  async scan() {
     const rows = (typeof S !== 'undefined' && S.rows) ? S.rows : [];
     const mode = HVC.enrichMode();
     const cols = HVC.EN_COLS;
@@ -29952,6 +30011,8 @@ const EnrichAudit = {
     try {
       for (let i = 0; i < rows.length; i += CH) {
         const end = Math.min(i + CH, rows.length);
+        const sqlProbes=PyEngine.processingMode()==='sql'?rows.slice(i,end).map(p=>({...p,_sources:{...p._sources}})):null;
+        if(sqlProbes)await PyEngine.enrichHvcRows(sqlProbes,null,mode);
         for (let j = i; j < end; j++) {
           const p = rows[j];
           for (const o of res.other) if (this._otherEmpty(p, o.k)) otherBy.get(o.k).empty++;
@@ -29960,8 +30021,8 @@ const EnrichAudit = {
           missing.forEach(k => { by.get(k).empty++; });
           let probe = null;
           try {
-            probe = Object.assign({}, p, { _sources: Object.assign({}, p._sources || {}) });
-            HVC.enrichOne(probe, scope, mode);
+            probe = sqlProbes?sqlProbes[j-i]:Object.assign({}, p, { _sources: Object.assign({}, p._sources || {}) });
+            if(!sqlProbes)HVC.enrichOne(probe, scope, mode);
           } catch (e) { probe = null; }
           if (probe) for (const k of missing) if (!HVC.colEmpty(probe, k)) by.get(k).fill++;
           const target = probe || p;
@@ -40271,7 +40332,7 @@ const BulkAutoApply = {
         HVC.rebuildIndex(S.rows);
         enriched = await HVC.enrichAsync(S.rows, prog, 'auto');
         prog('Заполнение точных стандартных весогабаритов…');
-        for (let i = 0; i < S.rows.length; i++) {
+        for (let i = 0; PyEngine.processingMode()!=='sql' && i < S.rows.length; i++) {
           const p = S.rows[i];
           try {
             const a = StdDims.assess(p, true), f = a.found;
@@ -46904,11 +46965,11 @@ function bindAll() {
       (t.other ? ' Категория OZON, ТН ВЭД, ссылка на фото и себестоимость обогащением не заполняются — они приходят из импорта, дерева Ozon или вручную.' : '');
     auditBox.style.display = 'block';
   };
-  const runAudit = silent => {
+  const runAudit = async silent => {
     if (!S.rows.length) { Toast.warn('Каталог пуст', 'Сначала импортируйте товары'); return null; }
     if (S.rows.length > 20000 && !silent && !window.confirm(`Проверить весь каталог: ${fmt(S.rows.length)} SKU. Сухой прогон займёт время — продолжить?`)) return null;
     HVC.rebuildIndex(S.rows);
-    const res = EnrichAudit.scan();
+    const res = await EnrichAudit.scan();
     renderAudit(res);
     if (!silent) {
       const t = EnrichAudit.totals(res);
@@ -46917,7 +46978,7 @@ function bindAll() {
     return res;
   };
   const auditBtn = $('#enAuditAll');
-  if (auditBtn) auditBtn.onclick = () => { try { runAudit(false); } catch (e) { console.error('[UC] audit:', e); Toast.err('Проверка не выполнена', String(e && e.message || e)); } };
+  if (auditBtn) auditBtn.onclick = async () => { try { await runAudit(false); } catch (e) { console.error('[UC] audit:', e); Toast.err('Проверка не выполнена', String(e && e.message || e)); } };
   const auditClose = $('#enAuditClose');
   if (auditClose) auditClose.onclick = () => { if (auditBox) auditBox.style.display = 'none'; };
   const auditFill = $('#enAuditFill');
@@ -46934,7 +46995,7 @@ function bindAll() {
       await withProgress('Заполнение пустых данных', 'OE → SKU+бренд → стандартные весогабариты, только пустые поля', async prog => {
         HVC.rebuildIndex(S.rows);
         rowsChanged = await HVC.enrichAsync(S.rows, prog, mode);
-        if (S.settings.autoStdDims === true) {
+        if (PyEngine.processingMode()!=='sql' && S.settings.autoStdDims === true) {
           if (prog) prog('стандартные весогабариты по категории/виду…');
           for (const p of S.rows) {
             try {
@@ -46956,7 +47017,7 @@ function bindAll() {
       auditFill.disabled = false;
       try { syncEnSw(); renderEnrichCoverage(); Table.paint(); Dash.render(); } catch (e) { }
     }
-    try { runAudit(true); } catch (e) { }
+    try { await runAudit(true); } catch (e) { }
   };
   HVC.EN_COLS.forEach(k => {
     const el = $('#enCol_' + k); if (!el) return;
@@ -47071,7 +47132,7 @@ function bindAll() {
       /* Третий шаг правила ОВХ: типовые габариты категории/вида — только точное
          совпадение справочника, только пустые поля, только строки без карантина. */
       let stdN = 0;
-      if (autoStd) {
+      if (PyEngine.processingMode()!=='sql' && autoStd) {
         if (prog) prog('стандартные весогабариты по категории/виду…');
         for (const p of S.rows) {
           try {

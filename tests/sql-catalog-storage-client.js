@@ -42,5 +42,20 @@ P._fetch=async(path,opts)=>{
  P.health=async()=>true;P.verifyAuth=async()=> 'ok';
  await P.toggleProcessingMode();assert.equal(mode,'browser'); // SQL offline: no switch
  fail=false;await P.toggleProcessingMode();assert.equal(mode,'sql');
+ // Bounded parallel upload: five parts, at most three in flight; commit
+ // only after ALL workers have finished, even when one request fails.
+ ctx.S.rows=Array.from({length:4501},(_,i)=>({article:String(i),brand:'B'}));
+ let active=0,peak=0,commits=0,parts=[],breakPart=-1;
+ P._fetch=async(path,opts)=>{
+  const p=JSON.parse(opts.body);
+  if(p.action==='begin')return {token:'parallel'};
+  if(p.action==='commit'){assert.equal(active,0);commits++;return {revision:'parallel'};}
+  active++;peak=Math.max(peak,active);
+  try {await new Promise(r=>setTimeout(r,p.part%2?2:5));if(p.part===breakPart)throw Error('chunk failure');parts.push(p.part);return {};}
+  finally{active--;}
+ };
+ await P.saveSqlCatalog();assert.equal(peak,3);assert.equal(commits,1);assert.deepEqual(parts.sort((a,b)=>a-b),[0,1,2,3,4]);
+ parts=[];breakPart=1;commits=0;
+ await assert.rejects(()=>P.saveSqlCatalog(),/chunk failure/);assert.equal(active,0);assert.equal(commits,0);
  console.log('OK: SQLite-only persistence, typed reload and no IndexedDB fallback');
 })().catch(e=>{console.error(e);process.exitCode=1});

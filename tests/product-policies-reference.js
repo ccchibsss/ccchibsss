@@ -7,7 +7,7 @@ const numMatch=h.match(/(?:function num\([^]*?\n\}|const num = [^]*?\n\};)/);
 if(!numMatch)throw Error('num source not found');
 vm.runInContext(numMatch[0]+'\n'+h.slice(start,end),ctx);
 const a=h.indexOf('          for (const e of ex) {');
-const b=h.indexOf('          if(sqlEnrichment && enrichRules.length)',a);
+const b=h.indexOf('          if(!sqlEnrichment) for (const r of enrichRules)',a);
 // SQL guard is outside the original for loop in current pipeline.
 const loopStart=a>=0?a:h.indexOf('          if(!sqlEnrichment) for (const e of ex) {');
 const loop=h.slice(loopStart,b).replace('if(!sqlEnrichment) ','');
