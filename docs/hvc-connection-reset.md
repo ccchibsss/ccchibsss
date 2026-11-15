@@ -161,3 +161,25 @@ Unicode roundtrip, cleanup после ошибки и отсутствие ча�
 записями и полным JSON >50 MiB прошёл; максимальный POST 594268 bytes.
 Это synthetic/local проверки, не Windows/PyInstaller E2E на файле пользователя.
 Обновлять нужно index.html и Python engine вместе; сброс базы не требуется.
+
+## HVC: `HTTP 500 /catalog/hvc-reference: database is locked`
+
+This is SQLite writer contention, distinct from the Ozon row-state check.
+The client can upload three chunks concurrently; SQLite still has only one
+writer and the normal connection policy waits five seconds. HVC operations
+now enter a process-wide bounded writer queue before schema setup or writes.
+Queue acquisition waits at most 60 seconds and SQLite busy waiting is temporarily
+30 seconds for this operation, restored on success or failure. Requests are not
+replayed. Other endpoints/processes are not serialized by this HVC-only lock;
+a writer held beyond the wait limit can still fail explicitly.
+
+Per-entry JSON encoding is completed before the SQLite write transaction,
+rather than inside an executemany iterator holding the database write lock.
+The existing chunk-size bound limits this temporary prepared list. Normal
+validation, rechecking sealed status under the transaction, commit, and cleanup
+remain intact. Requires updating/restarting the Python engine; no DB reset.
+
+Regression coverage includes three concurrent real HTTP chunk requests with
+independent connections and a separate SQLite writer holding a lock beyond the
+test connection's original timeout. Tests verify complete chunk persistence,
+release, and restoration of the previous busy timeout on success/error.

@@ -112,4 +112,62 @@ class HvcChunked(unittest.TestCase):
                 self.assertEqual(full['rows'],indexed['rows'])
 
 
+    def test_upload_waits_for_external_writer_and_restores_timeout(self):
+        import threading
+        token=self.call('begin',total=1)['token']
+        self.c.execute('PRAGMA busy_timeout=1')
+        held=threading.Event();finish=threading.Event();errors=[]
+        def writer():
+            conn=sqlite3.connect(E.DB_PATH)
+            try:
+                conn.execute('BEGIN IMMEDIATE');held.set()
+                finish.wait(0.3)
+                conn.commit()
+            except Exception as e:errors.append(e)
+            finally:conn.close()
+        thread=threading.Thread(target=writer);thread.start()
+        try:
+            self.assertTrue(held.wait(5))
+            self.assertEqual(self.call('chunk',token=token,part=0,field='unsafeKeys',items=['A|B'])['saved'],1)
+            self.assertEqual(self.c.execute('PRAGMA busy_timeout').fetchone()[0],1)
+            with self.assertRaises(ValueError):self.call('chunk',token=token,part=-1,field='unsafeKeys',items=['X'])
+            self.assertEqual(self.c.execute('PRAGMA busy_timeout').fetchone()[0],1)
+            self.call('commit',token=token)
+        finally:finish.set();thread.join(5)
+        self.assertEqual(errors,[])
+
+    def test_http_concurrent_chunks_queue_before_sqlite(self):
+        import concurrent.futures,threading,time,urllib.request
+        from http.server import ThreadingHTTPServer
+        srv=ThreadingHTTPServer(('127.0.0.1',0),E.Handler)
+        thread=threading.Thread(target=srv.serve_forever,daemon=True)
+        active=0;peak=0;original=E._hvc_reference_upload_locked
+        def observed(conn,body):
+            nonlocal active,peak
+            active+=1;peak=max(peak,active)
+            try:
+                if body.get('action')=='chunk':time.sleep(0.05)
+                return original(conn,body)
+            finally:active-=1
+        def post(body):
+            req=urllib.request.Request('http://127.0.0.1:'+str(srv.server_port)+'/catalog/hvc-reference',data=json.dumps(body).encode(),headers={'X-UC-Token':'test-token','Content-Type':'application/json'})
+            with urllib.request.urlopen(req,timeout=15) as r:return json.loads(r.read())
+        with patch.object(E,'get_token',return_value='test-token'),patch.object(E,'_hvc_reference_upload_locked',side_effect=observed):
+            thread.start()
+            try:
+                token=post(dict(action='begin',total=3000))['token']
+                barrier=threading.Barrier(3)
+                def chunk(part):
+                    barrier.wait(5)
+                    return post(dict(action='chunk',token=token,part=part,field='parts',items=[[f'P{part}-{i}|B',{'name':'донор'}] for i in range(1000)]))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                    results=list(pool.map(chunk,range(3)))
+                self.assertEqual([r['saved'] for r in results],[1000]*3)
+                post(dict(action='commit',token=token))
+                self.assertEqual(peak,1)
+                self.assertEqual(self.c.execute('SELECT COUNT(*) FROM hvc_ref_entries WHERE id=?',(token,)).fetchone()[0],3000)
+                post(dict(action='release',token=token))
+            finally:srv.shutdown();srv.server_close();thread.join(5)
+
+
 del ImportExportAudit
