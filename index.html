@@ -22718,6 +22718,21 @@ function persistNow(changedList) {
   _persistQueue = call.catch(() => {}).finally(() => { _persistPending--; });
   return call;
 }
+async function persistImportOrThrow(label) {
+  if (S._bootReady !== true || S._bootError) {
+    throw new Error(label + ': ' + (S._bootError || 'хранилище ещё не готово. Дождитесь завершения запуска приложения и повторите.'));
+  }
+  try {
+    if (await persistNow()) return true;
+  } catch (e) {
+    const reason=String(e && (e.message || e.name) || e);
+    S._cacheWriteError=reason;
+    throw new Error(label + ': ' + reason + '. Данные остаются в памяти; не закрывайте вкладку, сделайте экспорт.');
+  }
+  const reason=S._cacheWriteError || (S.settings && S.settings.lastPersistError) ||
+    (S._volatileStorage ? 'IndexedDB недоступен: приложение работает только в памяти' : 'хранилище не подтвердило запись');
+  throw new Error(label + ': ' + reason + '. Данные остаются в памяти; не закрывайте вкладку, сделайте экспорт.');
+}
 async function storageFreeInfo() {
   try {
     if (!navigator.storage || !navigator.storage.estimate) return null;
@@ -26343,14 +26358,14 @@ const UI = {
       Toast.info('Показ включён', 'исключённые SKU видны в таблице со статусом «Исключён»');
     };
     $('#btnImport').onclick = async () => { // v12.9.121: движок встроен в существующую кнопку
-      if (await PyEngine.processingAvailable()) PyEngine.importFile(); else Import.pick();
+      await PyEngine.processingAvailable(); Import.pick();
     };
     const _bdi = $('#btnDiskImport'); if (_bdi) _bdi.onclick = () => DiskImport.pick();
     const _bss = $('#btnSettingsSnapshot'); if (_bss) _bss.onclick = () => SettingsSnapshot.download();
     const _bre = $('#btnReviewExport'); if (_bre) _bre.onclick = () => ReviewQueue.exportCsv();
     const _bpc = $('#btnPyCheck'); if (_bpc) _bpc.onclick = () => PyEngine.checkEconomics();
     const _bpr = $('#btnPyRecalc'); if (_bpr) _bpr.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.recalcCatalog() : runPipeline(true);
-    const _bpi = $('#btnPyImport'); if (_bpi) _bpi.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.importFile() : Import.pick();
+    const _bpi = $('#btnPyImport'); if (_bpi) _bpi.onclick = async () => { await PyEngine.processingAvailable(); Import.pick(); };
     const _bpe = $('#btnPyEnrich'); if (_bpe) _bpe.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.enrichFull('oe') : PyEngine.enrichBrowser('oe');
     const _bpd = $('#btnPyDashboard'); if (_bpd) _bpd.onclick = () => PyEngine.dashboard();
     const _bpx = $('#btnPyExport'); if (_bpx) _bpx.onclick = () => PyEngine.processingMode() === 'sql' ? PyEngine.exportCatalog() : Exp.open();
@@ -27161,56 +27176,13 @@ const PyEngine = {
     }
     return { touched, added };
   },
-  importFile() {
-    const inp = document.createElement('input');
-    inp.type = 'file'; inp.accept = '.csv,.xlsx,.zip';
-    inp.onchange = async () => {
-      const f = inp.files && inp.files[0]; if (!f) return;
-      if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Импорт файла на движке недоступен — используйте обычный импорт приложения.'); return; }
-      /* v12.9.144: место проверяем до отправки файла, понятными словами */
-      try {
-        const dg = await (await fetch(this.base() + '/diag')).json();
-        const needMb = Math.max(250, Math.ceil((f.size || 0) / 1048576) * 4);
-        if (dg && dg.disk_free_mb != null && dg.disk_free_mb < needMb) {
-          Toast.warn('Не хватает места на диске', 'Свободно ' + fmt(dg.disk_free_mb) + ' МБ, для импорта нужно минимум ' + fmt(needMb) + ' МБ (база движка ' + fmt(dg.db_size_mb || 0) + ' МБ в папке engine_data). Освободите 1–2 ГБ и повторите. Каталог в приложении не пострадал.');
-          return;
-        }
-      } catch (e) { /* движок сам проверит и ответит 507 */ }
-      await withProgress('Python: импорт файла', f.name, async () => {
-        const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 600000);
-        try {
-          /* v12.9.145: и на движке обогащается только прайс — первый файл.
-             Первый файл сессии создаёт SKU; следующие только обновляют его
-             строки (движок получает X-Import-Mode: enrich и не вставляет
-             новые, браузер не добавляет их в таблицу). */
-          if (!S.rows.length && typeof Import !== 'undefined') Import._priceFileDone = false;
-          const isPriceFile = !(typeof Import !== 'undefined' && Import._priceFileDone);
-          if (!isPriceFile) await this._syncCatalog('app-import-enrich-ref');
-          const r = await fetch(this.base() + '/import/file', { method: 'POST', signal: ctl.signal,
-            headers: { 'X-UC-Token': this.token(), 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream', 'X-Import-Mode': isPriceFile ? 'price' : 'enrich' }, body: f });
-          const j = await r.json().catch(() => ({}));
-          if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
-          const products = await this._pullProducts();
-          const m = this._mergeProducts(products, !isPriceFile);
-          bumpVersion();
-          if(isPriceFile){
-            S._econPending=true;persistEconPending();
-            applyFilter();Table.paint();
-          }else await runPipeline(true, { skipEconomics: true, persist: false });
-          if(!await persistNow())throw new Error('Импорт не сохранён в SQLite');
-          if(typeof Import!=='undefined')Import._priceFileDone=true;
-          Toast.ok('Файл импортирован на Python-движке',
-            f.name + ': строк в движок ' + fmt(j.imported || 0) + ' · в таблицу добавлено ' + fmt(m.added) + ', дополнено ' + fmt(m.touched) +
-            (j.oe_matched ? ' · по уникальному OE сопоставлено ' + fmt(j.oe_matched) : '') +
-            (j.skipped_outside_price ? ' · вне прайса (первого файла) пропущено ' + fmt(j.skipped_outside_price) + ' — новые SKU не создаются' : '') +
-            '. Файл разбирал движок, не браузер.');
-        } finally { clearTimeout(to); }
-      });
-    };
-    inp.click();
+  async importFile() {
+    await this.processingAvailable();
+    return Import.pick();
   },
   async _syncCatalog(source) {
-    const CH = 5000;
+    const CH = 5000, rows=S.rows, version=S.catalogVersion;
+    const validate=()=>{if(S.rows!==rows||S.catalogVersion!==version)throw new Error('Каталог изменился во время синхронизации');};
     const payloadOf = p => ({ article: p.article, brand: p.brand || '', name: p.name || '', price: num(p.price), cost: num(p.cost),
       stock: num(p.stock), sales: num(p.sales), weight: num(p.weight), length: num(p.length), width: num(p.width),
       height: num(p.height), volume: num(p.volume), oe_numbers: p.oe_numbers || '', analog_list: p.analog_list || '',
@@ -27257,10 +27229,15 @@ const PyEngine = {
       })(),
       ozon_realfbs_delivery: num(p.ozon_realfbs_delivery || 0), ozon_failed_cost: num(p.ozon_failed_cost || 0),
       min_stock: num(p.minStock || 0), no_buy_pct: forecastNoBuyRateInfo(p, null, S.settings || {}).rate, fixed_cost: num(p.fixed || 0) });
-    for (let i = 0; i < S.rows.length; i += CH) {
-      await this._fetch('/import/rows', { method: 'POST', timeout: 120000,
-        body: JSON.stringify({ rows: S.rows.slice(i, i + CH).map(payloadOf), source: source || 'app', final: i + CH >= S.rows.length }) });
+    const start=await this._fetch('/catalog/sync',{method:'POST',timeout:120000,body:JSON.stringify({action:'begin',total:rows.length,source:source||'app'})});
+    for (let i = 0; i < rows.length; i += CH) {
+      validate();
+      await this._fetch('/catalog/sync', { method: 'POST', timeout: 120000,
+        body: JSON.stringify({ action:'chunk',token:start.token,part:i/CH,rows:rows.slice(i,i+CH).map(payloadOf) }) });
     }
+    validate();
+    await this._fetch('/catalog/sync',{method:'POST',timeout:600000,body:JSON.stringify({action:'commit',token:start.token})});
+    validate();
   },
   async exportCatalog() {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Экспорт на движке недоступен — используйте обычный экспорт приложения.'); return; }
@@ -27409,15 +27386,16 @@ const PyEngine = {
   async exportOzon(format, articlesOverride) {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Выгрузка OZON на движке недоступна — используйте обычный экспорт OZON приложения.'); return; }
     const isXlsx = format === 'xlsx';
+    const rows=S.rows,version=S.catalogVersion,settings=JSON.stringify(S.settings),mode=this.processingMode();
+    const reference=()=>JSON.stringify(typeof OzonReference!=='undefined'&&OzonReference.hasData()?OzonReference.entries().map(e=>({category:e.cat,type:e.type})):[]);
+    const pairsSnapshot=reference();
+    const validate=()=>{if(S.rows!==rows||S.catalogVersion!==version||JSON.stringify(S.settings)!==settings||this.processingMode()!==mode||reference()!==pairsSnapshot)throw new Error('Каталог, настройки или справочник изменились во время выгрузки OZON');};
     await withProgress('Python: экспорт OZON', (isXlsx ? 'XLSX' : 'CSV') + ' шаблона собирает движок', async () => {
       await this.prepareOzonTyping(S.rows);
       await this._syncCatalog('app-ozon-export');
-      try { // пары «категория → тип» из загруженного дерева Ozon — для подстановки и проверки на движке
-        if (typeof OzonReference !== 'undefined' && OzonReference.hasData()) {
-          const pairs = OzonReference.entries().map(e => ({ category: e.cat, type: e.type }));
-          if (pairs.length) await this._fetch('/ozon/pairs/import', { method: 'POST', timeout: 120000, body: JSON.stringify({ pairs }) });
-        }
-      } catch (e) { /* справочник не ушёл — выгрузка идёт без проверки пар */ }
+      validate();
+      await this._fetch('/ozon/pairs/import',{method:'POST',timeout:120000,body:JSON.stringify({pairs:JSON.parse(pairsSnapshot),replace:true})});
+      validate();
       const discount = (typeof ozonDiscountPct === 'function') ? ozonDiscountPct() : 0;
       const selArticles = articlesOverride !== undefined ? articlesOverride
         : (S.sel && S.sel.size && typeof selKey === 'function')
@@ -27432,6 +27410,7 @@ const PyEngine = {
           : await fetch(this.base() + '/export/ozon.' + ext + '?discount_pct=' + encodeURIComponent(discount), { signal: ctl.signal, headers: { 'X-UC-Token': this.token() } });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const blob = await r.blob();
+        validate();
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob); a.download = 'UC_ozon_engine.' + ext;
         document.body.appendChild(a); a.click(); a.remove();
@@ -27442,20 +27421,23 @@ const PyEngine = {
       } finally { clearTimeout(to); }
     });
   },
-  async parseFile(f) {
+  async parseFile(f, options) {
     /* обобщённый разбор файла на движке (v12.9.111): возвращает строки-объекты
        по заголовкам; каталог движка не трогается — правила применения у импортов свои */
     const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 600000);
     try {
       const r = await fetch(this.base() + '/parse/file', { method: 'POST', signal: ctl.signal,
-        headers: { 'X-UC-Token': this.token(), 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream' }, body: f });
+        headers: { 'X-UC-Token': this.token(), 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream',...(options?.catalogImport?{'X-Catalog-Import':'1'}:{}) }, body: f });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+      if(!j.parse_id||!Number.isInteger(j.total)||j.total<0||!Array.isArray(j.headers))throw new Error('Некорректный ответ разбора файла');
       const out = [];
+      Object.defineProperty(out,'headers',{value:j.headers});
       for (let off = 0; ; off += 5000) {
         const page = await this._fetch('/parse/rows?parse_id=' + encodeURIComponent(j.parse_id) + '&offset=' + off + '&limit=5000', { timeout: 120000 });
-        out.push(...(page.rows || []));
-        if (!page.rows || !page.rows.length || off + 5000 >= (page.total || 0)) break;
+        if(page.total!==j.total||!Array.isArray(page.rows)||page.rows.length!==Math.min(5000,j.total-off))throw new Error('Неполный разбор файла: число строк изменилось или часть потеряна');
+        out.push(...page.rows);
+        if(out.length===j.total)break;
       }
       return out;
     } finally { clearTimeout(to); }
@@ -28512,7 +28494,7 @@ const DiskImport = {
 const Import = {
   pick() {
     const inp = document.createElement('input');
-    inp.type = 'file'; inp.accept = '.xlsx,.xls,.csv,.ods'; inp.multiple = false;
+    inp.type = 'file'; inp.accept = PyEngine.processingMode()==='sql'?'.xlsx,.csv,.zip':'.xlsx,.xls,.csv,.ods'; inp.multiple = false;
     inp.onchange = async () => { const f=inp.files && inp.files[0]; if (f) await Import.read(f); };
     inp.click();
   },
@@ -28525,7 +28507,10 @@ const Import = {
     await withProgress('Чтение файла', file.name, async () => {
       Prog.step(35);
       let table = [];
-      if (/\.csv$/i.test(file.name)) {
+      if (await PyEngine.processingAvailable()) {
+        const rows=await PyEngine.parseFile(file,{catalogImport:true});
+        if(rows.length){const headers=rows.headers||Object.keys(rows[0]);table=[headers,...rows.map(r=>headers.map(k=>r[k]??''))];}
+      } else if (/\.csv$/i.test(file.name)) {
         /* v12.9.95: потоковый разбор (CsvStream) — файл не поднимается целиком
            строкой, таблица строится по мере чтения кусков по 4 МБ. Значения,
            как и раньше, остаются ТЕКСТОМ (десятичная запятая не портится). */
@@ -29341,12 +29326,6 @@ const Import = {
       _mark('группы OE');
       Prog.step(78);
       touched.length = 0; visibilityUpdates.length = 0; idx.clear(); idxArt.clear();
-      /* v12.9.6-mem: разобранный CSV (126k массивов строк) больше не нужен —
-         освобождаем ДО пересчёта, иначе пик памяти = CSV + каталог + копия при записи. */
-      try { body.length = 0; } catch (e) { }
-      try {
-        if (S.pending && S.pending.body) { S.pending.body.length = 0; S.pending.body = []; S.pending.rows = []; }
-      } catch (e) { }
       /* Сохранение выполняет сам пайплайн: один проход записи, а не два. */
       /* v12.9.7-mem: пересчитываем только изменённые строки — повторный импорт
          того же файла больше не раздувает память на полный проход по каталогу. */
@@ -29355,7 +29334,7 @@ const Import = {
           if(prog)prog('Прайс: сохранение без обогащения и расчёта экономики…');
           S._econPending=true;persistEconPending();
           bumpVersion();applyFilter();Table.paint();
-          if(!await persistNow())throw new Error('Прайс не сохранён');
+          await persistImportOrThrow('Прайс не сохранён');
         }else await runPipeline(true, {
           changedRows, preserveView: nothingChanged, persist: !nothingChanged,
           /* v12.9.77: запись только изменённых строк — при любой доле дельты,
@@ -29368,6 +29347,10 @@ const Import = {
         });
       }
       catch (ePipe) { console.error('[UC] pipeline после импорта:', ePipe); throw ePipe; }
+      // Release parsed input only after persistence succeeds, so a failed
+      // save does not destroy the user's import preview and retry source.
+      try { body.length = 0; } catch (e) { }
+      if (S.pending) { S.pending.body = []; S.pending.rows = []; }
       Import._priceFileDone = true;
       _mark('пересчёт и запись');
       /* Автоматическая сверка работает независимо от общего режима обогащения.
@@ -34731,7 +34714,7 @@ const OzonExport = {
       });
     });
     const csv = out.map(line => line.map(v => {
-      const t = String(v == null ? '' : v);
+      const t = safeCsvText(v);
       return /[";\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
     }).join(';')).join('\r\n');
     DictIO._download(`UC_группы_массовой_выгрузки_${new Date().toISOString().slice(0, 10)}.csv`,
@@ -40871,7 +40854,7 @@ const Exp = {
     if (needDims) head.push('Вес, кг', 'Длина, см', 'Ширина, см', 'Высота, см');
     if (needSales) head.push('Продажи, шт/мес');
     if (needPrice) head.push('Цена');
-    const esc2 = v => { const t = String(v == null ? '' : v); return /[;"\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+    const esc2 = v => { const t = safeCsvText(v); return /[;"\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
     const parts = ['\uFEFF' + head.map(esc2).join(sep) + '\r\n'];
     for (const p of rows) {
       const cells = [p.article || '', p.brand || ''];
@@ -40907,7 +40890,7 @@ const Exp = {
       'category', 'tnved', 'weight', 'net_weight', 'length', 'width', 'height',
       'barcode', 'applicability', 'multiplicity', 'image_url', 'ozon_category', 'ozon_type'];
     const customCols = catList.filter(c => c.g === 'custom');
-    const esc2 = v => { const t = String(v == null ? '' : v); return /[;"\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+    const esc2 = v => { const t = safeCsvText(v); return /[;"\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
     const cell = (c, p) => {
       try { const v = c.src ? c.src(p) : c.custom ? (p.custom || {})[c.custom] : p[c.k]; return v == null ? '' : v; } catch (e) { return ''; }
     };
@@ -47859,7 +47842,7 @@ const BrandMarkupUI = {
     const rows = [['Бренд', 'Наценка %', 'Комментарий', 'Активна']].concat(
       this.rules().map(r => [r.brand, String(num(r.pct)), r.note || '', r.active === false ? 'нет' : 'да']));
     const csv = rows.map(r => r.map(v => {
-      const t = String(v == null ? '' : v);
+      const t = safeCsvText(v);
       return /[";\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
     }).join(';')).join('\r\n');
     DictIO._download(`UC_наценки_по_брендам_${new Date().toISOString().slice(0, 10)}.csv`,

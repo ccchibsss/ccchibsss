@@ -3612,14 +3612,15 @@ def encode_csv(text, enc):
     return ('\ufeff'+text).encode('utf-8')
 
 def rows_from_csv_bytes(data, mapping=None):
-    text = data.decode('utf-8-sig', errors='replace')
-    if '\ufffd' in text[:400]:
-        # как браузерный импорт: российские прайсы часто в windows-1251
-        try: text = data.decode('cp1251')
-        except Exception: pass
+    try:
+        text = data.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        # Inspect the entire input, never silently replace characters after
+        # a long ASCII preamble. Undefined cp1251 bytes fail explicitly.
+        text = data.decode('cp1251')
     delim = ';' if text.split('\n', 1)[0].count(';') >= text.split('\n', 1)[0].count(',') else ','
     try:  # B9: Sniffer учитывает кавычки; fallback — эвристика по первой строке
-        delim = csv.Sniffer().sniff(text[:2048], delimiters=';,\t').delimiter
+        delim = csv.Sniffer().sniff(text[:2048], delimiters=';,\t|').delimiter
     except Exception: pass
     rows = list(csv.reader(io.StringIO(text), delimiter=delim))
     if not rows: return []
@@ -3662,7 +3663,8 @@ def _xlsx_sheet_rows(data):
             if first is not None:
                 tgt = relmap.get(first.get(RNS + 'id'), '')
                 if tgt:
-                    sheet_path = 'xl/' + tgt.lstrip('/') if not tgt.startswith('xl/') else tgt
+                    import posixpath
+                    sheet_path = posixpath.normpath(tgt.lstrip('/') if tgt.startswith('/') else posixpath.join('xl',tgt))
         except Exception: pass
         if sheet_path not in names:
             cand = sorted(n for n in names if n.startswith('xl/worksheets/sheet'))
@@ -3708,8 +3710,11 @@ def rows_from_xlsx_bytes(data, mapping=None):
     try:
         import openpyxl
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
+        try:
+            ws = wb.worksheets[0]
+            rows = list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
     except ImportError:
         rows = _xlsx_sheet_rows(data)
     if not rows: return []
@@ -3737,7 +3742,7 @@ def files_from_zip(data):
             out.append((os.path.basename(info.filename), z.read(info.filename)))
     return out
 
-def import_rows(conn, rows, source, rebuild_fts=True):
+def import_rows(conn, rows, source, rebuild_fts=True, commit=True, history=True):
     n = 0
     for r in rows:
         art = str(r.get('article', '')).strip()
@@ -3846,14 +3851,14 @@ def import_rows(conn, rows, source, rebuild_fts=True):
         # история цен (п.6): только реальные изменения цены/себестоимости
         eff_price = num(r.get('price')) if num(r.get('price')) > 0 else (old['price'] if old else 0)
         eff_cost = num(r.get('cost')) if num(r.get('cost')) > 0 else (old['cost'] if old else 0)
-        if eff_price > 0 and (not old or abs(old['price'] - eff_price) > 1e-9 or abs(old['cost'] - eff_cost) > 1e-9):
+        if history and eff_price > 0 and (not old or abs(old['price'] - eff_price) > 1e-9 or abs(old['cost'] - eff_cost) > 1e-9):
             conn.execute('INSERT INTO price_history(article,brand,price,cost,stock,source,ts) VALUES(?,?,?,?,?,?,datetime("now"))',
                          (art, brand, eff_price, eff_cost, eff('stock'), source))
         n += 1
     if rebuild_fts:
         conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
-    conn.commit()
-    if rebuild_fts:  # финальный чанк: сжимаем WAL, иначе файл журнала растёт без bound
+    if commit: conn.commit()
+    if rebuild_fts and commit:  # финальный чанк: сжимаем WAL, иначе файл журнала растёт без bound
         try: conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         except Exception: pass
     return n
@@ -4022,17 +4027,80 @@ def recalc_catalog(conn, st, force=False):
             'avg_profit': rnd(agg['avgp'] or 0, 2) if n else 0, 'parallel': parallel}
 
 # ---------------- импорт файла целиком + обогащение OE (v12.9.105) ----------------
+def sync_catalog_snapshot(conn, body):
+    """Stage normalized inputs and publish an exact snapshot atomically.
+    Supplier import_rows semantics remain unchanged. Never mutate app_catalog.
+    """
+    import hashlib, secrets
+    def fingerprint():
+        h=hashlib.sha256()
+        for row in conn.execute('SELECT * FROM products ORDER BY article,brand'):
+            h.update(json.dumps(tuple(row),ensure_ascii=False,allow_nan=False).encode())
+        return h.hexdigest()
+    conn.execute('CREATE TABLE IF NOT EXISTS sync_upload(token TEXT PRIMARY KEY,base TEXT,total INTEGER,source TEXT,created REAL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS sync_parts(token TEXT,part INTEGER,data TEXT,PRIMARY KEY(token,part))')
+    action=body.get('action')
+    if action=='begin':
+        total=body.get('total')
+        if type(total) is not int or total<0:raise ValueError('Неверное число строк снимка')
+        token=secrets.token_hex(24)
+        import time
+        with conn:
+            conn.execute('DELETE FROM sync_parts WHERE token IN (SELECT token FROM sync_upload WHERE created<?)',(time.time()-86400,))
+            conn.execute('DELETE FROM sync_upload WHERE created<?',(time.time()-86400,))
+            conn.execute('INSERT INTO sync_upload VALUES(?,?,?,?,?)',(token,fingerprint(),total,str(body.get('source') or 'app-sync'),time.time()))
+        return {'token':token}
+    token=body.get('token')
+    upload=conn.execute('SELECT base,total,source FROM sync_upload WHERE token=?',(token,)).fetchone()
+    if not upload:raise ValueError('Снимок синхронизации не найден')
+    if action=='chunk':
+        part=body.get('part');rows=body.get('rows')
+        if type(part) is not int or part<0 or not isinstance(rows,list) or not 0<len(rows)<=5000:raise ValueError('Неверная часть снимка')
+        for row in rows:
+            if not isinstance(row,dict) or not isinstance(row.get('article'),str) or not row['article'].strip():raise ValueError('Неверный SKU снимка')
+            if not isinstance(row.get('brand',''),str):raise ValueError('Неверный бренд снимка')
+        with conn:conn.execute('INSERT OR REPLACE INTO sync_parts VALUES(?,?,?)',(token,part,json.dumps(rows,ensure_ascii=False,allow_nan=False)))
+        return {'saved':len(rows)}
+    if action!='commit':raise ValueError('Неизвестная операция снимка')
+    # BEGIN IMMEDIATE protects the fingerprint and publication against writers.
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        if fingerprint()!=upload[0]:raise ValueError('Каталог движка изменился во время синхронизации; повторите операцию')
+        parts=conn.execute('SELECT part FROM sync_parts WHERE token=? ORDER BY part',(token,)).fetchall()
+        if [r[0] for r in parts]!=list(range(len(parts))):raise ValueError('Пропущена часть снимка')
+        conn.execute('DELETE FROM products')
+        conn.execute('DELETE FROM eco_results')
+        count=0;seen=set()
+        for part, in parts:
+            rows=json.loads(conn.execute('SELECT data FROM sync_parts WHERE token=? AND part=?',(token,part)).fetchone()[0])
+            for row in rows:
+                key=(row['article'].strip(),row.get('brand','').strip())
+                if key in seen:raise ValueError('Повторный ключ SKU в снимке')
+                seen.add(key)
+            count+=import_rows(conn,rows,upload[2],rebuild_fts=False,commit=False,history=False)
+        if count!=upload[1]:raise ValueError('Неполный снимок каталога')
+        conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
+        conn.execute('DELETE FROM sync_parts WHERE token=?',(token,))
+        conn.execute('DELETE FROM sync_upload WHERE token=?',(token,))
+        conn.commit()
+    except Exception:
+        conn.rollback();raise
+    return {'total':count}
+
 def import_file_bytes(conn, filename, data, enrich_only=False, mapping=None):
     """Файл разбирает движок, а не браузер: CSV/XLSX/ZIP -> строки -> каталог.
        enrich_only (v12.9.145): файл не первый (не прайс) — только обогащение
        уже существующих SKU, новые строки не вставляются."""
     name = os.path.basename(str(filename or 'file'))
     files = files_from_zip(data) if name.lower().endswith('.zip') else [(name, data)]
+    if not files: raise ValueError('В архиве нет CSV/XLSX файлов')
     ensure_free_space(sum(len(b) for _, b in files))  # v12.9.144: отказ до записи, а не в середине
     total = 0; skipped = 0; oe_matched = 0
     existing = None; oe_to_key = {}
     if enrich_only:
-        existing = {_norm_pair(r[0], r[1]) for r in conn.execute('SELECT article,brand FROM products')}
+        existing = {}
+        for a,b in conn.execute('SELECT article,brand FROM products'):
+            existing.setdefault(_norm_pair(a,b),[]).append((a,b))
         for _a, _b, _oe in conn.execute('SELECT article,brand,oe_numbers FROM products'):
             for _c in _oe_codes(_oe): oe_to_key.setdefault(_c, set()).add((_a, _b))
     try:
@@ -4041,7 +4109,13 @@ def import_file_bytes(conn, filename, data, enrich_only=False, mapping=None):
             if existing is not None:
                 kept = []
                 for r in rows:
-                    if _norm_pair(r.get('article', ''), r.get('brand', '')) in existing: kept.append(r); continue
+                    key=(str(r.get('article','')).strip(),str(r.get('brand','')).strip())
+                    matches=existing.get(_norm_pair(*key),[])
+                    if key in matches or len(matches)==1:
+                        a,b=key if key in matches else matches[0]
+                        kept.append(dict(r,article=a,brand=b));continue
+                    if matches:
+                        skipped+=1;continue  # ambiguous normalized identities must never insert a new SKU
                     # как findByOe браузера: уникальный OE -> та же карточка прайса
                     _keys = set()
                     for _c in _oe_codes(r.get('oe_numbers', '')): _keys |= oe_to_key.get(_c, set())
@@ -4050,7 +4124,7 @@ def import_file_bytes(conn, filename, data, enrich_only=False, mapping=None):
                         r = dict(r); r['article'], r['brand'] = _ka, _kb; oe_matched += 1; kept.append(r)
                     elif str(r.get('article', '')).strip(): skipped += 1
                 rows = kept
-            total += import_rows(conn, rows, f'file:{name}', rebuild_fts=False)
+            total += import_rows(conn, rows, f'file:{name}', rebuild_fts=False, commit=False)
         conn.execute("INSERT INTO products_fts(products_fts) VALUES('rebuild')")
         conn.commit()
     except Exception:
@@ -4794,36 +4868,46 @@ def _raw_table(filename, data):
     """Файл -> (заголовки, строки-списки) без привязки к каталогу.
        CSV — stdlib; XLSX — openpyxl, если есть; ZIP — первый файл внутри."""
     name = os.path.basename(str(filename or 'file'))
+    if not name.lower().endswith(('.csv','.xlsx','.zip')):raise ValueError('SQL-парсер поддерживает CSV, XLSX и ZIP с одним файлом. Сохраните XLS/ODS как XLSX.')
     if name.lower().endswith('.zip'):
         files = files_from_zip(data)
         if not files: raise RuntimeError('в ZIP нет CSV/XLSX')
+        if len(files)!=1: raise ValueError('Для импорта с маппингом выберите один CSV/XLSX, а не архив с несколькими файлами')
         name, data = files[0]
     if name.lower().endswith('.xlsx'):
         # v12.9.147: как импорт каталога — openpyxl если есть, иначе stdlib
         try:
             import openpyxl
             wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-            table = [list(r) for r in wb.active.iter_rows(values_only=True)]
+            try: table = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+            finally: wb.close()
         except ImportError:
             table = [list(r) for r in _xlsx_sheet_rows(data)]
     else:
-        text = data.decode('utf-8-sig', errors='replace')
-        if '\ufffd' in text[:400]:
-            try: text = data.decode('cp1251')
-            except Exception: pass
+        try: text = data.decode('utf-8-sig')
+        except UnicodeDecodeError: text = data.decode('cp1251')
         first = text.split('\n', 1)[0]
         delim = ';' if first.count(';') >= first.count(',') and first.count(';') >= first.count('\t') else ('\t' if first.count('\t') > first.count(',') else ',')
+        try: delim = csv.Sniffer().sniff(text[:2048], delimiters=';,\t|').delimiter
+        except csv.Error: pass
         table = list(csv.reader(io.StringIO(text), delimiter=delim))
     table = [r for r in table if any(str(c).strip() for c in r if c is not None)]
     if not table: return [], []
     headers = [str(h).strip() if h is not None else '' for h in table[0]]
     return headers, table[1:]
 
-def parse_file_bytes(conn, filename, data):
+def parse_file_bytes(conn, filename, data, catalog_import=False):
     """Разобрать файл в кэш парсинга: наружу — постранично через /parse/rows.
        Каталог не трогаем: это сырьё для импортов приложения (цены конкурентов,
        продажи, заказы, тарифы — у каждого свои правила применения)."""
     headers, table = _raw_table(filename, data)
+    if catalog_import:
+        all_rows=[headers]+table
+        hi=import_header_index(all_rows)
+        headers=[str(v).strip() if v is not None and str(v).strip() else 'Колонка_'+str(i+1) for i,v in enumerate(all_rows[hi])]
+        table=all_rows[hi+1:]
+    if len(headers)!=len(set(headers)):
+        raise ValueError('Повторяющиеся заголовки: переименуйте колонки перед импортом, иначе значения будут потеряны')
     import uuid
     sid = uuid.uuid4().hex[:16]
     conn.execute('INSERT INTO parse_sessions(id,filename,headers,total,created) VALUES(?,?,?,?,datetime("now"))',
@@ -5174,7 +5258,8 @@ def export_catalog_records(conn,keys=None):
     return result
 
 def _xml_esc(v):
-    return (str(v).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    text=re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]',' ',str(v))
+    return (text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             .replace('"', '&quot;'))
 
 def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None, yellow=None, formulas=None):
@@ -5455,18 +5540,22 @@ def _std_match(p):
             return {'length': l, 'width': w, 'height': h, 'weight': wt, 'source': hits[0].get('c', '')}
     return None
 
-def import_ozon_pairs(conn, pairs):
-    conn.execute('''CREATE TABLE IF NOT EXISTS ozon_pairs(category TEXT NOT NULL, type TEXT NOT NULL,
-      PRIMARY KEY(category, type))''')
-    n = 0
-    for pr in pairs or []:
+def import_ozon_pairs(conn, pairs, replace=False):
+    if not isinstance(pairs,list):raise ValueError('Неверный справочник категорий OZON')
+    prepared=[]
+    for pr in pairs:
+        if not isinstance(pr,dict):raise ValueError('Неверная пара категорий OZON')
         cat = str(pr.get('category') or pr.get('cat') or '').strip()
         typ = str(pr.get('type') or pr.get('name') or '').strip()
-        if cat and typ:
-            conn.execute('INSERT OR IGNORE INTO ozon_pairs VALUES(?,?)', (cat, typ)); n += 1
-    conn.commit()
-    return {'ok': True, 'imported': n,
-            'total': conn.execute('SELECT COUNT(*) FROM ozon_pairs').fetchone()[0]}
+        if not cat or not typ:
+            if replace:raise ValueError('Пустая пара категорий OZON')
+            continue
+        prepared.append((cat,typ))
+    with conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS ozon_pairs(category TEXT NOT NULL, type TEXT NOT NULL, PRIMARY KEY(category, type))')
+        if replace:conn.execute('DELETE FROM ozon_pairs')
+        conn.executemany('INSERT OR IGNORE INTO ozon_pairs VALUES(?,?)',prepared)
+    return {'ok':True,'imported':len(prepared),'total':conn.execute('SELECT COUNT(*) FROM ozon_pairs').fetchone()[0]}
 
 def _pairs_map(conn):
     try: rows = conn.execute('SELECT category,type FROM ozon_pairs').fetchall()
@@ -5870,7 +5959,9 @@ class Handler(BaseHTTPRequestHandler):
             # бинарное тело НЕЛЬЗЯ читать через _body() (JSON): читаем один раз здесь
             from urllib.parse import unquote
             fname = unquote(self.headers.get('X-Filename', 'file.csv'))
-            ln = int(self.headers.get('Content-Length', 0) or 0)
+            try: ln = int(self.headers.get('Content-Length', 0) or 0)
+            except (ValueError,TypeError):return self._send(400, {'ok':False,'error':'Неверный Content-Length'})
+            if ln<0:return self._send(400, {'ok':False,'error':'Неверный Content-Length'})
             if ln > 200 * 1024 * 1024:  # A5: потолок файла загрузки
                 return self._send(413, {'ok': False, 'error': 'файл больше 200 МБ'})
             data = self.rfile.read(ln) if ln else b''
@@ -5885,12 +5976,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/parse/file':
             from urllib.parse import unquote
             fname = unquote(self.headers.get('X-Filename', 'file.csv'))
-            ln = int(self.headers.get('Content-Length', 0) or 0)
+            try: ln = int(self.headers.get('Content-Length', 0) or 0)
+            except (ValueError,TypeError):return self._send(400, {'ok':False,'error':'Неверный Content-Length'})
+            if ln<0:return self._send(400, {'ok':False,'error':'Неверный Content-Length'})
             if ln > 200 * 1024 * 1024:  # A5: потолок файла загрузки
                 return self._send(413, {'ok': False, 'error': 'файл больше 200 МБ'})
             data = self.rfile.read(ln) if ln else b''
             try:
-                return self._send(200, {'ok': True, **parse_file_bytes(db(), fname, data)})
+                return self._send(200, {'ok': True, **parse_file_bytes(db(), fname, data, catalog_import=self.headers.get('X-Catalog-Import')=='1')})
             except Exception as e:
                 if isinstance(e, DiskFullError) or 'disk is full' in str(e) or 'database or disk' in str(e):
                     return self._send_disk_full()
@@ -5905,6 +5998,8 @@ class Handler(BaseHTTPRequestHandler):
                 st = body.get('settings') or {}
                 results = [calc_row(r, st) for r in (body.get('rows') or [])[:5000]]
                 return self._send(200, {'ok': True, 'results': results})
+            if self.path == '/catalog/sync':
+                return self._send(200, {'ok':True, **sync_catalog_snapshot(conn,body)})
             if self.path == '/import/rows':
                 n = import_rows(conn, body.get('rows') or [], body.get('source', 'app'),
                                 rebuild_fts=body.get('final') is not False)
@@ -5967,7 +6062,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/snapshots':
                 return self._send(200, {'ok': True, **make_snapshot(conn, body.get('note', ''))})
             if self.path == '/ozon/pairs/import':
-                return self._send(200, import_ozon_pairs(conn, body.get('pairs') or []))
+                return self._send(200, import_ozon_pairs(conn, body.get('pairs') or [], replace=body.get('replace') is True))
             if self.path == '/export/ozon.csv':
                 keys = None
                 if body.get('articles') is not None:
