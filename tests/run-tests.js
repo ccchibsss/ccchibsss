@@ -676,7 +676,7 @@ assert(app.includes('btnPyExport') && app.includes('_syncCatalog'), 'кнопк�
 assert(app.includes('rec.parallel'), 'приложение показывает параллельный пересчёт');
 
 // v12.9.110: полное обогащение на движке
-assert(app.includes("'/catalog/enrich-hvc'") && app.includes('async enrichFull(modeOverride)'), 'полное обогащение на движке');
+assert(app.includes("'/catalog/enrich-hvc-rows'") && app.includes('async enrichFull(modeOverride)'), 'полное обогащение на движке');
 assert(app.includes("parts:[...HVC.parts]") && app.includes('btnPyEnrichFull'), 'доноры Каталога V и кнопка полного обогащения');
 assert(app.includes("'category', 'tnved', 'applicability'"), 'слияние расширенных полей только в пустые');
 

@@ -4626,6 +4626,65 @@ def enrich_name_categories(conn, rows, context, enabled=True):
         result.append({'article':row.get('article'), 'brand':row.get('brand',''), 'fields':fields, 'removed':removed})
     return {'rows':result}
 
+_HVC_REFERENCE_FIELDS = ('parts','oe','byArt','byOe','unsafeKeys','unsafeOe')
+
+def hvc_reference_upload(conn, body):
+    """Bounded, immutable SQLite reference chunks; no monolithic JSON upload."""
+    import secrets
+    conn.execute('CREATE TABLE IF NOT EXISTS hvc_ref_upload(id TEXT PRIMARY KEY,separator TEXT NOT NULL,total INTEGER NOT NULL,sealed INTEGER NOT NULL,created REAL NOT NULL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS hvc_ref_chunks(id TEXT NOT NULL,part INTEGER NOT NULL,field TEXT NOT NULL,data TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(id,part))')
+    action=body.get('action')
+    if action=='begin':
+        total=body.get('total');sep=body.get('groupSeparator',' / ')
+        if type(total) is not int or total<0 or not isinstance(sep,str) or len(sep)>100:raise ValueError('Неверный справочник HVC')
+        token='chunked:'+secrets.token_hex(24)
+        with conn:
+            conn.execute('DELETE FROM hvc_ref_chunks WHERE id IN (SELECT id FROM hvc_ref_upload WHERE created<?)',(time.time()-86400,))
+            conn.execute('DELETE FROM hvc_ref_upload WHERE created<?',(time.time()-86400,))
+            conn.execute('INSERT INTO hvc_ref_upload VALUES(?,?,?,0,?)',(token,sep,total,time.time()))
+        return {'token':token}
+    token=body.get('token')
+    upload=conn.execute('SELECT total,sealed FROM hvc_ref_upload WHERE id=?',(token,)).fetchone()
+    if not upload:raise ValueError('Загрузка справочника HVC не найдена')
+    if action=='release':
+        with conn:
+            conn.execute('DELETE FROM hvc_ref_chunks WHERE id=?',(token,))
+            conn.execute('DELETE FROM hvc_ref_upload WHERE id=?',(token,))
+        return {'released':True}
+    if action=='chunk':
+        part=body.get('part');field=body.get('field');items=body.get('items')
+        if upload[1]:raise ValueError('Справочник HVC уже зафиксирован')
+        if type(part) is not int or part<0 or field not in _HVC_REFERENCE_FIELDS or not isinstance(items,list) or not 0<len(items)<=2000:raise ValueError('Неверная часть справочника HVC')
+        if field in ('unsafeKeys','unsafeOe'):
+            if any(not isinstance(v,str) for v in items):raise ValueError('Неверные ключи HVC')
+        else:
+            if any(not isinstance(v,list) or len(v)!=2 or not isinstance(v[0],str) for v in items):raise ValueError('Неверные записи HVC')
+        encoded=json.dumps(items,ensure_ascii=False,allow_nan=False)
+        if len(encoded.encode())>2*1024*1024:raise ValueError('Часть справочника HVC больше 2 МБ')
+        with conn:
+            conn.execute('UPDATE hvc_ref_upload SET sealed=sealed WHERE id=?',(token,))
+            current=conn.execute('SELECT sealed FROM hvc_ref_upload WHERE id=?',(token,)).fetchone()
+            if not current or current[0]:raise ValueError('Справочник HVC уже закрыт')
+            conn.execute('INSERT OR REPLACE INTO hvc_ref_chunks VALUES(?,?,?,?,?)',(token,part,field,encoded,len(items)))
+        return {'saved':len(items)}
+    if action!='commit':raise ValueError('Неизвестная операция справочника HVC')
+    with conn:
+        conn.execute('UPDATE hvc_ref_upload SET sealed=sealed WHERE id=?',(token,))
+        parts=conn.execute('SELECT part,n FROM hvc_ref_chunks WHERE id=? ORDER BY part',(token,)).fetchall()
+        if [p[0] for p in parts]!=list(range(len(parts))) or sum(p[1] for p in parts)!=upload[0]:raise ValueError('Неполный справочник HVC')
+        conn.execute('UPDATE hvc_ref_upload SET sealed=1 WHERE id=?',(token,))
+    return {'reference_id':token}
+
+def _read_hvc_chunked_reference(conn, reference_id):
+    try:head=conn.execute('SELECT separator,sealed FROM hvc_ref_upload WHERE id=?',(reference_id,)).fetchone()
+    except sqlite3.OperationalError:head=None
+    if not head or not head[1]:raise ValueError('Справочник HVC не загружен полностью')
+    result={k:[] for k in _HVC_REFERENCE_FIELDS};result['groupSeparator']=head[0]
+    # Cursor iteration avoids reading/decoding a second full JSON graph at once.
+    for field,data in conn.execute('SELECT field,data FROM hvc_ref_chunks WHERE id=? ORDER BY part',(reference_id,)):
+        result[field].extend(json.loads(data))
+    return result
+
 @_atomic_enrichment
 def enrich_hvc_input_rows(conn, rows, reference=None, mode='auto', cat_mode='artbrand', columns=None, policy=None, reference_id=None):
     """Enrich exactly the supplied rows, not the whole normalized SQL catalog."""
@@ -4635,13 +4694,17 @@ def enrich_hvc_input_rows(conn, rows, reference=None, mode='auto', cat_mode='art
         encoded=json.dumps(reference,ensure_ascii=False,allow_nan=False)
         reference_id=hashlib.sha256(encoded.encode()).hexdigest()
         conn.execute('INSERT OR IGNORE INTO hvc_input_reference VALUES(?,?)',(reference_id,encoded))
-    saved=conn.execute('SELECT data FROM hvc_input_reference WHERE id=?',(reference_id,)).fetchone()
-    if not saved:raise ValueError('Нет справочника HVC')
+    if isinstance(reference_id,str) and reference_id.startswith('chunked:'):
+        graph=_read_hvc_chunked_reference(conn,reference_id)
+    else:
+        saved=conn.execute('SELECT data FROM hvc_input_reference WHERE id=?',(reference_id,)).fetchone()
+        if not saved:raise ValueError('Нет справочника HVC')
+        graph=json.loads(saved[0])
     def allowed(p,t):
         candidate=dict(p)
         candidate['dimension_context']=json.dumps({'sources':p.get('_sources') or {},'blocked':bool(p.get('dimensionAnomalyBlocked'))},ensure_ascii=False)
         return _dimension_candidate_allowed(candidate,tuple(num(t[k]) for k in ('length','width','height','weight')),policy or {})
-    output=hvc_enrich_rows(rows,json.loads(saved[0]),mode,cat_mode,columns,time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),num,rnd,allowed)
+    output=hvc_enrich_rows(rows,graph,mode,cat_mode,columns,time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),num,rnd,allowed)
     results=[]
     for before,after in zip(rows,output):
         fields={k:v for k,v in after.items() if k not in before or not equivalent(before[k],v)}
@@ -6011,6 +6074,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/donors/import':
                 n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
                 return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/catalog/hvc-reference':
+                return self._send(200,{'ok':True,**hvc_reference_upload(conn,body)})
             if self.path == '/catalog/enrich-hvc-rows':
                 return self._send(200,{'ok':True,**enrich_hvc_input_rows(conn,body.get('rows') or [],body.get('reference'),body.get('mode','auto'),body.get('cat_mode','artbrand'),body.get('columns'),body.get('policy'),body.get('reference_id'))})
             if self.path == '/catalog/check-mark-status':
