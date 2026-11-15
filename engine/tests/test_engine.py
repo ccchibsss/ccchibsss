@@ -10,7 +10,8 @@ class TestCalc(unittest.TestCase):
     def test_golden_12(self):
         path = os.path.join(os.path.dirname(__file__), '..', '..',
                             'UC_unit_economics_OZON_2026-11-06_filtered.csv')
-        rows = list(csv.reader(open(path, encoding='utf-8-sig'), delimiter=';'))
+        with open(path, encoding='utf-8-sig') as source:
+            rows = list(csv.reader(source, delimiter=';'))
         ix = {h: i for i, h in enumerate(rows[0])}
         for r in rows[1:]:
             got = E.calc_row({'article': r[0], 'price': E.num(r[ix['Цена, ₽/ед.']]),
@@ -533,17 +534,26 @@ class TestAuditFixes133(unittest.TestCase):
         import threading, http.client
         from http.server import ThreadingHTTPServer
         srv = ThreadingHTTPServer(('127.0.0.1', 0), E.Handler)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        server_thread=threading.Thread(target=srv.serve_forever, daemon=True)
+        server_thread.start()
         try:
             port = srv.server_address[1]
             c = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
             c.request('GET', '/health', headers={'Host': 'evil.example.com'})
-            self.assertEqual(c.getresponse().status, 403)
+            with c.getresponse() as response:
+                self.assertEqual(response.status, 403)
+                response.read()
+            c.close()
             c = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
             c.request('GET', '/health')
-            self.assertEqual(c.getresponse().status, 200)
+            with c.getresponse() as response:
+                self.assertEqual(response.status, 200)
+                response.read()
+            c.close()
         finally:
             srv.shutdown()
+            srv.server_close()
+            server_thread.join(timeout=5)
     def test_secret_roundtrip_passthrough(self):  # A3 (на не-Windows — passthrough)
         E.save_secret('UC_MAIL_PASSWORD', 'pw123')
         self.assertEqual(E.secrets().get('UC_MAIL_PASSWORD'), 'pw123')
@@ -683,7 +693,8 @@ class TestImportEnrich(unittest.TestCase):
         from http.server import ThreadingHTTPServer
         E.TOKEN_PATH = pathlib.Path(self.tmp) / 'token.txt'
         srv = ThreadingHTTPServer(('127.0.0.1', 0), E.Handler)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        server_thread=threading.Thread(target=srv.serve_forever, daemon=True)
+        server_thread.start()
         try:
             req = urllib.request.Request(
                 f'http://127.0.0.1:{srv.server_address[1]}/import/file',
@@ -695,6 +706,8 @@ class TestImportEnrich(unittest.TestCase):
                 self.assertEqual(_json.loads(r.read())['imported'], 1)
         finally:
             srv.shutdown()
+            srv.server_close()
+            server_thread.join(timeout=5)
     def test_import_csv_cp1251(self):
         # аудит v12.9.106: браузерный импорт умеет windows-1251 — движок обязан тоже
         res = E.import_file_bytes(self.conn, 'price.csv',

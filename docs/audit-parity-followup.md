@@ -1,5 +1,15 @@
 # Повторный аудит браузер ↔ движок SQLite
 
+> **Актуальный статус рабочего дерева (2026-11-08):** ниже сохранена история
+> аудита и последовательных исправлений. Числа тестов и перечни дефектов в
+> ранних разделах относятся к тем этапам, а не к текущему состоянию.
+> Последняя проверка: **193 Python-теста**, JS-тесты приложения и проверки
+> синтаксиса пяти исполняемых блоков HTML — успешно. Полный паритет приложения
+> всё ещё не подтверждён: computed/src-экспорт частично использует браузерные снимки
+> (построение всех 35 текущих Excel-формул перенесено на Python); остаются специальные случаи RegExp
+> и преобразований. См. последние разделы для действующего объёма исправлений.
+
+
 ## Вердикт
 
 Полный паритет **не подтверждён**. Формулировка «сверено и совпадает» в
@@ -868,3 +878,298 @@ Caller должен передавать target indices уже по тем же 
 pending правилам: find пока является поисковым ядром, не полным UI lifecycle.
 При overflow поведение намеренно совпадает с браузером: status требует ручной
 проверки; choice может сохраниться, если есть отдельный admissible identity hit.
+
+## AnomalyOE: SQL live/apply/API/manual/automatic routing
+
+engine/dimension_oe_apply.py реализует повторную проверку live-доноров: source
+identity/OE, membership/excluded/blocked, актуальный tuple и issueFree, automatic
+row evidence и HVC singleRow/oeCodes, проверку raw HVC.cross link при OE-tier.
+Owners перепроверяются повторным server find перед apply. Применение переносит
+только tuple единого донора, сохраняет explicit volume, обновляет canonical и
+пользовательские source labels, ограниченную историю review (20), log,
+сбрасывает ack. Review имеет oeProofVersion=1 и требует отдельной проверки.
+
+/catalog/dimension-oe выполняет find/apply. Сервер сам фильтрует marked/blocked/
+excluded/pending targets. Preview token хранится в SQLite вместе с SHA-256
+всего исходного snapshot и TTL 1 час. Apply требует тот же token и свежий
+snapshot (rows, found, HVC parts/byOe/oe/cross, limits, labels/mode, revisions),
+повторно запускает поиск и валидирует весь выбранный batch ДО мутаций. Выбор
+донора из клиентского preview сервером не принимается. SQL transaction сохраняет
+полный enrichment state и scalar ОВХ, одноразовый token удаляется при успехе.
+Изменение даже несущественного поля snapshot отклоняет apply: намеренно более
+консервативная защита, чем сравнение одних revisions.
+
+AnomalyOE.find/apply в SQL mode теперь вызывают findSql/applySql; browser ветки
+сохранены. Автосверка по OE после импорта использует те же точки входа и тоже
+полностью проходит server find/apply. UI сохраняет выбор, диалог и отчёт;
+перед применением проверяет каталог/revisions/token и весь ответ batch.
+Ни JS donor lookup, ни JS live/sourceAllowed для SQL-решения не вызываются.
+После apply запускается обычный SQL pipeline с skipGroups/changedRows; ОВХ
+остаются на проверке. Смена режима отменяет preview, запрещена во время OE job.
+
+Проверки: 9 фактических JS find+apply сравнений (row/HVC, manual/automatic,
+explicit volume, same SKU without OE, review history), API snapshot/revision/
+donor changes/TTL-token replay/duplicate selection/no partial scalar write,
+live missing/wrong HVC cross, automatic pending selection. VM UI тест выполняет
+реальные find/apply SQL ветки и проверяет manual+automatic routing, stale/offline,
+wrong-response whole-batch validation и вызов pipeline. 165 Python tests,
+JS tests и syntax 5 scripts OK.
+
+Ограничения: полные snapshots повторяются в больших find/apply запросах;
+server/client/IndexedDB не образуют общую транзакцию (network loss после SQL
+commit требует повторной синхронизации). UI limits/find отчёт может использовать
+browser evaluate, но решения SQL server-side. Прежние regex/formula, hydration
+и export presentation/lazy typing ограничения ещё не закрыты; полный task
+parity всех подсистем не заявляется.
+
+### Follow-up: staged cloud hydration and lazy Ozon export typing
+
+GAS pull now defers CategoryKindAuto in SQL mode and awaits Python hydration before replacing S.rows (same lifecycle as custom-server pull). SQL Ozon preview, validation/report, CSV/XLSX generation and direct Python export prepare pending type assignments through the independent Python preferred endpoint. The synchronous row formatter no longer invokes OzonAuto.applyPreferred in SQL mode. Preparation is staged on drafts: network failure or changes to catalogue, pending row content, mode, settings or reference revisions reject the result before client mutations; manual assignments remain untouched. Async preview wrappers handle errors, validation event handlers await their jobs. Report validation is recomputed instead of reusing stale cached results.
+
+Actual client VM regression test: tests/enrichment-lifecycle-client.js, included in Python discovery. Covers offline response, catalogue/row mutation during await, success, browser bypass, actual cloud mapper defer flag and route hooks.
+
+Formula differential cases expanded for negative square roots, NaN truthiness/arithmetic/string conversion, power overflow/domain/zero-negative exponent, round overflow/underflow and infinite remainder. Python no longer raises domain/overflow exceptions where browser Math produces NaN/Infinity. This does not establish full formula/RegExp equivalence: object coercion, missing/extra function arguments, exotic Unicode regex and float serialization still require further work. Computed/custom export snapshots remain browser-prepared.
+
+Verification: 166 Python tests, node tests/run-tests.js, five executable HTML script syntax checks, git diff --check passed. Nonfatal ResourceWarnings remain in the existing suite.
+
+### Follow-up: formula argument and JSON coercion parity
+
+Python ExprLang now implements fixed-arity JavaScript function calls (missing arguments become undefined, excess arguments are evaluated then ignored), while keeping min/max/coalesce variadic and if lazy. round defaults its precision when the supplied argument is undefined. JSON arrays/objects use browser-style string conversion; numeric conversion handles arrays, radix-prefixed strings, exponent notation, ECMAScript whitespace and invalid numeric spellings. num follows parseFloat prefix/exponent semantics after whitespace removal and first-comma normalization. Nested array .length is supported while primitive property access stays undefined; property grammar requires identifiers. Unary arithmetic preserves numeric NaN, and division/remainder apply the browser's falsey-denominator rule. UTF-16 length supports unpaired surrogates.
+
+Added a real-browser-reference matrix of over 1,800 formula/JSON-input cases plus missing/excess function arguments and parser/whitespace guards. Reference JSON integers are parsed as doubles to compare numeric semantics rather than Python arbitrary-precision JSON integers against JavaScript binary64 values. No Node/JavaScript execution was added to the production Python implementation.
+
+Remaining limits: exotic object-to-primitive hooks outside ordinary imported JSON, exhaustive shortest-number formatting, negative-zero transport, Unicode-version differences in case mapping and regex equivalence are not proven. Computed/custom export snapshot preparation is unchanged in this step. Do not interpret this as complete application parity.
+
+### Follow-up: common rule RegExp semantics
+
+Added engine/js_regex.py, an independent standard-library translator for the non-Unicode, ignore-case RegExp used by matchCond. SQL rule matching now handles ASCII-only digit/word classes and word boundaries; ECMAScript whitespace; UTF-16 code units (including astral characters); all four dot-excluded line terminators; strict end-of-input `$`; legacy identity escapes, hex/Unicode/control escapes; named captures/references and ordinary lookarounds. Non-Unicode case canonicalization avoids Python-only folds of Kelvin sign, long s and dotless i. Literal class ranges expand through canonicalization instead of merely uppercasing their endpoints. Python-only inline flags, atomic groups and possessive quantifiers are rejected. Compiled patterns use a bounded cache.
+
+Kept the actual browser contract: matchCond lowercases/trims the pattern before construction, including its escape letters. Regex subjects now use browser JSON string coercion and JS truthiness instead of Python repr/truthiness. Non-regex operators share that string coercion.
+
+Tests: tests/match-condition-reference.js executes the actual matchCond extracted from index.html; a matrix of over 2,500 cases covers common constructs, Unicode/case distinctions, syntax rejection, array/object/boolean subjects and line terminators. An integration test verifies regex-driven enrichment and exclusion through the SQLite operations.
+
+Limits remain explicit: this translator is not a full ECMAScript regex interpreter. Forward/unmatched capture references, legacy decimal/octal ambiguities, variable-length lookbehind, unusual escaped range endpoints and complement-class unions are not fully equivalent. Invalid or unsupported translations return false, matching the existing matcher error contract; that does not imply unsupported valid JS patterns have parity. No browser/Node fallback was added. Full application parity, including computed/custom export snapshots, is still unfinished.
+
+### Follow-up: class-set parsing and capture references
+
+Replaced the incremental character-class translation with a UTF-16 set parser. Escaped hex/Unicode/octal endpoints, unions of positive/complement shorthand classes, legacy shorthand/range combinations and negated classes are interpreted before case canonicalization; output sets are compressed into safe Python ranges. This closes the prior escaped-range/complement-union limitations (including the micro-sign/Greek-mu fold across range endpoints).
+
+Added a capture-layout pass and internal capture names: forward/self references become empty matches, and references to optional/unmatched captures use conditional empty matches instead of Python's failing backreference behavior. Named references share this mechanism; legacy decimal/octal fallback and identity escapes 8/9 are parsed explicitly. Invalid/duplicate capture names are rejected; Python's internal names do not broaden accepted syntax intentionally.
+
+Expanded differential coverage through actual matchCond plus direct browser RegExp for uppercase shorthand unions (matchCond itself lowercases escape letters). Added optional/forward/self and named references, legacy octal and decimal fallback, malformed names, escaped ranges, mixed classes, control characters and Unicode folds. Production still uses only Python standard library, without a JavaScript runtime.
+
+Still not exhaustive ECMAScript regex parity: variable-length/backwards-evaluated lookbehind, capture clearing on quantified alternatives, escaped Unicode capture names, and newer duplicate-name alternatives remain unproven/unsupported. Python/JS Unicode-version differences remain possible. The earlier limitations for full application/export parity still apply.
+
+### Follow-up: independent custom-column export preparation
+
+General SQL CSV/XLSX export now sends raw custom fields and column descriptors; custom value slots are placeholders, not browser-computed presentation values. engine/export_custom.py independently applies the actual exportCatalogCellValue/num behavior on Python, and store_export_cells stages those converted cells in SQLite alongside unchanged computed/source-column snapshots. Date/nonfinite type markers preserve conversions that JSON would otherwise erase. Old callers without custom metadata retain their prior behavior. No dynamic code evaluation is used.
+
+Important compatibility finding: existing browser custom-column definitions set c.f even for text columns ('@'), and the generic formatter numerically converts any nonempty value when c.f is truthy and c.txt absent. This step deliberately preserves that behavior rather than silently changing existing exports; string custom values such as 'text' therefore still become 0 with those definitions. Differential tests document the current behavior. Raw unformatted metadata is also tested, but the UI's existing descriptors are unchanged.
+
+All export-cell rows are now validated and converted before snapshot replacement, and insertion uses a savepoint: malformed later rows or a SQLite write failure cannot leave a partly replaced export snapshot. This does not commit a caller's surrounding transaction. Also fixed an actual client export error: the format argument shadowed the fmt() display helper, throwing after download; an executable client VM test covers the successful path.
+
+New checks cover actual client raw-input dispatch, actual browser custom-cell conversion, mixed custom/computed columns, CSV/XLSX output, brand identity, type markers, invalid metadata and malformed/failed-write atomicity. Full verification: 173 Python tests, JS app tests, syntax checks for five executable scripts and diff check passed; targeted custom-export tests passed after adding nonfinite markers.
+
+Not full export parity: computed/src callback values and Excel formula generation still arrive as presentation snapshots from the browser. Raw custom inputs now have independent Python conversion, not independent import mapping or formula evaluation for every export column. The earlier regex and end-to-end transaction limitations remain.
+
+### Correctness pass: text preservation, async races and export guards
+
+- Fixed the custom-text data-loss bug in BOTH paths, rather than preserving it indefinitely for parity. Actual custom descriptors now set txt for non-numeric types; leading zeros and nonnumeric text are preserved. Python receives custom_text metadata and performs independent string conversion. Dates in custom text use ISO UTC consistently, not the browser's local Date.toString; NaN and signed infinities retain type markers for textual conversion. Older descriptors without txt keep compatibility. This supersedes the earlier decision to preserve the '@' numeric-conversion bug.
+- Concurrent Ozon preview/validation lazy typing is serialized. The second caller rechecks pending rows after the first applies, avoiding duplicate requests and self-induced stale errors. Catalogue-array replacement and HVC revision changes invalidate pending results in addition to existing row/settings/reference guards. Superseded preview and validation requests do not render old results.
+- General SQL catalogue export checks catalogue identity/revision, processing mode and settings after synchronization/recalculation and immediately before the downloader creates a file link (after receiving its blob). A changed catalogue/configuration causes an explicit retry error, not a mixed-state file or browser fallback. This is client-side stale-response protection, not a global SQLite catalogue revision/transaction protocol across clients.
+- Hardened export metadata validation: reject duplicate/reserved/non-string column keys and malformed explicit formula arrays before snapshot changes. Existing savepoint staging and rollback protection remain.
+- Closed test HTTP servers, joined their threads and used a context manager for the golden CSV file. The full suite now completes without the earlier ResourceWarnings.
+
+Executed client tests cover concurrent typing, catalogue replacement/HVC mutation while awaiting, superseded renderer DOM suppression, raw custom text metadata, stale catalogue/configuration during export and the actual downloader's pre-link guard. Browser differential cases include text/null/object/array/date/special-number conversion; SQLite tests assert leading-zero text preservation and invalid metadata rejection.
+
+Verification: 174 Python tests, node tests/run-tests.js, five executable HTML script syntax checks, git diff --check. This correctness pass does NOT close the explicitly listed computed/src export, Excel formula generation, exotic RegExp and multi-stage transaction parity gaps. No features were removed; no PR merge was performed.
+
+### Follow-up: independent Excel formula generation
+
+engine/export_formulas.py implements all **35 current exportCatalog xl definitions** independently in Python. SQL general export no longer calls c.xl or Exp._sanitizeFormula and no longer submits browser-generated formula strings. The browser sends selected column descriptors, sheet layout, dimension unit, formula toggle and compact raw availability flags. Python builds cell references and cross-sheet links, resolves selected dependencies, applies export-availability guards and generates bounded/whitelisted formulas. Numeric caches receive IFERROR wrapping under the same rule as the browser; disabled formulas and missing dependencies retain cached values.
+
+Missing-dependency warnings are preserved: the server returns ASCII formula keys in an exposed X-UC-Export-Warnings response header, and the client maps these back to selected column names. Existing API callers without formula_options retain snapshot compatibility. With the new option, supplied formula strings cannot replace server-generated formulas; unsupported formula keys fail explicitly. Duplicate/missing SQLite SKU identities are rejected. HTTP article filtering happens before row-relative formula construction, avoiding shifted references after selection.
+
+Differential coverage executes actual exportCatalog c.xl functions, exportCellUnavailable helpers and Exp._sanitizeFormula in a JS VM: every registered key, cm/mm, row 2/999, local/inter-sheet references, numeric/text cached values and omission of each dependency are compared. The test fails if a new browser xl definition has no Python counterpart. Additional guard matrices compare model-review, no-buy, missing-input/tariff and per-marketplace flags. SQLite/XLSX tests verify cached values and formulas, missing-dependency warnings, disabling formulas and ignoring client formula strings. The real POST handler and byte response verify filtering and CORS-exposed warning headers; actual downloader/client tests verify warnings and absence of browser formula execution.
+
+Also aligned custom-text Date handling in the standalone browser XLSX writer with the ISO conversion already used in the general formatter/Python path.
+
+Verification: 178 Python tests, node tests/run-tests.js, five executable HTML script syntax checks and git diff --check passed. Full parity is still NOT claimed: many computed/src cell values still arrive as browser presentation snapshots; formula-availability decisions use supplied quality flags rather than independently reconstructing every upstream quality state. The remaining exotic regex and cross-request transaction limitations still apply. This supersedes the earlier statement that Excel-formula generation itself remains browser-only.
+
+
+### Follow-up: composed enrichment run and SQL state continuity
+
+Executed a new composed regression on the 12 checked-in DEMO SKU identities and
+physical inputs, with explicitly synthetic donor/category/OE fixtures. Eight
+stages (HVC, formula rules, kind, Ozon preferred, TN VED, quarantine, mark status,
+policies), three HVC modes and two successive runs produce 48 stage-result
+comparisons / 576 row comparisons against actual browser reference functions.
+This is not a user-production-catalog run. Full details and reproduction commands:
+`docs/enrichment-catalog-run-2026-11-08.md`.
+
+The run exposed stale product SQL context across stages: kind/TN VED sources were
+not retained for the next HVC pass, and quarantine did not refresh the product
+context's blocked flag. Added context persistence for both. Six previously
+incremental-writing enrichment routes now use SAVEPOINT rollback boundaries
+instead of unconditional commits. Bad later rows/failed HVC writes leave no
+partial batch and do not commit/rollback caller-owned pending changes.
+
+Verification: 181 Python tests (including three new integration/rollback tests),
+JS app tests and diff check passed. The composed fixture asserts meaningful
+filled results and preservation of manual fields, not merely equal empty rows.
+The entire multi-step/browser/IndexedDB lifecycle is still not one transaction;
+full real-catalog validation requires inputs not present in this checkout.
+
+
+### Follow-up: lossless rule-enrichment transport and client batch application
+
+Fixed a real HTTP boundary difference: ordinary JSON turned existing NaN and
+signed infinities into null before Python evaluated rules. The rules endpoint
+now accepts validated path/type sidecars, restores numbers independently in
+Python, and returns/persists corresponding sidecars for nested response values.
+Legacy top-level nonfinite response metadata is retained for compatibility.
+No JavaScript runtime or browser fallback is used in production.
+
+The client stages and validates ALL rule-response chunks before mutating any
+row, checks the original catalogue/row fingerprints, rules/configuration and
+processing mode, and rejects malformed/unknown output fields and number paths.
+A failed second chunk leaves the first chunk unapplied in browser memory. The
+server still persists each HTTP chunk independently; this does not roll back
+server chunks already accepted or provide a browser/SQLite distributed transaction.
+
+Also fixed numeric condition conversion: match_condition gt/lt now uses the
+independent browser-num equivalent rather than the more permissive/different
+legacy engine num. In particular NaN/Infinity become zero for these conditions,
+as the browser does, and numeric-prefix strings use parseFloat behavior.
+Unchanged copied NaN values no longer look like spurious changes, while false
+and numeric zero/one are distinguished when determining returned fields.
+
+Added repeated real-browser rule executions vs actual SQLite operations with
+NaN/infinities, nested arrays/objects, a boolean-to-number assignment and
+nonfinite numeric conditions. Client VM checks cover lossless dispatch/restore,
+a 1001-row failure at chunk two, invalid metadata/fields, stale row/configuration
+and duplicate/prototype paths. Browser numeric references now execute the actual
+num implementation rather than a Number-based test approximation.
+
+Verification: 184 Python tests, JS app tests, five executable script syntax
+checks and diff check passed. Dates and other non-JSON runtime object types are
+not covered by the new numeric sidecar protocol; remaining RegExp/complete
+lifecycle and real-catalog limitations remain explicit.
+
+
+### Follow-up: Date semantics in rule enrichment
+
+Extended the rule transport's validated sidecar protocol to valid/invalid Date,
+including nested values. Python uses an explicit immutable JSDate value, not an
+ISO string in place of a Date. Arithmetic, comparisons and numeric whitelist
+functions reject direct Date operands like browser ExprLang; lazy branches,
+truthiness, string/blank/coalesce functions and direct/nested Date assignments
+retain browser semantics. Date precision arguments to round follow the browser's
+separate +d conversion. Responses restore actual Date objects in the client;
+mutation of an input Date during await invalidates the result.
+
+Date metadata carries epoch milliseconds and the source environment's native
+Date.toString representation (necessary for matching timezone-dependent string
+operations), while the JSON value remains the ISO representation/null. Python
+validates canonical Gregorian ISO vs epoch over JavaScript's full TimeClip range,
+including year zero and extended years; the client verifies Date/JSON agreement
+before applying. This is explicit runtime-type/display input metadata, not
+browser formula execution on behalf of the server.
+
+Three new tests compare actual browser rule-loop behavior for Date copy, nested
+objects, invalid dates, arithmetic/functions, lazy branches and repeated SQL
+roundtrips. Range and timezone cases include UTC/Europe-Moscow, +/-8.64e15ms and
+year zero. Actual client tests assert Date restoration, invalid metadata rejection
+and stale-Date mutation protection.
+
+Verification: 187 Python tests, JS app tests, executable HTML syntax checks and
+diff check passed. This closes Date transport for RULE enrichment only: other
+standalone enrichment endpoints and browser-only presentation/helper paths have
+not all been switched to this typed protocol. Complete application parity must
+still be checked end-to-end; this section is not a declaration of completion.
+
+
+### Follow-up: rule cross-product and evaluation order
+
+Added a deterministic actual-browser-vs-SQLite matrix over 31 input values,
+38 formula expressions and nine condition operators, repeated twice. It covers
+null/booleans, signed zero, subnormal/large/nonfinite numbers, numeric-prefix and
+nonfinite strings, Cyrillic, arrays and objects. Expected JSON numbers are
+interpreted as binary64 like the browser, while path indices remain integers.
+
+The expanded Date cases exposed a real expression evaluation-order mismatch:
+browser ExprLang evaluates divisors first and skips the numerator on a falsy
+divisor. Python used eager left-to-right evaluation, so num(date)/0 preserved
+the previous target after an error instead of assigning Infinity. Fixed / and %
+in the independent Python evaluator; p.date/0, num(p.date)/0, p.date%0 and
+num(p.date)%0 now match the actual browser loop, including repeated runs.
+This deliberately preserves the existing browser semantics, rather than
+changing both implementations to conventional arithmetic rules.
+
+Verification: 188 Python tests and JS app tests passed; diff check clean.
+Complete enrichment parity remains the acceptance criterion, not an assertion
+based on this matrix. Full real-catalog UI lifecycle and cross-request rollback
+remain unverified/unimplemented as described above.
+
+
+### Follow-up: category/TNVED conversions and policy order audit
+
+An expanded actual-browser TNVED test (30 combinations of code/category/type
+inputs) exposed two differences: a numeric code 8421230000.0 was rendered with
+an extra .0, and an array category [] was normalized to the literal Python []
+instead of the browser empty string. Category/TNVED text conversion now uses
+the independent JS-string equivalent, also covering booleans/arrays/objects.
+The full suite was rerun because this normalizer is shared by other classifiers.
+
+A real endpoint-vs-browser policy test exposed incorrect precedence with a
+numeric-prefix order_no such as "2 kg". The endpoint now uses browser-num
+conversion rather than the legacy engine's numeric parser for sorting rules.
+Also fixed a missing null in policyReason: template interpolation of an explicit
+null value is "null", not the empty string. Both issues have regression tests
+running the actual browser loop against the SQLite endpoint.
+
+Verification: 190 Python tests, JS application tests and diff check passed.
+The passing scope includes name/category, kind/TNVED, Ozon, HVC, user rules,
+policies, mark status and dimension operations, but not a complete real-data
+UI E2E demonstration. Previously documented transaction/transport limitations
+are not superseded by this successful test run.
+
+
+### Follow-up: mark-status nonstring values and unknown-status metadata
+
+Added 33 combinations of status/code/required fields with numeric, boolean,
+array/object and ECMAScript-specific whitespace values, compared against the
+actual browser check + pipeline hide action and its unknown-status Set. The
+reference harness optionally exposes that Set; existing output stays compatible.
+
+Found and fixed differences in Python's truthiness (empty arrays/objects must
+be truthy in JS), conversion of arrays/objects/numbers to strings (including
+custom valid/invalid status lists), and trim behavior (BOM is JS whitespace,
+U+001C is not). The SQL endpoint's unknown-status list now uses the same
+conversion/trimming as the browser instead of Python str/strip. Numeric code
+length checks continue to count UTF-16 units after JS-style conversion.
+
+Verification: 191 Python tests, JS application tests and diff check passed.
+This covers the JSON-representable field cases tested here, not typed transport
+for dates/nonfinite values in the mark-status route or a global transaction.
+
+
+### Follow-up: typed mark-status HTTP contract and staged application
+
+The mark-status endpoint now decodes Date/NaN/signed-infinity metadata for both
+rows AND settings before independent Python evaluation. Settings retain their
+legacy JSON snapshot plus a separate persisted type sidecar. Response fields
+are JSON-safe with type metadata, and the client restores runtime types.
+
+The client validates output fields/types/identity and stages all row updates
+and unknown-status additions until all chunks succeed. Catalogue identity,
+input/settings fingerprints and processing mode are checked before applying.
+A second-chunk failure leaves rows and the browser unknown-status Set untouched;
+previously accepted server requests are still independent transactions.
+
+Two added tests exercise Date/invalid-Date/NaN/infinities against actual browser
+mark checking and verify saved settings type restoration, actual client typed
+dispatch, 1001-row second-chunk failure, stale Date mutation and forbidden output
+fields. Full verification: 193 Python tests, JS application tests, syntax of five
+executable HTML scripts, diff check passed. This closes the previously noted
+typed MARK route gap, not every other endpoint or global lifecycle atomicity.
