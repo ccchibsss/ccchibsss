@@ -38,3 +38,15 @@ class SqlCatalogStorage(unittest.TestCase):
         self.assertEqual(restored[0]['value'],float('inf'));json.dumps(page,allow_nan=False)
     def test_actual_client_storage_routing(self):
         subprocess.check_call(['node',str(pathlib.Path(__file__).resolve().parents[2]/'tests/sql-catalog-storage-client.js')])
+    def test_commit_does_not_decode_uploaded_row_json(self):
+        from unittest.mock import patch
+        t=self.begin([{'article':str(i),'custom':{'x':'test'}} for i in range(1000)])
+        with patch.object(E.json,'loads',side_effect=AssertionError('Commit reparsed row JSON')):
+            self.call('commit',token=t)
+        self.assertEqual(self.call('read')['total'],1000)
+
+    def test_legacy_incomplete_upload_can_still_be_committed(self):
+        t=self.begin([{'article':'old'}])
+        self.c.execute('DELETE FROM app_catalog_chunk_sizes');self.c.commit()
+        self.call('commit',token=t)
+        self.assertEqual(self.call('read')['chunk']['rows'][0]['article'],'old')

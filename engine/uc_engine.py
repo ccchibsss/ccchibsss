@@ -4553,6 +4553,29 @@ def enrich_name_categories(conn, rows, context, enabled=True):
     return {'rows':result}
 
 @_atomic_enrichment
+def enrich_hvc_input_rows(conn, rows, reference=None, mode='auto', cat_mode='artbrand', columns=None, policy=None, reference_id=None):
+    """Enrich exactly the supplied rows, not the whole normalized SQL catalog."""
+    import hashlib
+    conn.execute('CREATE TABLE IF NOT EXISTS hvc_input_reference(id TEXT PRIMARY KEY,data TEXT NOT NULL)')
+    if reference is not None:
+        encoded=json.dumps(reference,ensure_ascii=False,allow_nan=False)
+        reference_id=hashlib.sha256(encoded.encode()).hexdigest()
+        conn.execute('INSERT OR IGNORE INTO hvc_input_reference VALUES(?,?)',(reference_id,encoded))
+    saved=conn.execute('SELECT data FROM hvc_input_reference WHERE id=?',(reference_id,)).fetchone()
+    if not saved:raise ValueError('Нет справочника HVC')
+    def allowed(p,t):
+        candidate=dict(p)
+        candidate['dimension_context']=json.dumps({'sources':p.get('_sources') or {},'blocked':bool(p.get('dimensionAnomalyBlocked'))},ensure_ascii=False)
+        return _dimension_candidate_allowed(candidate,tuple(num(t[k]) for k in ('length','width','height','weight')),policy or {})
+    output=hvc_enrich_rows(rows,json.loads(saved[0]),mode,cat_mode,columns,time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),num,rnd,allowed)
+    results=[]
+    for before,after in zip(rows,output):
+        fields={k:v for k,v in after.items() if k not in before or not equivalent(before[k],v)}
+        clean,types=encode_special(fields)
+        results.append({'article':before.get('article'),'brand':before.get('brand',''),'fields':clean,'special_values':types,'removed':[k for k in before if k not in after]})
+    return {'rows':results,'reference_id':reference_id,'changed':sum(bool(r['fields'] or r['removed']) for r in results)}
+
+@_atomic_enrichment
 def enrich_hvc(conn, reference=None, mode='auto', cat_mode='artbrand', columns=None, policy=None):
     """HVC snapshot route; keeps ordered graph and dimension evidence intact."""
     conn.execute('CREATE TABLE IF NOT EXISTS hvc_reference(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
@@ -5893,6 +5916,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/donors/import':
                 n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
                 return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/catalog/enrich-hvc-rows':
+                return self._send(200,{'ok':True,**enrich_hvc_input_rows(conn,body.get('rows') or [],body.get('reference'),body.get('mode','auto'),body.get('cat_mode','artbrand'),body.get('columns'),body.get('policy'),body.get('reference_id'))})
             if self.path == '/catalog/check-mark-status':
                 return self._send(200, {'ok':True, **check_mark_status_rows(conn, body.get('rows') or [], body.get('settings') or {}, body.get('special_values'))})
             if self.path == '/catalog/enrich-category-tnved':
@@ -6063,6 +6088,7 @@ def app_catalog_state(conn, action, body):
     conn.execute('CREATE TABLE IF NOT EXISTS app_catalog_head(id INTEGER PRIMARY KEY CHECK(id=1),revision TEXT NOT NULL,metadata TEXT NOT NULL,total INTEGER NOT NULL)')
     conn.execute('CREATE TABLE IF NOT EXISTS app_catalog_chunks(revision TEXT NOT NULL,part INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(revision,part))')
     conn.execute('CREATE TABLE IF NOT EXISTS app_catalog_upload(token TEXT PRIMARY KEY,base TEXT NOT NULL,total INTEGER NOT NULL,metadata TEXT NOT NULL,created REAL NOT NULL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS app_catalog_chunk_sizes(revision TEXT NOT NULL,part INTEGER NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(revision,part))')
     head=conn.execute('SELECT revision,metadata,total FROM app_catalog_head WHERE id=1').fetchone()
     current=head[0] if head else ''
     if action=='read':
@@ -6071,7 +6097,7 @@ def app_catalog_state(conn, action, body):
         part=body.get('part',0)
         if type(part) is not int or part<0:raise ValueError('Неверный номер части')
         chunk=conn.execute('SELECT data FROM app_catalog_chunks WHERE revision=? AND part=?',(revision,part)).fetchone()
-        return {'revision':current,'metadata':json.loads(head[1]) if head else {},'total':head[2] if head else 0,'chunk':json.loads(chunk[0]) if chunk else None,'exists':bool(head)}
+        return {'revision':current,'metadata':json.loads(head[1]) if head and part==0 else {},'total':head[2] if head else 0,'chunk':json.loads(chunk[0]) if chunk else None,'exists':bool(head)}
     if action=='begin':
         total=body.get('total');metadata=body.get('metadata',{})
         if type(total) is not int or total<0 or not isinstance(metadata,dict):raise ValueError('Неверный каталог')
@@ -6080,6 +6106,7 @@ def app_catalog_state(conn, action, body):
         with conn:
             for old in stale:
                 conn.execute('DELETE FROM app_catalog_chunks WHERE revision=?',(old,))
+                conn.execute('DELETE FROM app_catalog_chunk_sizes WHERE revision=?',(old,))
                 conn.execute('DELETE FROM app_catalog_upload WHERE token=?',(old,))
         token=secrets.token_hex(24)
         with conn:
@@ -6091,9 +6118,14 @@ def app_catalog_state(conn, action, body):
     if action=='chunk':
         part=body.get('part');chunk=body.get('chunk')
         if type(part) is not int or part<0 or not isinstance(chunk,dict) or not isinstance(chunk.get('rows'),list) or len(chunk['rows'])>1000:raise ValueError('Неверная часть каталога')
-        decoded=decode_special(chunk['rows'],chunk.get('special_values',[]))
+        types=chunk.get('special_values',[])
+        # Ordinary price rows need validation, not a full deepcopy.
+        decoded=decode_special(chunk['rows'],types) if types else chunk['rows']
+        if not isinstance(types,list):raise ValueError('Неверные типы каталога')
         if any(not isinstance(row,dict) for row in decoded):raise ValueError('Неверная строка каталога')
-        with conn:conn.execute('INSERT OR REPLACE INTO app_catalog_chunks VALUES(?,?,?)',(token,part,json.dumps(chunk,ensure_ascii=False,allow_nan=False)))
+        with conn:
+            conn.execute('INSERT OR REPLACE INTO app_catalog_chunks VALUES(?,?,?)',(token,part,json.dumps(chunk,ensure_ascii=False,allow_nan=False)))
+            conn.execute('INSERT OR REPLACE INTO app_catalog_chunk_sizes VALUES(?,?,?)',(token,part,len(decoded)))
         return {'saved':len(decoded)}
     if action!='commit':raise ValueError('Неизвестная операция каталога')
     # Lock and compare again inside the publishing transaction. Interrupted uploads
@@ -6102,12 +6134,21 @@ def app_catalog_state(conn, action, body):
         conn.execute('UPDATE app_catalog_head SET revision=revision WHERE id=1')
         latest=conn.execute('SELECT revision FROM app_catalog_head WHERE id=1').fetchone()
         if (latest[0] if latest else '')!=upload[0]:raise ValueError('Конфликт версии каталога SQLite')
-        chunks=conn.execute('SELECT part,data FROM app_catalog_chunks WHERE revision=? ORDER BY part',(token,)).fetchall()
+        chunks=conn.execute('SELECT c.part,s.n FROM app_catalog_chunks c LEFT JOIN app_catalog_chunk_sizes s ON s.revision=c.revision AND s.part=c.part WHERE c.revision=? ORDER BY c.part',(token,)).fetchall()
         if [r[0] for r in chunks]!=list(range(len(chunks))):raise ValueError('Пропущена часть каталога')
-        if sum(len(json.loads(r[1])['rows']) for r in chunks)!=upload[1]:raise ValueError('Неполная загрузка каталога')
+        # Pre-upgrade, unfinished uploads have no size record. Read only those
+        # legacy chunks; new uploads never reparse the entire catalog at commit.
+        total=0
+        for part,count in chunks:
+            if count is None:
+                raw=conn.execute('SELECT data FROM app_catalog_chunks WHERE revision=? AND part=?',(token,part)).fetchone()[0]
+                count=len(json.loads(raw)['rows'])
+            total+=count
+        if total!=upload[1]:raise ValueError('Неполная загрузка каталога')
         conn.execute('INSERT OR REPLACE INTO app_catalog_head VALUES(1,?,?,?)',(token,upload[2],upload[1]))
         conn.execute('DELETE FROM app_catalog_upload WHERE token=?',(token,))
         conn.execute('DELETE FROM app_catalog_chunks WHERE revision!=? AND revision NOT IN (SELECT token FROM app_catalog_upload)',(token,))
+        conn.execute('DELETE FROM app_catalog_chunk_sizes WHERE revision!=? AND revision NOT IN (SELECT token FROM app_catalog_upload)',(token,))
     return {'revision':token,'total':upload[1]}
 
 
