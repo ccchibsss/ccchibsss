@@ -831,11 +831,11 @@ assert(app.includes('данные на месте, пуста только вы�
   vm.runInContext(pySource + '\nglobalThis.engine = PyEngine;', modeContext);
   assert.strictEqual(modeContext.engine.processingMode(), 'browser');
   modeContext.engine.renderProcessingMode();
-  assert.strictEqual(button.textContent, 'Обработка: браузер');
+  assert.strictEqual(button.checked, false);
   store.set('uc.processingMode', 'sql');
   modeContext.engine.renderProcessingMode();
-  assert.strictEqual(button.textContent, 'Обработка: SQL');
-  assert.strictEqual(button['aria-pressed'], 'true');
+  assert.strictEqual(button.checked, true);
+  assert.strictEqual(button.disabled, false);
   store.set('uc.processingMode', 'invalid');
   assert.strictEqual(modeContext.engine.processingMode(), 'browser');
 }
