@@ -9154,6 +9154,7 @@ try {
       <div class="hint" style="margin-bottom:5px;letter-spacing:.1em;text-transform:uppercase">Предпросмотр (первые 5 строк после нормализации)</div>
       <div style="overflow:auto;border:1px solid var(--line);border-radius:9px"><table class="plain" id="impPreview"></table></div>
       <div id="impWarn" style="margin-top:9px"></div>
+      <div id="impApplyStatus" role="status" aria-live="polite" style="margin-top:9px;white-space:pre-wrap" hidden></div>
     </div>
   </div>
   <div class="mfoot"><span class="hint mono" id="impMeta"></span><div class="sp" style="flex:1"></div>
@@ -28680,6 +28681,7 @@ const Import = {
         if ($('#impKey')) $('#impKey').value = 'article+brand';
         if ($('#impMode')) $('#impMode').value = 'upsert';
       }
+      const applyStatus = $('#impApplyStatus'); if (applyStatus) { applyStatus.textContent = ''; applyStatus.hidden = true; }
       S.pending = { file: file.name, headers, body, advisorTemplate, map: (guess ? guess.config : autoMap(headers)).map(m => ({ ...m })) };
       Import.normalize();
       Import.render();
@@ -46788,10 +46790,28 @@ function bindAll() {
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { $$('.modal.on').forEach(m => m.classList.remove('on')); document.body.classList.remove('nav-open'); } });
   $$('.modal').forEach(m => m.addEventListener('mousedown', e => { if (e.target === m) m.classList.remove('on'); }));
   // === КРИТИЧЕСКИЕ КНОПКИ: привязываем ПЕРВЫМИ, чтобы если ниже что-то упадёт — они всё равно работали ===
-  on('#impApply', 'onclick', (e) => {
+  on('#impApply', 'onclick', async (e) => {
     e && e.preventDefault();
-    try { Import.apply(); }
-    catch (err) { console.error('[UC] Import.apply error:', err); Toast.err('Ошибка импорта', String(err.message || err).slice(0, 180)); }
+    const button = $('#impApply'), status = $('#impApplyStatus');
+    if (button.disabled) return;
+    button.disabled = true;
+    if (status) { status.hidden = false; status.textContent = 'Применение импорта… Дождитесь завершения; повторно выбирать файл не нужно.'; }
+    try {
+      await Import.apply();
+      // Validation can return without starting an import and keeps the wizard open.
+      if (status) status.textContent = $('#mImport').classList.contains('on')
+        ? 'Импорт не завершён. Проверьте сопоставление колонок и сообщение проверки.' : '';
+    } catch (err) {
+      console.error('[UC] Import.apply error:', err);
+      const reason = storageErrorText(err);
+      if (status) {
+        status.hidden = false;
+        status.textContent = 'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
+      }
+      if (!err || !err._ucShown) Toast.err('Ошибка импорта', reason.slice(0, 400));
+    } finally {
+      button.disabled = false;
+    }
   });
   on('#expRun', 'onclick', async (e) => {
     e && e.preventDefault();
