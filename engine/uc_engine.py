@@ -4691,7 +4691,26 @@ def enrich_name_categories(conn, rows, context, enabled=True):
 
 _HVC_REFERENCE_FIELDS = ('parts','oe','byArt','byOe','unsafeKeys','unsafeOe')
 
+# ThreadingHTTPServer can receive three HVC chunks at once. Queue them before
+# SQLite (one writer), including schema setup and commit/release operations.
+_HVC_REFERENCE_WRITE_LOCK=threading.Lock()
+
 def hvc_reference_upload(conn, body):
+    if not _HVC_REFERENCE_WRITE_LOCK.acquire(timeout=60):
+        raise ValueError('Очередь записи HVC занята больше 60 секунд; операция не выполнена')
+    previous_timeout=None
+    try:
+        previous_timeout=conn.execute('PRAGMA busy_timeout').fetchone()[0]
+        # Other endpoints/processes may also be writing. Wait without replaying
+        # the request; restore the connection policy even after an exception.
+        conn.execute('PRAGMA busy_timeout=30000')
+        return _hvc_reference_upload_locked(conn,body)
+    finally:
+        try:
+            if previous_timeout is not None:conn.execute('PRAGMA busy_timeout='+str(int(previous_timeout)))
+        finally:_HVC_REFERENCE_WRITE_LOCK.release()
+
+def _hvc_reference_upload_locked(conn, body):
     """Bounded, immutable SQLite reference chunks; no monolithic JSON upload."""
     import secrets
     conn.execute('CREATE TABLE IF NOT EXISTS hvc_ref_upload(id TEXT PRIMARY KEY,separator TEXT NOT NULL,total INTEGER NOT NULL,sealed INTEGER NOT NULL,created REAL NOT NULL)')
@@ -4732,6 +4751,11 @@ def hvc_reference_upload(conn, body):
             if any(not isinstance(v,list) or len(v)!=2 or not isinstance(v[0],str) for v in items):raise ValueError('Неверные записи HVC')
         encoded=json.dumps(items,ensure_ascii=False,allow_nan=False)
         if len(encoded.encode())>2*1024*1024:raise ValueError('Часть справочника HVC больше 2 МБ')
+        scalar=field in ('unsafeKeys','unsafeOe')
+        # Encode before acquiring SQLite's write lock, not in executemany's
+        # lazy iterator while every other writer is blocked.
+        entries=[(token,part,field,item if scalar else item[0],pos,
+            json.dumps(True if scalar else item[1],ensure_ascii=False,allow_nan=False)) for pos,item in enumerate(items)]
         with conn:
             conn.execute('UPDATE hvc_ref_upload SET sealed=sealed WHERE id=?',(token,))
             current=conn.execute('SELECT sealed FROM hvc_ref_upload WHERE id=?',(token,)).fetchone()
@@ -4739,9 +4763,7 @@ def hvc_reference_upload(conn, body):
             indexed=conn.execute('SELECT 1 FROM hvc_ref_indexed WHERE id=?',(token,)).fetchone()
             if indexed:
                 conn.execute('DELETE FROM hvc_ref_entries WHERE id=? AND part=?',(token,part))
-                scalar=field in ('unsafeKeys','unsafeOe')
-                conn.executemany('INSERT OR REPLACE INTO hvc_ref_entries VALUES(?,?,?,?,?,?)',
-                    ((token,part,field,item if scalar else item[0],pos,json.dumps(True if scalar else item[1],ensure_ascii=False,allow_nan=False)) for pos,item in enumerate(items)))
+                conn.executemany('INSERT OR REPLACE INTO hvc_ref_entries VALUES(?,?,?,?,?,?)',entries)
             # Indexed snapshots keep data once; old snapshots retain their JSON.
             conn.execute('INSERT OR REPLACE INTO hvc_ref_chunks VALUES(?,?,?,?,?)',(token,part,field,'[]' if indexed else encoded,len(items)))
         return {'saved':len(items)}

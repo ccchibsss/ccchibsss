@@ -27590,7 +27590,12 @@ const PyEngine = {
     const reference=options.reference || this.ozonProcessingReference();
     // Persistence/cloud metadata may change while a large reference uploads.
     // Only the effective classifier flag and processing mode affect this call.
-    const before=rows.map(p=>JSON.stringify(p)),catalog=S.rows;
+    // Match product state, not tariff/weight/marketplace calculation caches.
+    // These four fields are also removed when persisting the slim catalog.
+    const transient=new Set(['_t','_bw','mp','_stdDimsCalc']);
+    const stable=p=>JSON.stringify(Object.fromEntries(Object.keys(p).filter(k=>!transient.has(k)).map(k=>[k,p[k]])),
+      (k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(key=>[key,v[key]])):v);
+    const before=rows.map(stable),catalog=S.rows;
     const enabled=S.settings.autoCategoryByName!==false,mode=this.processingMode();
     const referenceId=await this.acquireOzonReference(reference);
     const staged=[];
@@ -27598,11 +27603,12 @@ const PyEngine = {
     const stats={total:0,auto:0,oe:0,applicability:0,manual:0,keyword:0,none:0,conflict:0};
     for(let offset=0;offset<rows.length;offset+=1000) {
       const batch=rows.slice(offset,offset+1000);
+      const inputs=before.slice(offset,offset+batch.length).map(text=>JSON.parse(text));
       const result=await this._fetch('/catalog/enrich-ozon-preferred',{method:'POST',timeout:120000,
-        body:JSON.stringify({rows:batch,reference_id:referenceId,enabled,
+        body:JSON.stringify({rows:inputs,reference_id:referenceId,enabled,
           force:options.force===true,force_name:options.forceName===true})});
       if(!Array.isArray(result.rows)||result.rows.length!==batch.length) throw new Error('Неполный ответ Ozon SQLite');
-      result.rows.forEach((r,i)=>{if(!r || r.article!==batch[i].article || r.brand!==(batch[i].brand||'') || !r.fields || !Array.isArray(r.removed)) throw new Error('Неверный порядок или формат ответа Ozon SQLite');
+      result.rows.forEach((r,i)=>{if(!r || r.article!==inputs[i].article || r.brand!==(inputs[i].brand||'') || !r.fields || !Array.isArray(r.removed)) throw new Error('Неверный порядок или формат ответа Ozon SQLite');
         if([...Object.keys(r.fields),...r.removed].some(k=>!k.startsWith('ozon_')&&!k.startsWith('_ozonName'))) throw new Error('Недопустимые поля Ozon SQLite');});
       result.rows.forEach((r,i)=>staged.push({p:batch[i],r}));
       result.rows.forEach((r,i)=>{const p={...batch[i],...r.fields};for(const k of r.removed)delete p[k];stats.total++;if(['manual','import'].includes(p.ozon_type_src))stats.manual++;else if(p.ozon_type_src==='keyword')stats.keyword++;else if(p.ozon_type_src==='auto'){stats.auto++;if(p.ozon_type_basis==='oe')stats.oe++;else if(p.ozon_type_basis==='applicability')stats.applicability++;}else{stats.none++;if(r.result && /conflict/i.test(r.result.reason||''))stats.conflict++;}});
@@ -27610,8 +27616,13 @@ const PyEngine = {
     if(S.rows!==catalog)throw new Error('Ozon: каталог заменён во время обогащения');
     if(this.processingMode()!==mode)throw new Error('Ozon: режим обработки изменился во время обогащения');
     if((S.settings.autoCategoryByName!==false)!==enabled)throw new Error('Ozon: настройка автокатегоризации изменилась во время обогащения');
-    const changedIndex=rows.findIndex((p,i)=>JSON.stringify(p)!==before[i]);
-    if(changedIndex>=0)throw new Error('Ozon: строка '+String(rows[changedIndex]?.article||changedIndex+1)+' изменилась во время обогащения');
+    const changedIndex=rows.findIndex((p,i)=>stable(p)!==before[i]);
+    if(changedIndex>=0){
+      const previous=JSON.parse(before[changedIndex]),current=JSON.parse(stable(rows[changedIndex]));
+      const fields=[...new Set([...Object.keys(previous),...Object.keys(current)])]
+        .filter(k=>JSON.stringify(previous[k])!==JSON.stringify(current[k]));
+      throw new Error('Ozon: строка '+String(rows[changedIndex]?.article||changedIndex+1)+' изменилась во время обогащения; поля: '+fields.slice(0,12).join(', '));
+    }
     for(const {p,r} of staged){for(const k of r.removed)delete p[k];Object.assign(p,r.fields);}
     return stats;
     }finally{if(!options.reference)await this.releaseOzonReference(reference);}
