@@ -21472,6 +21472,7 @@ function runPipeline(full, options) {
      пересчёт занимает свою часть шкалы (78…97 %). */
   const _stepRange = Array.isArray(options.stepRange) && options.stepRange.length === 2 ? options.stepRange : [0, 100];
   const _step = v => Prog.step(_stepRange[0] + (_stepRange[1] - _stepRange[0]) * (v / 100));
+  let pipelineOzonReference=null;
   const execute = async (prog = () => {}) => {
     const tStart = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     clearTariffLookupCache();
@@ -21488,6 +21489,7 @@ function runPipeline(full, options) {
     const sqlEnrichment = typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql';
 
     const ozonSqlReference=full && sqlEnrichment ? PyEngine.ozonProcessingReference() : null;
+    pipelineOzonReference=ozonSqlReference;
     const tnvedServerRows = [];
     const markStatusServerRows = [];
     let econErr = 0, firstErr = '';
@@ -21756,7 +21758,8 @@ function runPipeline(full, options) {
     else if (options.showProgress === false) job = execute(() => {});
     else job = withProgress('Пайплайн данных', 'фильтры → категоризация → правила → экономика', execute);
   } catch (e) { RecommendedPriceScenario.pipelineEnd(); throw e; }
-  return Promise.resolve(job).finally(() => {
+  return Promise.resolve(job).finally(async () => {
+    if(pipelineOzonReference)await PyEngine.releaseOzonReference(pipelineOzonReference);
     RecommendedPriceScenario.pipelineEnd();
     S._pipeActive = Math.max(0, (S._pipeActive || 1) - 1);
   });
@@ -27541,23 +27544,65 @@ const PyEngine = {
       identity:{rows:S.rows.map(p=>({article:p.article,brand:p.brand})),parts:[...HVC.parts],
         byArt:[...HVC.byArt].map(([k,v])=>[k,[...v]]),oe_mode:oeMode()}};
   },
+  async acquireOzonReference(reference) {
+    if(!this._ozonReferences)this._ozonReferences=new WeakMap();
+    if(this._ozonReferences.has(reference))return this._ozonReferences.get(reference);
+    const job=(async()=>{
+      const text=JSON.stringify(reference);
+      const start=await this._fetch('/catalog/ozon-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'begin',total:text.length})});
+      if(typeof start.token!=='string'||!start.token.startsWith('ozon:'))throw new Error('Неверный токен справочника Ozon');
+      try{
+        let part=0;
+        for(let off=0;off<text.length;){
+          let end=Math.min(off+300000,text.length);
+          if(end<text.length&&text.charCodeAt(end-1)>=0xD800&&text.charCodeAt(end-1)<=0xDBFF)end--;
+          const data=text.slice(off,end);
+          const result=await this._fetch('/catalog/ozon-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'chunk',token:start.token,part:part++,data})});
+          if(result.saved!==data.length)throw new Error('Часть справочника Ozon не подтверждена');
+          off=end;
+        }
+        const result=await this._fetch('/catalog/ozon-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'commit',token:start.token})});
+        if(result.reference_id!==start.token)throw new Error('Неверная версия справочника Ozon');
+        return result.reference_id;
+      }catch(e){
+        try{await this._fetch('/catalog/ozon-reference',{method:'POST',timeout:10000,body:JSON.stringify({action:'release',token:start.token})});}catch(cleanup){}
+        throw e;
+      }
+    })();
+    this._ozonReferences.set(reference,job);
+    try{return await job;}catch(e){this._ozonReferences.delete(reference);throw e;}
+  },
+  async releaseOzonReference(reference) {
+    const pending=this._ozonReferences?.get(reference);
+    if(!pending)return;
+    this._ozonReferences.delete(reference);
+    try{const token=await pending;await this._fetch('/catalog/ozon-reference',{method:'POST',timeout:10000,body:JSON.stringify({action:'release',token})});}
+    catch(e){console.warn('[UC] временный справочник Ozon не удалён:',e);}
+  },
   async enrichOzonPreferred(rows, options={}) {
     if(!rows.length) return;
     await this.processingAvailable();
     const reference=options.reference || this.ozonProcessingReference();
+    const before=rows.map(p=>JSON.stringify(p)),catalog=S.rows,settings=JSON.stringify(S.settings);
+    const referenceId=await this.acquireOzonReference(reference);
+    const staged=[];
+    try {
     const stats={total:0,auto:0,oe:0,applicability:0,manual:0,keyword:0,none:0,conflict:0};
     for(let offset=0;offset<rows.length;offset+=1000) {
       const batch=rows.slice(offset,offset+1000);
       const result=await this._fetch('/catalog/enrich-ozon-preferred',{method:'POST',timeout:120000,
-        body:JSON.stringify({rows:batch,reference,enabled:S.settings.autoCategoryByName!==false,
+        body:JSON.stringify({rows:batch,reference_id:referenceId,enabled:S.settings.autoCategoryByName!==false,
           force:options.force===true,force_name:options.forceName===true})});
       if(!Array.isArray(result.rows)||result.rows.length!==batch.length) throw new Error('Неполный ответ Ozon SQLite');
       result.rows.forEach((r,i)=>{if(!r || r.article!==batch[i].article || r.brand!==(batch[i].brand||'') || !r.fields || !Array.isArray(r.removed)) throw new Error('Неверный порядок или формат ответа Ozon SQLite');
         if([...Object.keys(r.fields),...r.removed].some(k=>!k.startsWith('ozon_')&&!k.startsWith('_ozonName'))) throw new Error('Недопустимые поля Ozon SQLite');});
-      result.rows.forEach((r,i)=>{for(const k of r.removed) delete batch[i][k];Object.assign(batch[i],r.fields);});
-      result.rows.forEach((r,i)=>{const p=batch[i];stats.total++;if(['manual','import'].includes(p.ozon_type_src))stats.manual++;else if(p.ozon_type_src==='keyword')stats.keyword++;else if(p.ozon_type_src==='auto'){stats.auto++;if(p.ozon_type_basis==='oe')stats.oe++;else if(p.ozon_type_basis==='applicability')stats.applicability++;}else{stats.none++;if(r.result && /conflict/i.test(r.result.reason||''))stats.conflict++;}});
+      result.rows.forEach((r,i)=>staged.push({p:batch[i],r}));
+      result.rows.forEach((r,i)=>{const p={...batch[i],...r.fields};for(const k of r.removed)delete p[k];stats.total++;if(['manual','import'].includes(p.ozon_type_src))stats.manual++;else if(p.ozon_type_src==='keyword')stats.keyword++;else if(p.ozon_type_src==='auto'){stats.auto++;if(p.ozon_type_basis==='oe')stats.oe++;else if(p.ozon_type_basis==='applicability')stats.applicability++;}else{stats.none++;if(r.result && /conflict/i.test(r.result.reason||''))stats.conflict++;}});
     }
+    if(S.rows!==catalog||JSON.stringify(S.settings)!==settings||rows.some((p,i)=>JSON.stringify(p)!==before[i]))throw new Error('Каталог или настройки изменились во время Ozon-обогащения');
+    for(const {p,r} of staged){for(const k of r.removed)delete p[k];Object.assign(p,r.fields);}
     return stats;
+    }finally{if(!options.reference)await this.releaseOzonReference(reference);}
   },
   prepareOzonTyping(rows) {
     // Preview and validation often start together. Serialize lazy typing so
@@ -27793,12 +27838,19 @@ const PyEngine = {
     const total=fields.reduce((n,k)=>n+reference[k].length,0);
     const start=await this._fetch('/catalog/hvc-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'begin',total,groupSeparator:reference.groupSeparator})});
     if(typeof start.token!=='string'||!start.token.startsWith('chunked:'))throw new Error('Неверный токен справочника HVC');
-    let part=0,sent=0;
-    const send=async(field,items)=>{
+    let part=0,sent=0,failure=null;
+    const pending=new Set();
+    const send=async(field,items,part)=>{
       const result=await this._fetch('/catalog/hvc-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'chunk',token:start.token,part,field,items})});
       if(result.saved!==items.length)throw new Error('Часть справочника HVC не подтверждена');
-      part++;sent+=items.length;
+      sent+=items.length;
       if(prog)prog('SQL: передача справочника HVC '+sent+' из '+total);
+    };
+    const schedule=async(field,items)=>{
+      while(pending.size>=3)await Promise.race(pending);
+      if(failure)throw failure;
+      const task=send(field,items,part++).catch(e=>{failure=e;}).finally(()=>pending.delete(task));
+      pending.add(task);
     };
     try {
       for(const field of fields){
@@ -27808,16 +27860,19 @@ const PyEngine = {
           // request without allocating another full-graph JSON string.
           const size=JSON.stringify(item).length*3+3;
           if(size>1024*1024)throw new Error('Одна запись справочника HVC слишком велика; поле '+field);
-          if(items.length&&(bytes+size>1024*1024||items.length>=2000)){await send(field,items);items=[];bytes=0;}
+          if(items.length&&(bytes+size>1024*1024||items.length>=8000)){await schedule(field,items);items=[];bytes=0;}
           items.push(item);bytes+=size;
         }
-        if(items.length)await send(field,items);
+        if(items.length)await schedule(field,items);
       }
+      await Promise.all(pending);
+      if(failure)throw failure;
       const result=await this._fetch('/catalog/hvc-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'commit',token:start.token})});
       if(result.reference_id!==start.token)throw new Error('Неверная версия справочника HVC');
       console.info('[UC] HVC SQL: справочник '+total+' записей, '+part+' частей, '+(Date.now()-started)+' мс');
       return result.reference_id;
     }catch(e){
+      await Promise.all(pending);
       try{await this._fetch('/catalog/hvc-reference',{method:'POST',body:JSON.stringify({action:'release',token:start.token})});}catch(cleanup){}
       throw e;
     }

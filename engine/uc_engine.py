@@ -4510,14 +4510,77 @@ def apply_product_policies(conn, rows, rules):
             conn.execute('INSERT OR REPLACE INTO product_policy_state VALUES(?,?,?)',(r['article'],r['brand'],json.dumps(r['fields'],ensure_ascii=False)))
     return {'rows':results}
 
-def enrich_ozon_preferred(conn, rows, reference, enabled=True, force=False, force_name=False):
+# One active compiled Ozon reference; explicit release and SQLite-backed reload.
+# Holding the lock through apply prevents shared classifier caches racing.
+import threading
+_OZON_REFERENCE_LOCK=threading.RLock()
+_OZON_REFERENCE_CACHE={}
+
+def ozon_reference_upload(conn,body):
+    import secrets
+    conn.execute('CREATE TABLE IF NOT EXISTS ozon_ref_upload(id TEXT PRIMARY KEY,total INTEGER NOT NULL,sealed INTEGER NOT NULL,created REAL NOT NULL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS ozon_ref_chunks(id TEXT NOT NULL,part INTEGER NOT NULL,data TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(id,part))')
+    action=body.get('action')
+    if action=='begin':
+        total=body.get('total')
+        if type(total) is not int or total<=0:raise ValueError('Неверный размер справочника Ozon')
+        token='ozon:'+secrets.token_hex(24)
+        with conn:
+            conn.execute('DELETE FROM ozon_ref_chunks WHERE id IN (SELECT id FROM ozon_ref_upload WHERE created<?)',(time.time()-86400,))
+            conn.execute('DELETE FROM ozon_ref_upload WHERE created<?',(time.time()-86400,))
+            conn.execute('INSERT INTO ozon_ref_upload VALUES(?,?,0,?)',(token,total,time.time()))
+        return {'token':token}
+    token=body.get('token')
+    # Use the same lock order as enrichment: resource lock, then SQLite write.
+    with _OZON_REFERENCE_LOCK:
+        with conn:
+            conn.execute('UPDATE ozon_ref_upload SET sealed=sealed WHERE id=?',(token,))
+            head=conn.execute('SELECT total,sealed FROM ozon_ref_upload WHERE id=?',(token,)).fetchone()
+            if not head:raise ValueError('Справочник Ozon не найден')
+            if action=='release':
+                conn.execute('DELETE FROM ozon_ref_chunks WHERE id=?',(token,))
+                conn.execute('DELETE FROM ozon_ref_upload WHERE id=?',(token,))
+                _OZON_REFERENCE_CACHE.pop(token,None)
+                return {'released':True}
+            if action=='chunk':
+                part=body.get('part');data=body.get('data')
+                if head[1] or type(part) is not int or part<0 or not isinstance(data,str) or not data or len(data)>300000:raise ValueError('Неверная часть справочника Ozon')
+                count=len(data.encode('utf-16-le'))//2
+                conn.execute('INSERT OR REPLACE INTO ozon_ref_chunks VALUES(?,?,?,?)',(token,part,data,count))
+                return {'saved':count}
+            if action!='commit':raise ValueError('Неизвестная операция справочника Ozon')
+            parts=conn.execute('SELECT part,n FROM ozon_ref_chunks WHERE id=? ORDER BY part',(token,)).fetchall()
+            if [p[0] for p in parts]!=list(range(len(parts))) or sum(p[1] for p in parts)!=head[0]:raise ValueError('Неполный справочник Ozon')
+            reference=json.loads(''.join(r[0] for r in conn.execute('SELECT data FROM ozon_ref_chunks WHERE id=? ORDER BY part',(token,))))
+            if not isinstance(reference,dict) or not isinstance(reference.get('pairs'),list) or not isinstance(reference.get('category_rows'),list) or not isinstance(reference.get('identity'),dict) or not isinstance(reference['identity'].get('rows'),list):raise ValueError('Неверный справочник Ozon/идентичностей')
+            conn.execute('UPDATE ozon_ref_upload SET sealed=1 WHERE id=?',(token,))
+        _OZON_REFERENCE_CACHE.clear()
+        _OZON_REFERENCE_CACHE[token]=(reference,None)
+        return {'reference_id':token}
+
+def enrich_ozon_preferred(conn,rows,reference=None,enabled=True,force=False,force_name=False,reference_id=None):
+    if reference_id is None:return _apply_ozon_preferred(conn,rows,reference,enabled,force,force_name)
+    from ozon_preferred import OzonPreferred
+    from ozon_identity import IdentityGuard
+    with _OZON_REFERENCE_LOCK:
+        head=conn.execute('SELECT sealed FROM ozon_ref_upload WHERE id=?',(reference_id,)).fetchone()
+        if not head or not head[0]:raise ValueError('Справочник Ozon не зафиксирован')
+        cached=_OZON_REFERENCE_CACHE.get(reference_id)
+        if cached is None:
+            graph=json.loads(''.join(r[0] for r in conn.execute('SELECT data FROM ozon_ref_chunks WHERE id=? ORDER BY part',(reference_id,))))
+            _OZON_REFERENCE_CACHE.clear();cached=(graph,None)
+        graph,prepared=cached
+        if prepared is None:prepared=(OzonPreferred(graph),IdentityGuard(graph['identity']['rows'],graph['identity']))
+        _OZON_REFERENCE_CACHE[reference_id]=(graph,prepared)
+        return _apply_ozon_preferred(conn,rows,graph,enabled,force,force_name,prepared=prepared,store_reference=False)
+
+def _apply_ozon_preferred(conn, rows, reference, enabled=True, force=False, force_name=False, prepared=None, store_reference=True):
     from ozon_preferred import OzonPreferred
     from ozon_identity import IdentityGuard
     if not isinstance(reference,dict) or not isinstance(reference.get('pairs'),list) or not isinstance(reference.get('category_rows'),list) or not isinstance(reference.get('identity'),dict):
         raise ValueError('Не передан полный исходный справочник Ozon/категорий/идентичностей')
-    model=OzonPreferred(reference)
     identity=reference['identity']
-    guard=IdentityGuard(identity.get('rows',rows),identity)
+    model,guard=prepared if prepared is not None else (OzonPreferred(reference),IdentityGuard(identity.get('rows',rows),identity))
     results=[]
     # Compute and validate the complete batch before any database mutation.
     for p in rows:
@@ -4527,7 +4590,7 @@ def enrich_ozon_preferred(conn, rows, reference, enabled=True, force=False, forc
             'fields':{k:output[k] for k in keys if k in output},'removed':sorted(keys-set(output)), 'result':verdict})
     with conn:
         conn.execute('CREATE TABLE IF NOT EXISTS ozon_preferred_reference(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)')
-        conn.execute('INSERT OR REPLACE INTO ozon_preferred_reference VALUES(1,?)',(json.dumps(reference,ensure_ascii=False),))
+        if store_reference:conn.execute('INSERT OR REPLACE INTO ozon_preferred_reference VALUES(1,?)',(json.dumps(reference,ensure_ascii=False),))
         conn.execute('CREATE TABLE IF NOT EXISTS ozon_preferred_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
         for r in results:
             conn.execute('INSERT OR REPLACE INTO ozon_preferred_state VALUES(?,?,?)',(r['article'],r['brand'],json.dumps(r['fields'],ensure_ascii=False)))
@@ -4633,28 +4696,36 @@ def hvc_reference_upload(conn, body):
     import secrets
     conn.execute('CREATE TABLE IF NOT EXISTS hvc_ref_upload(id TEXT PRIMARY KEY,separator TEXT NOT NULL,total INTEGER NOT NULL,sealed INTEGER NOT NULL,created REAL NOT NULL)')
     conn.execute('CREATE TABLE IF NOT EXISTS hvc_ref_chunks(id TEXT NOT NULL,part INTEGER NOT NULL,field TEXT NOT NULL,data TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(id,part))')
+    conn.execute('CREATE TABLE IF NOT EXISTS hvc_ref_indexed(id TEXT PRIMARY KEY)')
+    conn.execute('CREATE TABLE IF NOT EXISTS hvc_ref_entries(id TEXT NOT NULL,part INTEGER NOT NULL,field TEXT NOT NULL,k TEXT NOT NULL,pos INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(id,part,k))')
+    conn.execute('CREATE INDEX IF NOT EXISTS hvc_ref_lookup ON hvc_ref_entries(id,field,k)')
     action=body.get('action')
     if action=='begin':
         total=body.get('total');sep=body.get('groupSeparator',' / ')
         if type(total) is not int or total<0 or not isinstance(sep,str) or len(sep)>100:raise ValueError('Неверный справочник HVC')
         token='chunked:'+secrets.token_hex(24)
         with conn:
+            conn.execute('DELETE FROM hvc_ref_entries WHERE id IN (SELECT id FROM hvc_ref_upload WHERE created<?)',(time.time()-86400,))
+            conn.execute('DELETE FROM hvc_ref_indexed WHERE id IN (SELECT id FROM hvc_ref_upload WHERE created<?)',(time.time()-86400,))
             conn.execute('DELETE FROM hvc_ref_chunks WHERE id IN (SELECT id FROM hvc_ref_upload WHERE created<?)',(time.time()-86400,))
             conn.execute('DELETE FROM hvc_ref_upload WHERE created<?',(time.time()-86400,))
             conn.execute('INSERT INTO hvc_ref_upload VALUES(?,?,?,0,?)',(token,sep,total,time.time()))
+            conn.execute('INSERT INTO hvc_ref_indexed VALUES(?)',(token,))
         return {'token':token}
     token=body.get('token')
     upload=conn.execute('SELECT total,sealed FROM hvc_ref_upload WHERE id=?',(token,)).fetchone()
     if not upload:raise ValueError('Загрузка справочника HVC не найдена')
     if action=='release':
         with conn:
+            conn.execute('DELETE FROM hvc_ref_entries WHERE id=?',(token,))
+            conn.execute('DELETE FROM hvc_ref_indexed WHERE id=?',(token,))
             conn.execute('DELETE FROM hvc_ref_chunks WHERE id=?',(token,))
             conn.execute('DELETE FROM hvc_ref_upload WHERE id=?',(token,))
         return {'released':True}
     if action=='chunk':
         part=body.get('part');field=body.get('field');items=body.get('items')
         if upload[1]:raise ValueError('Справочник HVC уже зафиксирован')
-        if type(part) is not int or part<0 or field not in _HVC_REFERENCE_FIELDS or not isinstance(items,list) or not 0<len(items)<=2000:raise ValueError('Неверная часть справочника HVC')
+        if type(part) is not int or part<0 or field not in _HVC_REFERENCE_FIELDS or not isinstance(items,list) or not 0<len(items)<=8000:raise ValueError('Неверная часть справочника HVC')
         if field in ('unsafeKeys','unsafeOe'):
             if any(not isinstance(v,str) for v in items):raise ValueError('Неверные ключи HVC')
         else:
@@ -4665,7 +4736,14 @@ def hvc_reference_upload(conn, body):
             conn.execute('UPDATE hvc_ref_upload SET sealed=sealed WHERE id=?',(token,))
             current=conn.execute('SELECT sealed FROM hvc_ref_upload WHERE id=?',(token,)).fetchone()
             if not current or current[0]:raise ValueError('Справочник HVC уже закрыт')
-            conn.execute('INSERT OR REPLACE INTO hvc_ref_chunks VALUES(?,?,?,?,?)',(token,part,field,encoded,len(items)))
+            indexed=conn.execute('SELECT 1 FROM hvc_ref_indexed WHERE id=?',(token,)).fetchone()
+            if indexed:
+                conn.execute('DELETE FROM hvc_ref_entries WHERE id=? AND part=?',(token,part))
+                scalar=field in ('unsafeKeys','unsafeOe')
+                conn.executemany('INSERT OR REPLACE INTO hvc_ref_entries VALUES(?,?,?,?,?,?)',
+                    ((token,part,field,item if scalar else item[0],pos,json.dumps(True if scalar else item[1],ensure_ascii=False,allow_nan=False)) for pos,item in enumerate(items)))
+            # Indexed snapshots keep data once; old snapshots retain their JSON.
+            conn.execute('INSERT OR REPLACE INTO hvc_ref_chunks VALUES(?,?,?,?,?)',(token,part,field,'[]' if indexed else encoded,len(items)))
         return {'saved':len(items)}
     if action!='commit':raise ValueError('Неизвестная операция справочника HVC')
     with conn:
@@ -4675,14 +4753,40 @@ def hvc_reference_upload(conn, body):
         conn.execute('UPDATE hvc_ref_upload SET sealed=1 WHERE id=?',(token,))
     return {'reference_id':token}
 
-def _read_hvc_chunked_reference(conn, reference_id):
+def _read_hvc_chunked_reference(conn, reference_id, rows=None):
     try:head=conn.execute('SELECT separator,sealed FROM hvc_ref_upload WHERE id=?',(reference_id,)).fetchone()
     except sqlite3.OperationalError:head=None
     if not head or not head[1]:raise ValueError('Справочник HVC не загружен полностью')
     result={k:[] for k in _HVC_REFERENCE_FIELDS};result['groupSeparator']=head[0]
-    # Cursor iteration avoids reading/decoding a second full JSON graph at once.
-    for field,data in conn.execute('SELECT field,data FROM hvc_ref_chunks WHERE id=? ORDER BY part',(reference_id,)):
-        result[field].extend(json.loads(data))
+    try:indexed=conn.execute('SELECT 1 FROM hvc_ref_indexed WHERE id=?',(reference_id,)).fetchone()
+    except sqlite3.OperationalError:indexed=None
+    if indexed and rows is not None:
+        def fetch(field,keys):
+            keys=list(keys);values={}
+            for offset in range(0,len(keys),400):
+                batch=keys[offset:offset+400]
+                sql='SELECT k,data FROM hvc_ref_entries INDEXED BY hvc_ref_lookup WHERE id=? AND field=? AND k IN ('+','.join('?' for _ in batch)+') ORDER BY part,pos'
+                for key,data in conn.execute(sql,(reference_id,field,*batch)):values[key]=json.loads(data)
+            return values
+        norm=hvc_enrich_rows.__globals__['norm']
+        keys={norm(p.get('article'))+'|'+norm(p.get('brand')) for p in rows}
+        by_art=fetch('byArt',keys)
+        oes={oe for codes in by_art.values() for oe in codes}
+        for p in rows:
+            raw=str(p.get('oe_norm') or '').strip()
+            oes.add(raw);oes.update(re.split(r'[/;,|\s\x01]+',raw))
+        by_oe=fetch('byOe',oes)
+        holders=keys|{key for group in by_oe.values() for key in group}
+        result.update(parts=fetch('parts',holders),oe=fetch('oe',oes),byArt=by_art,byOe=by_oe,
+            unsafeKeys=list(fetch('unsafeKeys',holders)),unsafeOe=list(fetch('unsafeOe',oes)))
+        return result
+    if indexed:
+        for field,key,data in conn.execute('SELECT field,k,data FROM hvc_ref_entries WHERE id=? ORDER BY part,pos',(reference_id,)):
+            result[field].append(key if field in ('unsafeKeys','unsafeOe') else [key,json.loads(data)])
+    else:
+        # Backward-compatible read for uploads started before the index existed.
+        for field,data in conn.execute('SELECT field,data FROM hvc_ref_chunks WHERE id=? ORDER BY part',(reference_id,)):
+            result[field].extend(json.loads(data))
     return result
 
 @_atomic_enrichment
@@ -4695,7 +4799,7 @@ def enrich_hvc_input_rows(conn, rows, reference=None, mode='auto', cat_mode='art
         reference_id=hashlib.sha256(encoded.encode()).hexdigest()
         conn.execute('INSERT OR IGNORE INTO hvc_input_reference VALUES(?,?)',(reference_id,encoded))
     if isinstance(reference_id,str) and reference_id.startswith('chunked:'):
-        graph=_read_hvc_chunked_reference(conn,reference_id)
+        graph=_read_hvc_chunked_reference(conn,reference_id,rows)
     else:
         saved=conn.execute('SELECT data FROM hvc_input_reference WHERE id=?',(reference_id,)).fetchone()
         if not saved:raise ValueError('Нет справочника HVC')
@@ -6093,8 +6197,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'ok':True, **quarantine_dimension_rows(conn,body.get('rows') or [],body.get('limits') or [],body.get('oe_mode','auto'))})
             if self.path == '/catalog/apply-policies':
                 return self._send(200, {'ok':True, **apply_product_policies(conn,body.get('rows') or [],body.get('rules') or [])})
+            if self.path == '/catalog/ozon-reference':
+                return self._send(200,{'ok':True,**ozon_reference_upload(conn,body)})
             if self.path == '/catalog/enrich-ozon-preferred':
-                return self._send(200, {'ok':True, **enrich_ozon_preferred(conn,body.get('rows') or [],body.get('reference'),body.get('enabled') is not False,body.get('force') is True,body.get('force_name') is True)})
+                return self._send(200, {'ok':True, **enrich_ozon_preferred(conn,body.get('rows') or [],body.get('reference'),body.get('enabled') is not False,body.get('force') is True,body.get('force_name') is True,reference_id=body.get('reference_id'))})
             if self.path == '/catalog/classify-ozon':
                 return self._send(200, {'ok':True, **classify_ozon_rows(conn,body.get('rows') or [],body.get('reference'),body.get('operation','classify'),body.get('force') is True)})
             if self.path == '/catalog/enrich-rules':

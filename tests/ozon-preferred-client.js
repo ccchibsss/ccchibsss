@@ -1,7 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
 const a=h.indexOf('  async enrichOzonPreferred(rows, options={}) {'),b=h.indexOf('  async enrichRules(',a);
 const ctx={};vm.createContext(ctx);vm.runInContext('globalThis.P={'+h.slice(a,b)+'};',ctx);
-ctx.S={settings:{}};const P=ctx.P;P.processingAvailable=async()=>{};P.ozonProcessingReference=()=>({});
+ctx.S={settings:{}};const P=ctx.P;P.processingAvailable=async()=>{};P.ozonProcessingReference=()=>({});P.acquireOzonReference=async()=> 'ozon:test';P.releaseOzonReference=async()=>{};
 (async()=>{
  const rows=[{article:'A',brand:'B',ozon_type:'old',_ozonNameStatus:'stale'},{article:'C',brand:'D',ozon_type:'old'}];
  const before=JSON.stringify(rows);
