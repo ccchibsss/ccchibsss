@@ -8385,7 +8385,18 @@ html { -webkit-text-size-adjust: 100%; }
   <!-- ТАББАР РАЗДЕЛА ЭКСПОРТА: OZON И ОБЩИЙ ЭКСПОРТ -->
   <div class="tabbar" id="exportViewTabs" style="margin-bottom:14px;gap:6px;flex-wrap:wrap">
     <button type="button" class="on" data-etab="ozon" style="font-weight:700;color:#2fd6a3"><i class="fa-solid fa-cloud-arrow-down"></i> ⭐ Рабочая выгрузка OZON</button>
+    <button type="button" data-etab="data">Загруженные и обогащённые данные</button>
     <button type="button" data-etab="general"><i class="fa-solid fa-file-excel"></i> Общий экспорт каталога XLSX/CSV и снапшоты</button>
+  </div>
+
+  <div id="exportPanelData" style="display:none">
+    <div class="card"><div class="pad">
+      <h3>Загруженные и обогащённые данные — без экономики</h3>
+      <p class="hint">Весь текущий каталог, включая скрытые строки, все стандартные поля с сохранёнными значениями и пользовательские колонки. Без формул, расчётных показателей, повторного обогащения и подстановки стандартных габаритов. Цена и себестоимость из прайса сохраняются как исходные данные. Размеры выгружаются в см, вес — в кг.</p>
+      <label class="f" for="dataExportFormat">Формат</label>
+      <select id="dataExportFormat"><option value="xlsx">Excel XLSX — только значения</option><option value="csv">CSV UTF-8 — только значения</option></select>
+      <button type="button" class="btn pri" id="dataExportRun">Скачать все данные без расчётов</button>
+    </div></div>
   </div>
 
   <!-- ==================== ВСПЛАВАЮЩАЯ ПАНЕЛЬ 1: ЭКСПОРТ ПО ШАБЛОНУ OZON ==================== -->
@@ -35048,13 +35059,15 @@ const OzonExport = {
         const tab = btn.dataset.etab;
         const pOz = $('#exportPanelOzon');
         const pGen = $('#exportPanelGeneral');
+        const pData = $('#exportPanelData');
+        if(pData)pData.style.display=tab==='data'?'block':'none';
         if (tab === 'ozon') {
           if (pOz) pOz.style.display = 'block';
           if (pGen) pGen.style.display = 'none';
           OzonExport.renderInView();
         } else {
           if (pOz) pOz.style.display = 'none';
-          if (pGen) pGen.style.display = 'block';
+          if (pGen) pGen.style.display = tab==='general'?'block':'none';
         }
       };
     });
@@ -40868,6 +40881,55 @@ function exportCellUnavailable(p, field, group) {
 function genericEconExportUnavailable(p) {
   return !p || !!(p.dimensionAnomalyBlocked || p.noBuyInconsistent || p.modelReviewRequired || p.missingTariffBlocked);
 }
+// A separate values-only path: never calls exportCatalog(), row src callbacks,
+// ensureEconomics(), Ozon typing, marketplace policies or export eligibility.
+const DataOnlyExport = {
+  specs() {
+    const custom=new Map((S.custom||[]).map(c=>[c.key,{key:c.key,name:c.name||c.key,custom:true}]));
+    for(const p of S.rows)for(const key of Object.keys(p.custom||{}))if(!custom.has(key))custom.set(key,{key,name:key,custom:true});
+    return STD.map(c=>({key:c.k,name:c.n})).concat([...custom.values()]);
+  },
+  value(p,c) {
+    const v=c.custom?(p.custom||{})[c.key]:p[c.key];
+    return v==null?'':typeof v==='object'?JSON.stringify(v):v;
+  },
+  async run() {
+    const button=$('#dataExportRun');if(button.disabled)return;button.disabled=true;
+    try{await withProgress('Экспорт данных без расчётов','все строки и сохранённые значения',async()=>{
+      const format=$('#dataExportFormat').value==='csv'?'csv':'xlsx',specs=this.specs();let blob;
+      if(PyEngine.processingMode()==='sql'){
+        await PyEngine.processingAvailable();
+        if(await persistNow()===false)throw new Error('Каталог не сохранён в SQLite; экспорт остановлен');
+        const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),600000);
+        try{
+          const r=await fetch(PyEngine.base()+'/export/data-only.'+format,{method:'POST',signal:ctl.signal,
+            headers:{'Content-Type':'application/json','X-UC-Token':PyEngine.token()},body:JSON.stringify({columns:specs})});
+          if(!r.ok){const error=await r.json().catch(()=>({}));throw new Error(error.error||'HTTP '+r.status);}
+          blob=await r.blob();
+        }finally{clearTimeout(timer);}
+      }else{
+        const rows=S.rows;if(!rows.length)throw new Error('Каталог пуст');
+        const present=new Set();for(const p of rows)for(const c of specs)if((c.custom?(p.custom||{})[c.key]:p[c.key])!==undefined)present.add(c);
+        const cols=specs.filter(c=>c.custom||present.has(c));
+        const headers=cols.map(c=>c.name+(c.custom?' [пользовательская: '+c.key+']':''));
+        if(format==='csv'){
+          const quote=v=>'"'+safeCsvText(v).replace(/"/g,'""')+'"';
+          const chunks=['\ufeff',headers.map(quote).join(';')+'\r\n'];
+          for(let i=0;i<rows.length;i+=1000)chunks.push(rows.slice(i,i+1000).map(p=>cols.map(c=>quote(this.value(p,c))).join(';')).join('\r\n')+'\r\n');
+          blob=new Blob(chunks,{type:'text/csv;charset=utf-8'});
+        }else{
+          if(cols.length>16384||rows.length>1048575)throw new Error('Превышен лимит XLSX; выберите CSV');
+          const ws=XLSX.utils.aoa_to_sheet([headers,...rows.map(p=>cols.map(c=>this.value(p,c)))]);
+          const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Данные');
+          blob=new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+        }
+      }
+      const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='UC_данные_без_расчётов.'+format;
+      document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);
+    });}catch(e){if(!e?._ucShown)Toast.err('Экспорт данных',storageErrorText(e));}finally{button.disabled=false;}
+  }
+};
+
 const Exp = {
   pick: null,
   mps: null,
@@ -46859,6 +46921,7 @@ function bindAll() {
   on('#btnExportOzonTop', 'onclick', () => OzonExport.open());
   on('#btnTopOzon', 'onclick', () => OzonExport.open());
     on('#btnDemoImport', 'onclick', () => Import.demo());
+  on('#dataExportRun', 'onclick', () => DataOnlyExport.run());
   on('#btnExportOpen', 'onclick', () => Exp.open());
   // === КОНЕЦ КРИТИЧЕСКОГО БЛОКА ===
 

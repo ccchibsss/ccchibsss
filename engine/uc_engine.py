@@ -5652,6 +5652,38 @@ def _xlsx_workbook(sheets, column_meta=None, protect=False):
     return out.getvalue()
 
 
+def export_data_only(conn,columns,fmt):
+    """Read the canonical app catalog, never normalized products/eco_results."""
+    if fmt not in ('csv','xlsx') or not isinstance(columns,list) or not columns:raise ValueError('Неверный формат или колонки')
+    if any(not isinstance(c,dict) or not isinstance(c.get('key'),str) or not isinstance(c.get('name'),str) for c in columns):raise ValueError('Неверные колонки')
+    # A read transaction pins head and chunks across concurrent catalog saves.
+    with conn:
+        conn.execute('BEGIN')
+        head=conn.execute('SELECT revision FROM app_catalog_head WHERE id=1').fetchone()
+        if not head:raise ValueError('Каталог SQLite пуст')
+        rows=[]
+        for (raw,) in conn.execute('SELECT data FROM app_catalog_chunks WHERE revision=? ORDER BY part',(head[0],)):
+            chunk=json.loads(raw)
+            rows.extend(decode_special(chunk['rows'],chunk.get('special_values',[])))
+    if not rows:raise ValueError('Каталог пуст')
+    def source(p,c):return (p.get('custom') or {}).get(c['key']) if c.get('custom') else p.get(c['key'])
+    cols=[c for c in columns if c.get('custom') or any(source(p,c) is not None for p in rows)]
+    headers=[c['name']+(' [пользовательская: '+c['key']+']' if c.get('custom') else '') for c in cols]
+    def cell(v):
+        if v is None:return ''
+        if isinstance(v,bool):return 'true' if v else 'false'
+        if isinstance(v,(dict,list)):return json.dumps(v,ensure_ascii=False,separators=(',',':'))
+        if isinstance(v,float) and not math.isfinite(v):return str(v)
+        return v
+    values=([cell(source(p,c)) for c in cols] for p in rows)
+    if fmt=='xlsx':
+        if len(cols)>16384 or len(rows)>1048575:raise ValueError('Превышен лимит XLSX; выберите CSV')
+        return _xlsx_from_rows(headers,values,'Данные')
+    out=io.StringIO(newline='');writer=csv.writer(out,delimiter=';',lineterminator='\r\n',quoting=csv.QUOTE_ALL)
+    writer.writerow([safe_csv_text(h) for h in headers])
+    for row in values:writer.writerow([safe_csv_text(v) for v in row])
+    return ('\ufeff'+out.getvalue()).encode('utf-8')
+
 def export_catalog_xlsx_bytes(conn, keys=None, columns=None, sheets=None, column_meta=None, protect=False):
     cols=columns if columns is not None else EXPORT_COLS
     rows=export_catalog_records(conn,keys)
@@ -6272,6 +6304,10 @@ class Handler(BaseHTTPRequestHandler):
                     discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys,
                     chz_codes=body.get('chz_codes')),
                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
+            if self.path in ('/export/data-only.csv','/export/data-only.xlsx'):
+                fmt='xlsx' if self.path.endswith('.xlsx') else 'csv'
+                return self._send_bytes(200,export_data_only(conn,body.get('columns'),fmt),
+                    'text/csv; charset=utf-8' if fmt=='csv' else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','UC_data_only.'+fmt)
             if self.path.startswith('/export/catalog'):
                 # Filter before generating row-relative formulas; filtering a
                 # prepared snapshot afterwards would leave references shifted.
