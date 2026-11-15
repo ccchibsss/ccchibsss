@@ -26,6 +26,26 @@ const P=ctx.P;let mode='sql',calls=0;P.processingMode=()=>mode;
  ctx.HVC={ozonRevision:1};const referenceChanged={article:'H'};
  P.enrichOzonPreferred=async rows=>{rows[0].ozon_type='Wrong';ctx.HVC.ozonRevision++;};
  await assert.rejects(()=>P.prepareOzonTyping([referenceChanged]));assert(!referenceChanged.ozon_type);
+ // Export uses the same cache-insensitive product comparison as import.
+ const cached={article:'CACHE',custom:{a:1,b:2},_t:{old:true},mp:{profit:1}};
+ P.enrichOzonPreferred=async rows=>{
+   assert(!('_t' in rows[0]));assert(!('mp' in rows[0]));
+   rows[0].ozon_type='Cached';cached._t={new:true};cached._bw=2;cached.mp={profit:3};
+   cached.custom={b:2,a:1};
+ };
+ await P.prepareOzonTyping([cached]);assert.equal(cached.ozon_type,'Cached');assert.equal(cached._bw,2);
+ // A failed draft operation must never mutate nested live source data.
+ const isolated={article:'ISOLATED',custom:{vehicle:['original']},_sources:{category:{name:'original'}}};
+ P.enrichOzonPreferred=async rows=>{
+   rows[0].custom.vehicle.push('draft');rows[0]._sources.category.name='draft';throw Error('offline');
+ };
+ await assert.rejects(()=>P.prepareOzonTyping([isolated]),/offline/);
+ assert.deepEqual(isolated.custom,{vehicle:['original']});assert.equal(isolated._sources.category.name,'original');
+ // A real nested edit during a request is still a conflict, not overwritten.
+ const edited={article:'EDITED',custom:{vehicle:['original']}};
+ P.enrichOzonPreferred=async rows=>{rows[0].ozon_type='Wrong';edited.custom.vehicle.push('manual')};
+ await assert.rejects(()=>P.prepareOzonTyping([edited]));assert(!edited.ozon_type);
+ assert.deepEqual(edited.custom.vehicle,['original','manual']);
  mode='browser';P.enrichOzonPreferred=async()=>{throw Error('must not call server')};await P.prepareOzonTyping([{article:'X'}]);
  // Execute the actual cloud mapper and verify that SQL mode defers kind lifecycle.
  let deferred;

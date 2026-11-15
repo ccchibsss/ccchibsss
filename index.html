@@ -27642,8 +27642,12 @@ const PyEngine = {
     if(!pending.length)return;
     const catalogRows=S.rows,version=S.catalogVersion||0,treeVersion=OzonReference.version(),categoryRevision=CategoryTnved.revision;
     const hvcRevision=typeof HVC==='undefined'?0:HVC.ozonRevision||0;
-    const fingerprint=p=>JSON.stringify(Object.fromEntries(Object.keys(p).filter(k=>!k.startsWith('_calc')).sort().map(k=>[k,p[k]])));
-    const enabled=S.settings?.autoCategoryByName!==false,before=pending.map(fingerprint),drafts=pending.map(p=>({...p}));
+    // Keep export drafts isolated all the way down: a spread leaves nested
+    // category evidence/custom attributes shared with the live catalog.
+    const transient=new Set(['_t','_bw','mp','_stdDimsCalc']);
+    const fingerprint=p=>JSON.stringify(Object.fromEntries(Object.keys(p).filter(k=>!k.startsWith('_calc')&&!transient.has(k)).map(k=>[k,p[k]])),
+      (k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(key=>[key,v[key]])):v);
+    const enabled=S.settings?.autoCategoryByName!==false,before=pending.map(fingerprint),drafts=before.map(text=>JSON.parse(text));
     await this.enrichOzonPreferred(drafts);
     if(S.rows!==catalogRows||(typeof HVC==='undefined'?0:HVC.ozonRevision||0)!==hvcRevision||this.processingMode()!=='sql'||(S.settings?.autoCategoryByName!==false)!==enabled||(S.catalogVersion||0)!==version||OzonReference.version()!==treeVersion||CategoryTnved.revision!==categoryRevision||pending.some((p,i)=>fingerprint(p)!==before[i]))throw new Error('Данные изменились во время подготовки Ozon; повторите выгрузку');
     drafts.forEach((p,i)=>{for(const k of Object.keys(pending[i]))if((k.startsWith('ozon_')||k.startsWith('_ozonName'))&&!(k in p))delete pending[i][k];for(const [k,v] of Object.entries(p))if(k.startsWith('ozon_')||k.startsWith('_ozonName'))pending[i][k]=v;});
