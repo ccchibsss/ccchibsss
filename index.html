@@ -13841,7 +13841,7 @@ async function withProgress(op, msg, fn) {
       throw e;
     }
     console.error('[UC]', op, e);
-    Toast.push('err', 'Ошибка · ' + op, String(e && e.message ? e.message : e).slice(0, 220));
+    Toast.push('err', 'Ошибка · ' + op, storageErrorText(e).slice(0, 400));
     /* v12.2: помечаем ошибку как уже показанную — иначе её же продублирует
        глобальный обработчик unhandledrejection («Необработанная ошибка»). */
     try { if (e && typeof e === 'object') e._ucShown = true; } catch (e2) { }
@@ -13854,7 +13854,7 @@ async function withProgress(op, msg, fn) {
 window.addEventListener('unhandledrejection', ev => {
   /* v12.2: не дублируем тост, если ошибку уже показал withProgress */
   if (ev.reason && ev.reason._ucShown) return;
-  Toast.push('err', 'Необработанная ошибка', String(ev.reason && ev.reason.message || ev.reason || '').slice(0, 200));
+  Toast.push('err', 'Необработанная ошибка', storageErrorText(ev.reason).slice(0, 400));
 });
 window.addEventListener('error', ev => { if (ev.message) Toast.push('warn', 'Ошибка страницы', ev.message.slice(0, 160)); });
 
@@ -22718,19 +22718,55 @@ function persistNow(changedList) {
   _persistQueue = call.catch(() => {}).finally(() => { _persistPending--; });
   return call;
 }
+/* Errors may be Dexie BulkError, DOM events, or structured API responses.
+   Never coerce a nested error object to "[object Object]". Do not dump row data. */
+function storageErrorText(error) {
+  const seen=new Set();
+  const read=(value,depth)=>{
+    if(value==null||depth>7)return '';
+    if(typeof value==='string')return value==='[object Object]'?'':value;
+    if(typeof value!=='object')return String(value);
+    if(seen.has(value))return '';seen.add(value);
+    const get=k=>{try{return value[k];}catch(e){return undefined;}};
+    const pieces=[];
+    const add=text=>{if(text&&!pieces.includes(text))pieces.push(text);};
+    const name=get('name');if(typeof name==='string'&&name!=='Error'&&name!=='Object')add(name);
+    for(const key of ['message','error','detail','reason','inner','cause','originalError'])add(read(get(key),depth+1));
+    for(const key of ['target','currentTarget']){
+      const target=get(key);try{if(target&&target!==value)add(read(target.error,depth+1));}catch(e){}
+    }
+    for(const key of ['failures','failuresByPos','errors']){
+      const failures=get(key);
+      if(failures&&typeof failures==='object'){
+        let entries=[];try{entries=Object.entries(failures).slice(0,3);}catch(e){}
+        for(const [pos,failure] of entries){const text=read(failure,depth+1);if(text)add('['+pos+'] '+text);}
+      }
+    }
+    if(!pieces.length){
+      const code=get('code');if(typeof code==='number'||typeof code==='string')add('Код '+code);
+      const type=get('type');if(typeof type==='string')add('Событие '+type);
+    }
+    if(!pieces.length){
+      let keys=[];try{keys=Object.keys(value).slice(0,10);}catch(e){}
+      add('Объект ошибки без сообщения'+(keys.length?' (поля: '+keys.join(', ')+')':''));
+    }
+    return pieces.join(': ').slice(0,1600);
+  };
+  return read(error,0)||'Неизвестная ошибка хранилища';
+}
 async function persistImportOrThrow(label) {
   if (S._bootReady !== true || S._bootError) {
-    throw new Error(label + ': ' + (S._bootError || 'хранилище ещё не готово. Дождитесь завершения запуска приложения и повторите.'));
+    throw new Error(label + ': ' + storageErrorText(S._bootError || 'хранилище ещё не готово. Дождитесь завершения запуска приложения и повторите.'));
   }
   try {
     if (await persistNow()) return true;
   } catch (e) {
-    const reason=String(e && (e.message || e.name) || e);
+    const reason=storageErrorText(e);
     S._cacheWriteError=reason;
     throw new Error(label + ': ' + reason + '. Данные остаются в памяти; не закрывайте вкладку, сделайте экспорт.');
   }
-  const reason=S._cacheWriteError || (S.settings && S.settings.lastPersistError) ||
-    (S._volatileStorage ? 'IndexedDB недоступен: приложение работает только в памяти' : 'хранилище не подтвердило запись');
+  const reason=storageErrorText(S._cacheWriteError || (S.settings && S.settings.lastPersistError) ||
+    (S._volatileStorage ? 'IndexedDB недоступен: приложение работает только в памяти' : 'хранилище не подтвердило запись'));
   throw new Error(label + ': ' + reason + '. Данные остаются в памяти; не закрывайте вкладку, сделайте экспорт.');
 }
 async function storageFreeInfo() {
@@ -22802,6 +22838,7 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false) {
   /* v12.9.6-mem: строки каталога материализуются ПО ЧАНКАМ. Полный второй массив
      копий (S.rows.map) на 126k SKU — это +150…250 МБ пика и падение вкладки
      «Out of memory» именно при повторном сохранении после импорта. */
+  let writePhase='подготовка строк';
   try {
     const rowCount = S.rows.length;
     let nextProductId = 1;
@@ -22835,6 +22872,7 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false) {
        её на десятках тысяч записей. Порционная запись держит память в норме и
        повторяет только повреждённую порцию. */
     const _bigWrite = rowCount > (num(CONST.CHUNKED_WRITE_ROWS) || 20000);
+    writePhase='запись товаров и метаданных ('+StorageCtl.mode()+')';
     if (StorageCtl.mode() === 'economy') {
       const _writeArgs = { rowCount, chunk: CH, changedList, withId, slimChunk, fullWrite: _fullWrite };
       if (_fullWrite && _bigWrite) {
@@ -22948,7 +22986,8 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false) {
     _auxPersist();
   } catch (e) {
     console.error('[UC] persist error:', e && e.name, e && e.message, e && e.stack);
-    const text = String(e && (e.message || e.name) || e).slice(0, 200);
+    const text = storageErrorText(e);
+    S._lastPersistFailure={at:nowISO(),engine:'browser',phase:writePhase,message:text};
     S.settings.lastPersistError = text; S._cacheWriteError = text;
     const quota = StorageCtl.isQuotaError(e), conflict = e && e.name === 'CatalogConflictError';
     Toast.err(conflict ? 'Каталог изменился в другой вкладке' : quota ? 'Недостаточно места для кэша' : 'Кэш не сохранён',
@@ -26764,12 +26803,18 @@ const PyEngine = {
       // One explicit migration for installations that selected SQL before it
       // owned persistence. Keep the legacy browser copy intact as a backup.
       const legacyCount=await db.products.count();
-      if(!legacyCount)throw new Error('В SQLite нет сохранённого каталога. Откройте браузерный режим и перенесите каталог кнопкой режима.');
-      if(!await askConfirm('Перенести прежний каталог в SQLite?', 'Найден браузерный каталог: '+legacyCount+' строк. Перенести его в SQL-хранилище? Старая копия останется нетронутой.', 'Перенести'))throw new Error('Перенос каталога отменён. Для прежнего хранилища выберите браузерный режим.');
-      await loadAll(true);
-      S._sqlCatalogRevision=data.revision;
-      await this.saveSqlCatalog();
-      return;
+      if(legacyCount){
+        if(!await askConfirm('Перенести прежний каталог в SQLite?', 'Найден браузерный каталог: '+legacyCount+' строк. Перенести его в SQL-хранилище? Старая копия останется нетронутой.', 'Перенести'))throw new Error('Перенос каталога отменён. Для прежнего хранилища выберите браузерный режим.');
+        await loadAll(true);
+        S._sqlCatalogRevision=data.revision;
+        await this.saveSqlCatalog();
+        return;
+      }
+      // A new SQLite database with no browser catalog is a valid first run,
+      // not a failed boot. Hydrate the empty result below; the first price
+      // will create the durable revision. Never erase existing in-memory edits.
+      if(S.rows.length)throw new Error('В SQLite ещё нет каталога, но во вкладке есть строки. Сначала экспортируйте их или явно перенесите каталог кнопкой режима.');
+
     }
     const secret=S.settings.secret,manualToken=S.settings.manualToken;
     const allowed=['custom','settings','tariffs','cats','rules','excs','sups','orders','hist','imports','snaps','pnl','mprof','eprof'];
@@ -26868,7 +26913,7 @@ const PyEngine = {
         headers: { 'Content-Type': 'application/json', 'X-UC-Token': this.token(), ...((opts && opts.headers) || {}) }
       });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+      if (!r.ok || j.ok === false) throw new Error('HTTP '+r.status+' '+path+': '+storageErrorText(j.error || j));
       return j;
     } finally { clearTimeout(to); }
   },
@@ -28677,6 +28722,8 @@ const Import = {
     Import.normalize();
     if (S.pending.artCol === -1) { Toast.err('Не выбран артикул', 'В окне маппинга назначьте одну колонку как «Артикул» в списке «Стандартное поле»'); return; }
     return withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
+      // Do not mutate the catalog when boot has already made persistence impossible.
+      if(S._bootReady!==true||S._bootError)throw new Error('Импорт не начат: '+storageErrorText(S._bootError||'Хранилище ещё не готово. Дождитесь завершения запуска.'));
       const movedToCost = this.applyPriceIsCost();
       if (movedToCost) Prog.msg('«Цена» из файла записана в себестоимость (закупка поставщика): ' + movedToCost);
       const { map, headers, body } = S.pending;

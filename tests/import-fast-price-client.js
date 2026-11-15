@@ -3,6 +3,7 @@ const a=h.indexOf('        if(isPriceFile){',h.indexOf('const Import = {')),b=h.
 let saves=0;const ctx={S:{rows:[{article:'A'}]},isPriceFile:true,prog:()=>{},persistEconPending:()=>{},bumpVersion:()=>{},applyFilter:()=>{},Table:{paint:()=>{}},persistNow:async()=>{saves++;return true;}};
 ctx.S._bootReady=true;ctx.S.settings={};
 vm.createContext(ctx);
+vm.runInContext(h.slice(h.indexOf('function storageErrorText('),h.indexOf('async function persistImportOrThrow(')),ctx);
 vm.runInContext(h.slice(h.indexOf('async function persistImportOrThrow('),h.indexOf('async function storageFreeInfo(')),ctx);
 vm.runInContext('this.first=async()=>{'+h.slice(a,b)+'}};',ctx);
 (async()=>{
