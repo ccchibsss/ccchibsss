@@ -35,3 +35,7 @@ class OzonPreferredAPI(unittest.TestCase):
     def test_actual_sql_client_rejects_bad_batches(self):
         path=pathlib.Path(__file__).resolve().parents[2]/'tests/ozon-preferred-client.js'
         subprocess.check_call(['node',str(path)])
+
+    def test_client_background_settings_guard(self):
+        path=pathlib.Path(__file__).resolve().parents[2]/'tests/ozon-concurrent-settings-client.js'
+        subprocess.check_call(['node',str(path)])

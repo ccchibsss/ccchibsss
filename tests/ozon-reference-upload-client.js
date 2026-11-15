@@ -1,7 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const h=fs.readFileSync(__dirname+'/../index.html','utf8'),c={console,S:{settings:{},rows:[]}};
 vm.createContext(c);const a=h.indexOf('  async acquireOzonReference('),b=h.indexOf('  prepareOzonTyping(',a);
-vm.runInContext('this.P={'+h.slice(a,b)+'};',c);const P=c.P;P.processingAvailable=async()=>{};
+vm.runInContext('this.P={'+h.slice(a,b)+'};',c);const P=c.P;P.processingAvailable=async()=>{};P.processingMode=()=> 'sql';
 let begins=0,commits=0,releases=0,maxBytes=0,rowCalls=0,failRow=-1,failUpload=false,text='';
 P._fetch=async(path,opts)=>{
  maxBytes=Math.max(maxBytes,Buffer.byteLength(opts.body));const p=JSON.parse(opts.body);
