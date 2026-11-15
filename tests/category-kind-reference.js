@@ -8,7 +8,7 @@ vm.runInContext(html.match(/function ozonSourceMap\(p\) \{[\s\S]*?\n\}/)[0]+'\n'
 const clean=v=>v instanceof Set ? [...v] : v;
 // Cross-context Maps/Sets are identified by their tag rather than instanceof.
 const replacer=(k,v)=>Object.prototype.toString.call(v)==='[object Map]'?Object.fromEntries(v):Object.prototype.toString.call(v)==='[object Set]'?[...v]:v;
-context.T.revision='test-v1';context.K.version='csv-kind-name-v1|test-v1';context.N.hasExplicitCategorySource=p=>!!p._categoryExplicitSource;
+context.T.revision=input.revision||'test-v1';context.K.version='csv-kind-name-v1|'+context.T.revision;context.N.hasExplicitCategorySource=p=>!!p._categoryExplicitSource;
 vm.runInContext("OzonAuto._index=()=>({heads:new Set()});this.ctx=NameCategory.prepare();this.ctx.version='ctx';",context);
 const results=[];
 for(const p of input.products) {

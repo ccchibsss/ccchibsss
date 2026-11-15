@@ -2,16 +2,14 @@
 import copy
 import re
 import unicodedata
+from enrichment_formula import string as js_string
 
 TYPE_KEY = re.compile(r'^(?:вид[\s_-]+категор(?:ии|изации)|тип[\s_-]+категории|подкатегория|category[\s_-]*type|sub[\s_-]*category)$',re.I)
 CODE_KEY = re.compile(r'^(?:тн[\s_-]*вэд(?:[\s_-]*(?:код|коды))?(?:[\s_-]*еаэс)?|код[\s_-]*тн[\s_-]*(?:вэд|вд)(?:[\s_-]*еаэс)?|тнвд(?:[\s_-]*еаэс)?|tnved(?:[\s_-]*eaes)?|hs[\s_-]*code)$',re.I)
 CODE_KEYS = ['tnved','tnved_eaes','tnvedEaes','hs_code','hsCode','ТН ВЭД код ЕАЭС','ТН ВЭД коды ЕАЭС','ТН ВЭД','Код ТН ВЭД','ТНВД']
 
 def text(v):
-    if v is None: return ''
-    if v is True: return 'true'
-    if v is False: return 'false'
-    return str(v)
+    return '' if v is None else js_string(v)
 
 def norm(v): return re.sub(r'\s+',' ',unicodedata.normalize('NFKC',text(v)).strip().lower().replace('ё','е'))
 

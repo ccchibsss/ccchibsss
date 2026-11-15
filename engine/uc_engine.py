@@ -17,6 +17,7 @@ engine_data/secrets.json (на Windows рекомендуется DPAPI-обёр
 """
 import argparse, csv, email, imaplib, io, json, math, os, re, shutil, sqlite3, sys, time, zipfile
 from decimal import Decimal, ROUND_HALF_UP
+from functools import wraps
 from price_solver import stable_floor, js_round
 from hvc_enrichment import enrich_rows as hvc_enrich_rows
 from name_category import apply as apply_name_category, MARKERS as NAME_CATEGORY_MARKERS
@@ -24,6 +25,11 @@ from category_tnved import CategoryTnved
 from category_kind import CategoryKind
 from ozon_classifier import OzonClassifier
 from enrichment_rules import apply_rules as apply_enrichment_rules
+from enrichment_transport import encode_special, decode_special, equivalent
+from export_custom import custom_cell, export_number
+from export_formulas import prepare_options as prepare_formula_options, cached_formula, unavailable as formula_unavailable
+from js_regex import search as js_regex_search
+from enrichment_formula import string as formula_string, truth as formula_truth, JS_SPACE
 from mark_status import apply as apply_mark_status
 from email.header import decode_header
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1393,15 +1399,8 @@ def _dimension_candidate_allowed(product, dims, policy):
 def match_condition(row, field, op, value):
     v = row.get(field)
     if op == 'empty': return v is None or v == ''
-    def js_string(x):
-        if x is True: return 'true'
-        if x is False: return 'false'
-        if x is None: return ''
-        if isinstance(x,list): return ','.join(js_string(y) if not isinstance(y,dict) else '[object Object]' for y in x)
-        if isinstance(x,dict): return '[object Object]'
-        if isinstance(x,float) and math.isfinite(x) and x.is_integer(): return str(int(x))
-        return str(x)
-    t = js_string(value).lower().strip()
+    def js_string(x):return '' if x is None else formula_string(x)
+    t = js_string(value).lower().strip(JS_SPACE)
     if not t or v is None or v == '': return False
     text = js_string(v).lower()
     if op == 'contains': return t in text
@@ -1409,30 +1408,72 @@ def match_condition(row, field, op, value):
     if op == 'eq': return text == t
     if op == 'ne': return text != t
     if op == 'startsWith': return text.startswith(t)
-    if op == 'gt': return num(v) > num(t)
-    if op == 'lt': return num(v) < num(t)
+    if op == 'gt': return export_number(v) > export_number(t)
+    if op == 'lt': return export_number(v) < export_number(t)
     if op == 'regex':
-        try: return bool(re.search(t, str(v or ''), re.I))
-        except re.error: return False
+        return js_regex_search(t, js_string(v) if formula_truth(v) else '')
     return False
 
 
-def check_mark_status_rows(conn, rows, settings):
+def _atomic_enrichment(fn):
+    """Rollback a failed batch without committing/rolling back caller work."""
+    @wraps(fn)
+    def run(conn,*args,**kwargs):
+        conn.execute('SAVEPOINT enrichment_batch')
+        try:
+            result=fn(conn,*args,**kwargs)
+            conn.execute('RELEASE enrichment_batch')
+            return result
+        except Exception:
+            conn.execute('ROLLBACK TO enrichment_batch')
+            conn.execute('RELEASE enrichment_batch')
+            raise
+    return run
+
+
+@_atomic_enrichment
+def check_mark_status_rows(conn, rows, settings, special_values=None):
+    if special_values is not None:
+        decoded=decode_special({'rows':rows,'settings':settings},special_values)
+        rows,settings=decoded['rows'],decoded['settings']
     conn.execute('CREATE TABLE IF NOT EXISTS mark_status_settings(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
-    conn.execute('INSERT OR REPLACE INTO mark_status_settings VALUES(1,?)',(json.dumps(settings,ensure_ascii=False),))
+    clean_settings,setting_types=encode_special(settings)
+    conn.execute('INSERT OR REPLACE INTO mark_status_settings VALUES(1,?)',(json.dumps(clean_settings,ensure_ascii=False,allow_nan=False),))
+    conn.execute('CREATE TABLE IF NOT EXISTS mark_status_setting_types(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)')
+    conn.execute('INSERT OR REPLACE INTO mark_status_setting_types VALUES(1,?)',(json.dumps(setting_types,ensure_ascii=False,allow_nan=False),))
     result=[]; unknown=[]
     for source in rows:
         output,outcome=apply_mark_status(source,settings)
         fields={k:output[k] for k in ('markCompliant','visible','visibleReason','policyAction','policyReason') if k in output}
-        if outcome['kind']=='unknown' and str(source.get('markStatus') or '').strip() not in unknown:
-            unknown.append(str(source.get('markStatus') or '').strip())
+        status=source.get('markStatus')
+        unknown_status=formula_string(status if formula_truth(status) else '').strip(JS_SPACE)
+        if outcome['kind']=='unknown' and unknown_status not in unknown:
+            unknown.append(unknown_status)
         if output.get('visible') is False:
             conn.execute("UPDATE products SET visible='0',visible_reason=? WHERE article=? AND brand=?",
                          (output.get('visibleReason',''),source.get('article',''),source.get('brand','')))
-        result.append({'article':source.get('article'),'brand':source.get('brand',''),'fields':fields,'result':outcome})
-    conn.commit()
+        fields,types=encode_special(fields)
+        result.append({'article':source.get('article'),'brand':source.get('brand',''),'fields':fields,'special_values':types,'result':outcome})
     return {'rows':result,'unknown':unknown}
 
+def _persist_product_context(conn, article, brand, updates, has_context):
+    """Keep the product snapshot consumed by later HVC passes up to date."""
+    if not has_context:return
+    saved=conn.execute('SELECT dimension_context FROM products WHERE article=? AND brand=?',(article,brand)).fetchone()
+    if saved is None:return
+    try:context=json.loads(saved[0] or '{}')
+    except (ValueError,TypeError):context={}
+    if not isinstance(context,dict):context={}
+    context.update(updates)
+    conn.execute('UPDATE products SET dimension_context=? WHERE article=? AND brand=?',
+                 (json.dumps(context,ensure_ascii=False),article,brand))
+
+
+def _persist_enrichment_sources(conn,article,brand,fields,has_context):
+    if '_sources' in fields:_persist_product_context(conn,article,brand,{'sources':fields['_sources']},has_context)
+
+
+@_atomic_enrichment
 def enrich_category_tnved(conn, rows, reference, enabled=True):
     conn.execute('CREATE TABLE IF NOT EXISTS category_tnved_reference(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
     if reference is not None:
@@ -1440,6 +1481,7 @@ def enrich_category_tnved(conn, rows, reference, enabled=True):
     saved=conn.execute('SELECT data FROM category_tnved_reference WHERE id=1').fetchone()
     if not saved: raise ValueError('Нет справочника категория/вид/ТН ВЭД')
     ref=json.loads(saved[0]); model=CategoryTnved(ref.get('rows',[]),ref.get('revision',''),ref.get('source','Категории12131.csv'))
+    has_context=any(c[1]=='dimension_context' for c in conn.execute('PRAGMA table_info(products)'))
     result=[]
     timestamp=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
     for source in rows:
@@ -1447,9 +1489,61 @@ def enrich_category_tnved(conn, rows, reference, enabled=True):
         fields={k:output[k] for k in ('tnved','_categoryTnvedAuto','_sources') if k in output}
         removed=[k for k in ('tnved','_categoryTnvedAuto') if k not in output]
         conn.execute('UPDATE products SET tnved=? WHERE article=? AND brand=?',(output.get('tnved',''),source.get('article',''),source.get('brand','')))
+        _persist_enrichment_sources(conn,source.get('article',''),source.get('brand',''),fields,has_context)
         result.append({'article':source.get('article'),'brand':source.get('brand',''),'fields':fields,'removed':removed,'result':status})
-    conn.commit()
     return {'rows':result}
+
+def dimension_oe_operation(conn, snapshot, operation='find', token=None, selected=None):
+    import hashlib,secrets,datetime
+    from dimension_oe_search import OeSearch
+    from dimension_oe_apply import apply_choices
+    from dimension_quarantine import compact
+    from enrichment_formula import truth
+    if operation not in ('find','apply'):raise ValueError('Неверная операция OE')
+    rows=snapshot['rows'];automatic=snapshot.get('automatic') is True
+    found=snapshot.get('found') or []
+    indices=[f['index'] for f in found]
+    if any(isinstance(i,bool) or not isinstance(i,int) or i<0 or i>=len(rows) for i in indices) or len(indices)!=len(set(indices)):
+        raise ValueError('Неверные индексы карантина OE')
+    marked=[f['index'] for f in found if f.get('selected')]
+    valid=lambda i:rows[i].get('dimensionAnomalyBlocked') and not rows[i].get('excluded')
+    all_targets=[i for i in indices if valid(i)]
+    pending=sum(truth(rows[i].get('_dimensionOeReview')) for i in all_targets) if automatic else 0
+    targets=[i for i in all_targets if not truth(rows[i].get('_dimensionOeReview'))] if automatic else [i for i in (marked if marked else indices) if valid(i)]
+    fingerprint=hashlib.sha256(json.dumps(snapshot,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    conn.execute('CREATE TABLE IF NOT EXISTS dimension_oe_preview(token TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,created REAL NOT NULL)')
+    if operation=='apply':
+        old=conn.execute('SELECT fingerprint,created FROM dimension_oe_preview WHERE token=?',(token,)).fetchone()
+        if old is None or old[0]!=fingerprint or time.time()-old[1]>3600:raise ValueError('Предложения устарели; повторите поиск по OE')
+    search=OeSearch(rows,snapshot.get('reference') or {},snapshot.get('limits') or [],snapshot.get('mode','auto'),snapshot.get('labels'))
+    proposals=search.find(targets,automatic)
+    summary={'checked':len(proposals),'noChoice':sum(x['choice'] is None for x in proposals),'pending':pending,
+        'noOe':sum(x['choice'] is None and x['status'].startswith('Нет OE') for x in proposals),
+        'conflicts':sum(x['choice'] is None and x['status'].startswith(('Конфликт','Противореч','Слишком много')) for x in proposals),
+        'smaller':sum(x['choice'] is not None and x['status'].startswith('Выбраны меньшие') for x in proposals),'errors':0,'changed':0}
+    summary['other']=summary['noChoice']-summary['noOe']-summary['conflicts']
+    if operation=='find':
+        token=secrets.token_urlsafe(24)
+        with conn:
+            conn.execute('DELETE FROM dimension_oe_preview WHERE created<?',(time.time()-3600,))
+            conn.execute('INSERT INTO dimension_oe_preview VALUES(?,?,?)',(token,fingerprint,time.time()))
+        return {'token':token,'preview':proposals,'summary':summary}
+    chosen=selected or []
+    updates=apply_choices(search,proposals,chosen,automatic,datetime.datetime.now(datetime.timezone.utc).isoformat())
+    keys=('weight','length','width','height','volume','_volumeExplicit','_sources','_dimensionOeReview','dimensionAnomalyAck')
+    results=[{'targetIndex':u['targetIndex'],'article':u['row'].get('article',''),'brand':u['row'].get('brand',''),
+              'fields':{k:u['row'][k] for k in keys if k in u['row']},'removed':[k for k in keys if k not in u['row']],'log':u['log']} for u in updates]
+    results=json.loads(compact(results))
+    with conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS dimension_oe_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
+        for r in results:
+            conn.execute('INSERT OR REPLACE INTO dimension_oe_state VALUES(?,?,?)',(r['article'],r['brand'],json.dumps(r['fields'],ensure_ascii=False)))
+            f=r['fields']
+            conn.execute('UPDATE products SET weight=?,length=?,width=?,height=?,volume=? WHERE article=? AND brand=?',
+                tuple(f.get(k,0) for k in ('weight','length','width','height','volume'))+(r['article'],r['brand']))
+        conn.execute('DELETE FROM dimension_oe_preview WHERE token=?',(token,))
+    summary['changed']=len(results)
+    return {'rows':results,'summary':summary}
 
 def fix_dimension_units(conn, items, limits, mode='auto', approved=False, labels=None, timestamp=None):
     import datetime
@@ -1496,6 +1590,7 @@ def quarantine_dimension_rows(conn, rows, limits, mode='auto', timestamp=None):
     from dimension_quarantine import DimensionQuarantine, FLAGS, compact
     model=DimensionQuarantine(limits,mode)
     timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    has_context=any(c[1]=='dimension_context' for c in conn.execute('PRAGMA table_info(products)'))
     results=[]
     keys=FLAGS+('_volumeExplicit',)
     for p in rows:
@@ -1507,6 +1602,9 @@ def quarantine_dimension_rows(conn, rows, limits, mode='auto', timestamp=None):
         conn.execute('INSERT OR REPLACE INTO dimension_quarantine_settings VALUES(1,?)',(json.dumps({'limits':limits,'oe_mode':mode},ensure_ascii=False),))
         conn.execute('CREATE TABLE IF NOT EXISTS dimension_quarantine_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
         for r in results:
+            updates={'blocked':bool(r['fields'].get('dimensionAnomalyBlocked'))}
+            if '_volumeExplicit' in r['fields']:updates['explicitVolume']=r['fields']['_volumeExplicit']
+            _persist_product_context(conn,r['article'],r['brand'],updates,has_context)
             conn.execute('INSERT OR REPLACE INTO dimension_quarantine_state VALUES(?,?,?)',(r['article'],r['brand'],json.dumps(r['fields'],ensure_ascii=False)))
     return {'rows':results}
 
@@ -1515,7 +1613,7 @@ def apply_product_policies(conn, rows, rules):
     keys=('excluded','deletePending','policyAction','policyReason','visible','visibleReason')
     results=[]
     for p in rows:
-        output=apply_policies(p,rules,match_condition,num)
+        output=apply_policies(p,rules,match_condition,export_number)
         results.append({'article':p.get('article',''),'brand':p.get('brand',''),
                         'fields':{k:output[k] for k in keys if k in output}})
     with conn:
@@ -1576,29 +1674,25 @@ def classify_ozon_rows(conn, rows, reference, operation='classify', force=False)
     conn.commit()
     return {'rows':result}
 
-def enrich_rule_rows(conn, rows, rules, context):
+@_atomic_enrichment
+def enrich_rule_rows(conn, rows, rules, context, special_values=None):
+    if special_values is not None:rows=decode_special(rows,special_values)
     conn.execute('CREATE TABLE IF NOT EXISTS enrichment_rule_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
     result=[]
     for row in rows:
         output=apply_enrichment_rules(row,rules,context,match_condition)
         keys=set(row)|set(output)
-        changed={k for k in keys if row.get(k)!=output.get(k) or (k in row)!=(k in output)}
+        changed={k for k in keys if not equivalent(row.get(k),output.get(k)) or (k in row)!=(k in output)}
         fields={k:output[k] for k in changed if k in output}
-        # JSON has no Infinity/NaN; match browser JSON.stringify transport.
-        def clean(v):
-            if isinstance(v,float) and not math.isfinite(v): return None
-            if isinstance(v,dict): return {k:clean(x) for k,x in v.items()}
-            if isinstance(v,list): return [clean(x) for x in v]
-            return v
         nonfinite={k:('nan' if math.isnan(v) else 'positive' if v>0 else 'negative') for k,v in fields.items() if isinstance(v,float) and not math.isfinite(v)}
-        fields=clean(fields);removed=[k for k in changed if k not in output]
+        fields,special_values_out=encode_special(fields);removed=[k for k in changed if k not in output]
         article,brand=row.get('article',''),row.get('brand','')
         conn.execute('INSERT OR REPLACE INTO enrichment_rule_state VALUES(?,?,?)',
-            (article,brand,json.dumps({'fields':fields,'removed':removed,'nonfinite':nonfinite},ensure_ascii=False)))
-        result.append({'article':article,'brand':brand,'fields':fields,'removed':removed,'nonfinite':nonfinite})
-    conn.commit()
+            (article,brand,json.dumps({'fields':fields,'removed':removed,'nonfinite':nonfinite,'special_values':special_values_out},ensure_ascii=False)))
+        result.append({'article':article,'brand':brand,'fields':fields,'removed':removed,'nonfinite':nonfinite,'special_values':special_values_out})
     return {'rows':result}
 
+@_atomic_enrichment
 def enrich_category_kinds(conn, rows, reference, context, enabled=True, operation='apply', category_confirmed=False):
     if operation not in ('apply','confirm','hydrate','explicit_import'): raise ValueError('Неизвестная операция вида')
     if not isinstance(reference,dict): raise ValueError('Не передан справочник видов')
@@ -1608,6 +1702,7 @@ def enrich_category_kinds(conn, rows, reference, context, enabled=True, operatio
     conn.execute('CREATE TABLE IF NOT EXISTS category_kind_reference(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL)')
     conn.execute('CREATE TABLE IF NOT EXISTS category_kind_state(article TEXT,brand TEXT,data TEXT NOT NULL,PRIMARY KEY(article,brand))')
     conn.execute('INSERT OR REPLACE INTO category_kind_reference VALUES(1,?)',(json.dumps(reference,ensure_ascii=False),))
+    has_context=any(c[1]=='dimension_context' for c in conn.execute('PRAGMA table_info(products)'))
     result=[]; at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
     for row in rows:
         changed=None
@@ -1625,10 +1720,11 @@ def enrich_category_kinds(conn, rows, reference, context, enabled=True, operatio
         conn.execute('UPDATE products SET category=?,category_type=? WHERE article=? AND brand=?',
             (output.get('category',''),output.get('category_type',''),article,brand))
         conn.execute('INSERT OR REPLACE INTO category_kind_state VALUES(?,?,?)',(article,brand,json.dumps(fields,ensure_ascii=False)))
+        _persist_enrichment_sources(conn,article,brand,fields,has_context)
         result.append({'article':article,'brand':brand,'fields':fields,'removed':removed,'changed':changed})
-    conn.commit()
     return {'rows':result}
 
+@_atomic_enrichment
 def enrich_name_categories(conn, rows, context, enabled=True):
     context = dict(context or {})
     context['categories'] = sorted(context.get('categories', []), key=lambda c: num(c.get('priority')))
@@ -1642,9 +1738,9 @@ def enrich_name_categories(conn, rows, context, enabled=True):
         conn.execute('UPDATE products SET category=? WHERE article=? AND brand=?',
                      (output.get('category',''), row.get('article',''), row.get('brand','')))
         result.append({'article':row.get('article'), 'brand':row.get('brand',''), 'fields':fields, 'removed':removed})
-    conn.commit()
     return {'rows':result}
 
+@_atomic_enrichment
 def enrich_hvc(conn, reference=None, mode='auto', cat_mode='artbrand', columns=None, policy=None):
     """HVC snapshot route; keeps ordered graph and dimension evidence intact."""
     conn.execute('CREATE TABLE IF NOT EXISTS hvc_reference(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)')
@@ -1687,7 +1783,6 @@ def enrich_hvc(conn, reference=None, mode='auto', cat_mode='artbrand', columns=N
         output.append({**{k: after.get(k) for k in fields}, 'article': after['article'], 'brand': after['brand'],
             '_sources': after.get('_sources') or {}, '_dimensionOeReview': after.get('_dimensionOeReview'),
             'groupSize': after.get('groupSize')})
-    conn.commit()
     return {'rows': output, 'processed': len(rows)}
 
 def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto', enrich_cols=None, dimension_policy=None, oe_registry=None):
@@ -2158,24 +2253,69 @@ def export_catalog_csv_bytes(conn, enc='utf-8', keys=None, columns=None, delimit
     return encode_csv(buf.getvalue(),enc)
 
 
-def store_export_cells(conn, cells, columns):
+def store_export_cells(conn, cells, columns, column_meta=None, formula_options=None, sheets=None):
     """Persist a request-scoped presentation snapshot. No arbitrary Python/SQL execution."""
     if not isinstance(columns,list) or any(not isinstance(c,list) or len(c)!=2 for c in columns):
         raise ValueError('Неверное описание экспортных колонок')
-    conn.execute('CREATE TEMP TABLE IF NOT EXISTS export_cells(article TEXT,brand TEXT,data TEXT,PRIMARY KEY(article,brand))')
-    conn.execute('DELETE FROM export_cells')
+    if any(not isinstance(k,str) or not k or not isinstance(h,str) or k in ('__export_order','__export_formulas') for k,h in columns) or len({k for k,_ in columns})!=len(columns):
+        raise ValueError('Неверные или повторяющиеся ключи экспортных колонок')
+    if not isinstance(cells,list):raise ValueError('Неверные строки экспорта')
+    if column_meta is not None and (not isinstance(column_meta,list) or len(column_meta)!=len(columns) or any(not isinstance(m,dict) for m in column_meta)):
+        raise ValueError('Неверные метаданные экспортных колонок')
+    refs=prepare_formula_options(column_meta,sheets,formula_options) if formula_options is not None else {}
+    if formula_options is not None:
+        identities=[(str(c.get('article','')),str(c.get('brand',''))) for c in cells if isinstance(c,dict)]
+        if len(set(identities))!=len(identities):raise ValueError('Повторяющиеся SKU в экспорте с формулами')
+        known={(str(r[0]),str(r[1])) for r in conn.execute('SELECT article,brand FROM products')}
+        if any(key not in known for key in identities):raise ValueError('SKU экспорта отсутствует в SQLite; повторите синхронизацию')
+    skipped=set()
+    staged=[]
     for order,cell in enumerate(cells):
+        if not isinstance(cell,dict):raise ValueError('Неверная строка экспорта')
         values=cell.get('values')
         if not isinstance(values,list) or len(values)!=len(columns): raise ValueError('Неполная строка экспорта')
+        values=list(values)
+        if column_meta is not None:
+            raw=cell.get('custom',{});dates=cell.get('custom_dates',[]);nonfinite=cell.get('custom_nonfinite',[]);special=cell.get('custom_special',{})
+            if not isinstance(raw,dict) or not isinstance(dates,list) or not isinstance(nonfinite,list) or any(not isinstance(k,str) for k in dates+nonfinite):raise ValueError('Неверные исходные пользовательские поля')
+            if not isinstance(special,dict) or any(not isinstance(k,str) or v not in ('NaN','Infinity','-Infinity') for k,v in special.items()):raise ValueError('Неверные специальные числовые значения')
+            for i,meta in enumerate(column_meta):
+                key=meta.get('custom')
+                if key is not None:
+                    if not isinstance(key,str) or not key or meta.get('key')!='c_'+key:raise ValueError('Неверная пользовательская колонка')
+                    values[i]=custom_cell(raw,key,meta.get('custom_format') is True,dates,nonfinite,meta.get('custom_text') is True,special)
         if any(isinstance(v,(list,dict)) for v in values): raise ValueError('Ячейка должна содержать скалярное значение')
-        formulas=cell.get('formulas') or [None]*len(columns)
+        formulas=cell.get('formulas')
+        if formulas is None:formulas=[None]*len(columns)
         if not isinstance(formulas,list) or len(formulas)!=len(columns): raise ValueError('Неполный набор формул')
         if any(f is not None and not isinstance(f,str) for f in formulas): raise ValueError('Формула должна быть строкой')
+        if formula_options is not None:
+            formulas=[None]*len(columns)
+            context=cell.get('formula_context',{})
+            if not isinstance(context,dict) or (context.get('mp') is not None and not isinstance(context['mp'],dict)) or any(not isinstance(v,dict) for v in (context.get('mp') or {}).values()):raise ValueError('Неверный контекст доступности формул')
+            if formula_options['enabled']:
+                for i,meta in enumerate(column_meta):
+                    key=meta['key']
+                    if not meta.get('server_formula') or formula_unavailable(context,key,meta.get('group') or 'calc'):continue
+                    f=cached_formula(key,order+2,refs,values[i],dim_unit=formula_options.get('dim_unit','cm'))
+                    formulas[i]=f
+                    if f is None:skipped.add(key)
         data={c[0]:v for c,v in zip(columns,values)}
         data['__export_formulas']={c[0]:f for c,f in zip(columns,formulas) if f}
         data['__export_order']=order
-        conn.execute('INSERT OR REPLACE INTO export_cells VALUES(?,?,?)',
-            (str(cell.get('article','')),str(cell.get('brand','')),json.dumps(data,ensure_ascii=False,allow_nan=False)))
+        staged.append((str(cell.get('article','')),str(cell.get('brand','')),json.dumps(data,ensure_ascii=False,allow_nan=False)))
+    # Validate/convert every row before replacing any request-scoped state.
+    conn.execute('SAVEPOINT prepare_export_cells')
+    try:
+        conn.execute('CREATE TEMP TABLE IF NOT EXISTS export_cells(article TEXT,brand TEXT,data TEXT,PRIMARY KEY(article,brand))')
+        conn.execute('DELETE FROM export_cells')
+        conn.executemany('INSERT OR REPLACE INTO export_cells VALUES(?,?,?)',staged)
+        conn.execute('RELEASE prepare_export_cells')
+    except Exception:
+        conn.execute('ROLLBACK TO prepare_export_cells')
+        conn.execute('RELEASE prepare_export_cells')
+        raise
+    return {'skipped_formulas':sorted(skipped)}
 
 
 def export_catalog_records(conn,keys=None):
@@ -2699,7 +2839,7 @@ class Handler(BaseHTTPRequestHandler):
         if self._host_ok(): return False
         self._send(403, {'ok': False, 'error': 'Host не разрешён'})
         return True
-    def _send_bytes(self, code, body, content_type, filename):
+    def _send_bytes(self, code, body, content_type, filename, export_warnings=None):
         # gzip только для текстовых типов: CSV/JSON/XML сжимаются кратно;
         # XLSX уже zip — повторное сжатие бесполезно.
         extra = {}
@@ -2710,6 +2850,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-UC-Token')
         self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        if export_warnings:
+            self.send_header('Access-Control-Expose-Headers','X-UC-Export-Warnings')
+            self.send_header('X-UC-Export-Warnings',json.dumps(export_warnings,separators=(',',':')))
         for k, v in extra.items(): self.send_header(k, v)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers(); self.wfile.write(body)
@@ -2929,10 +3072,12 @@ class Handler(BaseHTTPRequestHandler):
                 n = import_donors(conn, body.get('rows') or [], body.get('source', 'app'))
                 return self._send(200, {'ok': True, 'imported': n})
             if self.path == '/catalog/check-mark-status':
-                return self._send(200, {'ok':True, **check_mark_status_rows(conn, body.get('rows') or [], body.get('settings') or {})})
+                return self._send(200, {'ok':True, **check_mark_status_rows(conn, body.get('rows') or [], body.get('settings') or {}, body.get('special_values'))})
             if self.path == '/catalog/enrich-category-tnved':
                 return self._send(200, {'ok':True, **enrich_category_tnved(conn, body.get('rows') or [],
                     body.get('reference'), body.get('enabled') is not False)})
+            if self.path == '/catalog/dimension-oe':
+                return self._send(200, {'ok':True, **dimension_oe_operation(conn,body.get('snapshot') or {},body.get('operation','find'),body.get('token'),body.get('selected'))})
             if self.path == '/catalog/fix-dimension-units':
                 return self._send(200, {'ok':True, **fix_dimension_units(conn,body.get('items') or [],body.get('limits') or [],body.get('oe_mode','auto'),body.get('approved') is True,body.get('labels') or {})})
             if self.path == '/catalog/confirm-dimensions':
@@ -2947,7 +3092,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {'ok':True, **classify_ozon_rows(conn,body.get('rows') or [],body.get('reference'),body.get('operation','classify'),body.get('force') is True)})
             if self.path == '/catalog/enrich-rules':
                 return self._send(200, {'ok':True, **enrich_rule_rows(conn,body.get('rows') or [],
-                    body.get('rules') or [],body.get('context') or {})})
+                    body.get('rules') or [],body.get('context') or {},body.get('special_values'))})
             if self.path == '/catalog/enrich-category-kind':
                 return self._send(200, {'ok':True, **enrich_category_kinds(conn,body.get('rows') or [],
                     body.get('reference'),body.get('context') or {},body.get('enabled') is not False,
@@ -2993,8 +3138,14 @@ class Handler(BaseHTTPRequestHandler):
                     chz_codes=body.get('chz_codes')),
                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
             if self.path.startswith('/export/catalog'):
+                # Filter before generating row-relative formulas; filtering a
+                # prepared snapshot afterwards would leave references shifted.
+                if body.get('formula_options') is not None and body.get('articles') is not None:
+                    wanted={(str(a.get('article','')),str(a.get('brand',''))) for a in body['articles']}
+                    body['export_cells']=[c for c in body.get('export_cells',[]) if (str(c.get('article','')),str(c.get('brand',''))) in wanted]
+                export_warnings=None
                 if body.get('export_cells') is not None:
-                    store_export_cells(conn,body['export_cells'],body.get('columns'))
+                    export_warnings=store_export_cells(conn,body['export_cells'],body.get('columns'),body.get('column_meta'),body.get('formula_options'),body.get('sheets'))
                 else:
                     conn.execute('DROP TABLE IF EXISTS temp.export_cells')
                 keys = None
@@ -3002,7 +3153,7 @@ class Handler(BaseHTTPRequestHandler):
                     keys = [(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']]
                 if '.xlsx' in self.path:
                     return self._send_bytes(200, export_catalog_xlsx_bytes(conn, keys=keys, columns=body.get('columns'), sheets=body.get('sheets'), column_meta=body.get('column_meta'), protect=body.get('protect') is True),
-                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_catalog_engine.xlsx')
+                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_catalog_engine.xlsx',export_warnings)
                 return self._send_bytes(200, export_catalog_csv_bytes(conn, body.get('enc') or 'utf-8', keys=keys, columns=body.get('columns'), delimiter=body.get('delimiter',';')),
                     'text/csv; charset=utf-8', 'UC_catalog_engine.csv')
             if self.path == '/outbox':

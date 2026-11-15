@@ -1,6 +1,6 @@
 """Ordered product-policy actions, matching the browser pipeline."""
 import copy
-from category_tnved import text
+from enrichment_formula import string as text
 
 RULE_FIELDS = {'category': 'Категория', 'brand': 'Бренд', 'name': 'Название', 'article': 'Артикул', 'oe_numbers': 'OE-номера', 'price': 'Цена', 'cost': 'Себестоимость', 'weight': 'Вес', 'volume': 'Объём', 'stock': 'Остаток', 'minStock': 'Мин. остаток', 'sales': 'Продажи', 'noBuyPct': 'Прогноз невыкупа, %', 'markRequired': 'Требуется Честный знак', 'markStatus': 'Статус Честного знака', 'markCode': 'Код маркировки', 'visible': 'Видимость', 'src': 'Общий текст', 'category_src': 'Исходная категория'}
 RULE_OPS = {'contains': 'содержит', '!contains': 'не содержит', 'eq': 'равно', 'ne': 'не равно', 'gt': 'больше', 'lt': 'меньше', 'startsWith': 'начинается с', 'regex': 'регулярное выражение', 'empty': 'пусто'}

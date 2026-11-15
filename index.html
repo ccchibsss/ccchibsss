@@ -26658,7 +26658,7 @@ const PyEngine = {
     el.title = sql ? 'Серверный движок Python + SQLite. Нажмите для обработки браузером.' : 'Встроенная обработка браузером. Нажмите для SQL-движка.';
   },
   async toggleProcessingMode() {
-    if (S._pipeActive || (typeof _econEnsureJob !== 'undefined' && _econEnsureJob)) {
+    if (S._pipeActive || (typeof AnomalyOE!=='undefined' && AnomalyOE.busy) || (typeof _econEnsureJob !== 'undefined' && _econEnsureJob)) {
       Toast.warn('Дождитесь расчёта', 'Режим можно переключить после завершения текущей операции.'); return;
     }
     const next = this.processingMode() === 'sql' ? 'browser' : 'sql';
@@ -26666,6 +26666,7 @@ const PyEngine = {
       Toast.warn('SQL-движок недоступен', 'Запустите движок и проверьте токен. Режим остаётся браузерным.'); return;
     }
     lsSet('uc.processingMode', next);
+    if(typeof AnomalyOE!=='undefined')AnomalyOE.invalidate();
     S._econPending = true; persistEconPending();
     this.renderProcessingMode();
     Toast.info('Режим обработки изменён', next === 'sql' ? 'Расчёт и поддерживаемые операции — серверный движок Python + SQLite.' : 'Расчёт, импорт и экспорт — браузер.');
@@ -27179,7 +27180,7 @@ const PyEngine = {
       ' · изменилась цена: ' + fmt((d.price_changed || []).length) + (ch ? '. Например: ' + ch : '') +
       '. Снимки: ' + esc(from.created || '') + ' → ' + esc(to.created || '') + '.');
   },
-  async _download(path, body, filename, timeoutMs) {
+  async _download(path, body, filename, timeoutMs, validateSnapshot) {
     const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), timeoutMs || 600000);
     try {
       const r = await fetch(this.base() + path, { method: body ? 'POST' : 'GET', signal: ctl.signal,
@@ -27187,21 +27188,38 @@ const PyEngine = {
         body: body ? JSON.stringify(body) : undefined });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const blob = await r.blob();
+      if(validateSnapshot)validateSnapshot();
+      const warningHeader=r.headers?.get('X-UC-Export-Warnings');
+      if(warningHeader){
+        let warnings;try{warnings=JSON.parse(warningHeader);}catch(e){}
+        const skipped=warnings?.skipped_formulas;
+        if(Array.isArray(skipped) && skipped.length){
+          const names=skipped.map(k=>{const i=(body?.column_meta||[]).findIndex(c=>c.key===k);return body?.columns?.[i]?.[1] || k;});
+          Toast.warn('Часть формул заменена значениями','Не выбраны необходимые колонки: '+names.join(', '));
+        }
+      }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = filename;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     } finally { clearTimeout(to); }
   },
-  async exportCatalogFormat(fmt, articles) {
+  async exportCatalogFormat(format, articles) {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Экспорт на движке недоступен — используйте обычный экспорт приложения.'); return false; }
     await ensureEconomics();
     const selectedColumns=exportCatalog().filter(c=>Exp.pick && Exp.pick[c.k] && !exportColumnExcluded(c,Exp.activeMps()));
     if(!selectedColumns.length) throw new Error('Колонки не выбраны');
-    const isXlsx = fmt !== 'csv';
+    const isXlsx = format !== 'csv';
+    const catalogRows=S.rows,catalogRevision=S.catalogVersion||0,settings=JSON.stringify(S.settings),mode=this.processingMode();
+    const validateSnapshot=()=>{
+      if(S.rows!==catalogRows||(S.catalogVersion||0)!==catalogRevision||JSON.stringify(S.settings)!==settings||this.processingMode()!==mode)
+        throw new Error('Каталог, режим или настройки изменились во время экспорта. Повторите выгрузку.');
+    };
     await withProgress('Python: экспорт каталога', 'файл собирает движок из SQLite', async () => {
       await this._syncCatalog('app-export-fmt');
+      validateSnapshot();
       await this._fetch('/catalog/recalc', { method: 'POST', timeout: 600000, body: JSON.stringify({ settings: this._settingsSnapshot() }) });
+      validateSnapshot();
       const requested=articles ? new Set(articles.map(p=>JSON.stringify([p.article,p.brand || '']))) : null;
       const exportRows=S.rows.filter(p=>!requested || requested.has(JSON.stringify([p.article,p.brand || ''])));
       const useFormulas=isXlsx && (!$('#expFormulas') || $('#expFormulas').classList.contains('on'));
@@ -27212,41 +27230,20 @@ const PyEngine = {
       if(articleIndex>=0 && !inputCols.some(x=>x.c.k==='article')) inputCols.unshift({c:selectedColumns[articleIndex],i:articleIndex});
       const sheets=isXlsx ? [{name:'Юнит-экономика',indices:mainCols.map(x=>x.i)},
         {name:'Вводы и ставки',indices:inputCols.map(x=>x.i)}] : null;
-      const refs={};
-      if(isXlsx) {
-        mainCols.forEach((x,i)=>refs[x.c.k]=COL_LET(i));
-        inputCols.forEach((x,i)=>{if(x.c.k!=='article' || !mainCols.some(y=>y.c.k==='article'))
-          refs[x.c.k]="'Вводы и ставки'!"+COL_LET(i);});
-      } else selectedColumns.forEach((c,i)=>refs[c.k]=COL_LET(i));
-      refs.__ymAbsent=k=>YM_ONLY_EXPORT_FIELDS.has(k) && !Object.prototype.hasOwnProperty.call(refs,k);
-      const strictRefs=new Proxy(refs,{get(t,k){
-        if(typeof k==='symbol' || k==='then' || k==='toJSON') return undefined;
-        if(!Object.prototype.hasOwnProperty.call(t,k)) throw new Error('Отсутствует колонка '+String(k));
-        return t[k];}});
-      const skippedFormulas=new Set();
       // Shared presentation semantics: src/custom, unavailable values, text codes and numeric formats.
       const cells=exportRows.map((p,rowIndex)=>({article:p.article,brand:p.brand || '',
-        values:selectedColumns.map(c=>exportCatalogCellValue(c,p)),
-        formulas:selectedColumns.map(c=>{
-          if(!useFormulas || !c.xl || exportCellUnavailable(p,c.k,c.g)) return null;
-          try {
-            const raw=c.xl(rowIndex+2,strictRefs);
-            let f=raw ? Exp._sanitizeFormula(raw) : null;
-            if(raw && !f) skippedFormulas.add(c.n);
-            const value=exportCatalogCellValue(c,p);
-            if(f && typeof value==='number' && isFinite(value) && !/^IFERROR\(/i.test(f)) f=`IFERROR(${f},"")`;
-            return f;
-          }
-          catch(e) { skippedFormulas.add(c.n); return null; }
-        })}));
-      if(skippedFormulas.size) Toast.warn('Часть формул заменена значениями',
-        'Не выбраны необходимые колонки: '+[...skippedFormulas].join(', '));
+        custom:p.custom || {},
+        custom_dates:Object.keys(p.custom || {}).filter(k=>p.custom[k] instanceof Date),
+        custom_nonfinite:Object.keys(p.custom || {}).filter(k=>typeof p.custom[k]==='number' && !Number.isFinite(p.custom[k])),
+        custom_special:Object.fromEntries(Object.entries(p.custom || {}).filter(([k,v])=>typeof v==='number' && !Number.isFinite(v)).map(([k,v])=>[k,Number.isNaN(v)?'NaN':v<0?'-Infinity':'Infinity'])),
+        values:selectedColumns.map(c=>c.custom ? null : exportCatalogCellValue(c,p)),
+        formula_context:{...Object.fromEntries(['modelReviewRequired','noBuyInconsistent','priceInputsIncomplete','missingTariffBlocked'].filter(k=>p[k]!==undefined).map(k=>[k,p[k]])),mp:Object.fromEntries(Object.entries(p.mp || {}).map(([mp,result])=>[mp,Object.fromEntries(['inputUnavailable','returnRateInvalid','comparisonEligible'].filter(k=>result && result[k]!==undefined).map(k=>[k,result[k]]))]))}}));
       await this._download('/export/catalog' + (isXlsx ? '.xlsx' : '.csv'),
         { articles: articles || null, columns: selectedColumns.map((c,i) => ['__export_'+i,c.n]),
-          export_cells:cells, sheets,
-          column_meta:selectedColumns.map(c=>({key:c.k,width:c.w || 14,format:c.txt ? '@' : c.f || ''})),
+          export_cells:cells, sheets, formula_options:{enabled:useFormulas,dim_unit:currentDimUnit()},
+          column_meta:selectedColumns.map(c=>({key:c.k,group:c.g,server_formula:!!c.xl,custom:c.custom || null,custom_format:!!c.f,custom_text:!!c.txt,width:c.w || 14,format:c.txt ? '@' : c.f || ''})),
           protect:!$('#expProtect') || $('#expProtect').classList.contains('on'),
-          enc: $('#expEnc') ? $('#expEnc').value : 'utf-8', delimiter: $('#expDelim') ? $('#expDelim').value : ';' }, isXlsx ? 'UC_catalog_engine.xlsx' : 'UC_catalog_engine.csv');
+          enc: $('#expEnc') ? $('#expEnc').value : 'utf-8', delimiter: $('#expDelim') ? $('#expDelim').value : ';' }, isXlsx ? 'UC_catalog_engine.xlsx' : 'UC_catalog_engine.csv', undefined, validateSnapshot);
       Toast.ok('Каталог экспортирован на Python-движке (SQL)',
         'Файл собран движком из SQLite без сохранения в IndexedDB и без построения XLSX во вкладке. Колонки — выбранные поля, объём: ' +
         fmt(articles ? articles.length : S.rows.length) + ' SKU.');
@@ -27257,6 +27254,7 @@ const PyEngine = {
     if (!await this.health()) { Toast.warn('Python-движок не запущен', 'Выгрузка OZON на движке недоступна — используйте обычный экспорт OZON приложения.'); return; }
     const isXlsx = format === 'xlsx';
     await withProgress('Python: экспорт OZON', (isXlsx ? 'XLSX' : 'CSV') + ' шаблона собирает движок', async () => {
+      await this.prepareOzonTyping(S.rows);
       await this._syncCatalog('app-ozon-export');
       try { // пары «категория → тип» из загруженного дерева Ozon — для подстановки и проверки на движке
         if (typeof OzonReference !== 'undefined' && OzonReference.hasData()) {
@@ -27311,16 +27309,27 @@ const PyEngine = {
     const cfg=S.settings || {}, settings=Object.fromEntries(['markRequireCode','markInvalidStatuses','markValidStatuses','autoHideMark']
       .filter(k=>cfg[k]!==undefined).map(k=>[k,cfg[k]]));
     const keys=['article','brand','markStatus','markCode','markRequired','visible','visibleReason','policyAction','policyReason'];
+    const allowed=new Set(['markCompliant','visible','visibleReason','policyAction','policyReason']);
+    const fingerprint=()=>JSON.stringify(this.encodeRuleRows({rows,settings:S.settings}));
+    const before=fingerprint(),catalog=S.rows,mode=this.processingMode(),staged=[],unknown=[];
     for(let offset=0;offset<rows.length;offset+=1000) {
       const batch=rows.slice(offset,offset+1000);
+      const payload=this.encodeRuleRows({settings,rows:batch.map(p=>Object.fromEntries(keys.filter(k=>p[k]!==undefined).map(k=>[k,p[k]])))});
       const result=await this._fetch('/catalog/check-mark-status',{method:'POST',timeout:120000,
-        body:JSON.stringify({settings,rows:batch.map(p=>Object.fromEntries(keys.filter(k=>p[k]!==undefined).map(k=>[k,p[k]])))})});
-      if(!result.rows || result.rows.length!==batch.length) throw new Error('Неполный ответ проверки маркировки SQLite');
-      batch.forEach((p,i)=>{const r=result.rows[i];
-        if(p.article!==r.article || (p.brand || '')!==r.brand) throw new Error('Порядок строк маркировки изменился');
-        Object.assign(p,r.fields);});
-      for(const status of result.unknown || []) MarkStatus.unknown.add(status);
+        body:JSON.stringify({...payload.rows,special_values:payload.special_values})});
+      if(!Array.isArray(result.rows)||result.rows.length!==batch.length||!Array.isArray(result.unknown)||result.unknown.some(s=>typeof s!=='string'))throw new Error('Неполный ответ проверки маркировки SQLite');
+      for(let i=0;i<batch.length;i++){
+        const p=batch[i],r=result.rows[i];
+        if(!r||p.article!==r.article||(p.brand||'')!==r.brand||!r.fields||typeof r.fields!=='object'||Array.isArray(r.fields)||Object.keys(r.fields).some(k=>!allowed.has(k)))throw new Error('Неверный ответ маркировки SQLite');
+        const types=r.special_values||[];
+        if(!Array.isArray(types)||types.some(e=>!Array.isArray(e?.path)||!allowed.has(e.path[0])))throw new Error('Неверные типы маркировки SQLite');
+        staged.push({p,fields:this.decodeRuleFields(r.fields,types)});
+      }
+      unknown.push(...result.unknown);
     }
+    if(S.rows!==catalog||this.processingMode()!==mode||fingerprint()!==before)throw new Error('Данные изменились во время проверки маркировки');
+    for(const {p,fields} of staged)Object.assign(p,fields);
+    for(const status of unknown)MarkStatus.unknown.add(status);
   },
   async enrichCategoryTnved(rows) {
     await this.processingAvailable();
@@ -27363,6 +27372,41 @@ const PyEngine = {
       result.rows.forEach((r,i)=>{const p=batch[i];stats.total++;if(['manual','import'].includes(p.ozon_type_src))stats.manual++;else if(p.ozon_type_src==='keyword')stats.keyword++;else if(p.ozon_type_src==='auto'){stats.auto++;if(p.ozon_type_basis==='oe')stats.oe++;else if(p.ozon_type_basis==='applicability')stats.applicability++;}else{stats.none++;if(r.result && /conflict/i.test(r.result.reason||''))stats.conflict++;}});
     }
     return stats;
+  },
+  prepareOzonTyping(rows) {
+    // Preview and validation often start together. Serialize lazy typing so
+    // the second caller rechecks pending rows after the first one applies.
+    const job=(this._ozonTypingTail || Promise.resolve()).catch(()=>{}).then(()=>this._prepareOzonTyping(rows));
+    this._ozonTypingTail=job;
+    const clear=()=>{if(this._ozonTypingTail===job)this._ozonTypingTail=null;};
+    job.then(clear,clear);
+    return job;
+  },
+  async _prepareOzonTyping(rows) {
+    if(this.processingMode()!=='sql')return;
+    const pending=rows.filter(p=>!p.ozon_type&&!p.ozon_category&&!p._ozonNameStatus);
+    if(!pending.length)return;
+    const catalogRows=S.rows,version=S.catalogVersion||0,treeVersion=OzonReference.version(),categoryRevision=CategoryTnved.revision;
+    const hvcRevision=typeof HVC==='undefined'?0:HVC.ozonRevision||0;
+    const fingerprint=p=>JSON.stringify(Object.fromEntries(Object.keys(p).filter(k=>!k.startsWith('_calc')).sort().map(k=>[k,p[k]])));
+    const settings=JSON.stringify(S.settings),before=pending.map(fingerprint),drafts=pending.map(p=>({...p}));
+    await this.enrichOzonPreferred(drafts);
+    if(S.rows!==catalogRows||(typeof HVC==='undefined'?0:HVC.ozonRevision||0)!==hvcRevision||this.processingMode()!=='sql'||JSON.stringify(S.settings)!==settings||(S.catalogVersion||0)!==version||OzonReference.version()!==treeVersion||CategoryTnved.revision!==categoryRevision||pending.some((p,i)=>fingerprint(p)!==before[i]))throw new Error('Данные изменились во время подготовки Ozon; повторите выгрузку');
+    drafts.forEach((p,i)=>{for(const k of Object.keys(pending[i]))if((k.startsWith('ozon_')||k.startsWith('_ozonName'))&&!(k in p))delete pending[i][k];for(const [k,v] of Object.entries(p))if(k.startsWith('ozon_')||k.startsWith('_ozonName'))pending[i][k]=v;});
+  },
+  dimensionOeSnapshot(found, automatic) {
+    const fields=['article','brand','artikul','category','weight','net_weight','length','width','height','volume','_volumeExplicit',
+      'excluded','dimensionAnomalyBlocked','_sources','_dimensionImportIssues','_dimensionOeReview','_dimensionAutoEvidence',
+      '_dimensionAutoConflict','_dimensionAutoOeEvidence','oe_numbers','oe_list','oe_norm','oeSource'];
+    return {rows:S.rows.map(p=>Object.fromEntries(fields.filter(k=>p[k]!==undefined).map(k=>[k,p[k]]))),found,automatic,
+      reference:{parts:[...HVC.parts],byOe:[...HVC.byOe].map(([k,v])=>[k,[...v]]),oe:[...HVC.oe],cross:[...HVC.cross]},
+      limits:AnomalyDetector.limits,mode:oeMode(),labels:Object.fromEntries(STD.map(s=>[s.k,s.n])),
+      catalog_revision:S.catalogVersion||0,hvc_revision:HVC.ozonRevision||0};
+  },
+  async dimensionOeRequest(snapshot, operation='find', token, selected) {
+    await this.processingAvailable();
+    return this._fetch('/catalog/dimension-oe',{method:'POST',timeout:600000,
+      body:JSON.stringify({snapshot,operation,token,selected},(k,v)=>typeof v==='number'&&!Number.isFinite(v)?String(v):v)});
   },
   async fixDimensionUnits(entries, approved=false) {
     await this.processingAvailable();
@@ -27430,18 +27474,73 @@ const PyEngine = {
       result.rows.forEach((r,i)=>Object.assign(batch[i],r.fields));
     }
   },
+  encodeRuleRows(rows) {
+    const special_values=[];
+    const visit=(v,path,ancestors)=>{
+      if(path.length>128)throw new Error('Слишком глубокие данные правил обогащения');
+      if(v instanceof Date){
+        special_values.push({path,kind:'date',milliseconds:Number.isFinite(v.getTime())?v.getTime():null,text:String(v)});return;
+      }
+      if(typeof v==='number' && !Number.isFinite(v)){
+        special_values.push({path,kind:Number.isNaN(v)?'nan':v>0?'positive':'negative'});return;
+      }
+      if(!v || typeof v!=='object' || v instanceof Date)return;
+      if(ancestors.has(v))throw new Error('Циклические данные правил обогащения');
+      ancestors.add(v);
+      for(const [k,x] of Object.entries(v))visit(x,path.concat(Array.isArray(v)?Number(k):k),ancestors);
+      ancestors.delete(v);
+    };
+    visit(rows,[],new Set());
+    return {rows:JSON.parse(JSON.stringify(rows)),special_values};
+  },
+  decodeRuleFields(fields,entries) {
+    if(!fields || typeof fields!=='object' || Array.isArray(fields) || !Array.isArray(entries))throw new Error('Неверные поля правил обогащения');
+    const output=JSON.parse(JSON.stringify(fields)),seen=new Set();
+    for(const entry of entries){
+      const path=entry?.path,kind=entry?.kind;
+      if(!Array.isArray(path)||!path.length||path.length>128||!['nan','positive','negative','date'].includes(kind)||path.some(k=>!(typeof k==='string'||Number.isInteger(k))||['__proto__','constructor','prototype'].includes(k)))throw new Error('Неверный тип числа правил обогащения');
+      const identity=JSON.stringify(path);if(seen.has(identity))throw new Error('Повторяющийся тип числа правил обогащения');seen.add(identity);
+      let parent=output;
+      for(let i=0;i<path.length;i++){
+        const key=path[i];
+        if(!parent || typeof parent!=='object' || !Object.prototype.hasOwnProperty.call(parent,key) || (Array.isArray(parent)?!Number.isInteger(key)||key<0:typeof key!=='string'))throw new Error('Путь числа правил обогащения отсутствует');
+        if(i===path.length-1){
+          if(kind==='date'){
+            const ms=entry.milliseconds,text=entry.text;
+            if(typeof text!=='string'||text.length>256||(ms!==null&&(!Number.isInteger(ms)||Math.abs(ms)>8640000000000000)))throw new Error('Неверный Date правил обогащения');
+            const date=ms===null?new Date(NaN):new Date(ms);
+            if(date.toJSON()!==parent[key]||(ms===null&&text!=='Invalid Date'))throw new Error('Date не соответствует JSON');
+            parent[key]=date;
+          }else{if(parent[key]!==null)throw new Error('Тип числа заменяет не null');parent[key]=kind==='positive'?Infinity:kind==='negative'?-Infinity:NaN;}
+        }
+        else parent=parent[key];
+      }
+    }
+    return output;
+  },
   async enrichRules(rows,rules,context) {
     await this.processingAvailable();
+    const staged=[],fingerprint=p=>JSON.stringify(this.encodeRuleRows([p]));
+    const before=rows.map(fingerprint),catalogRows=S.rows,version=S.catalogVersion||0;
+    const config=JSON.stringify([rules,context?.version,S.settings]),mode=this.processingMode();
+    const allowed=new Set(rules.filter(r=>r.kind==='enrich'&&r.enabled&&typeof r.target_val==='string').map(r=>r.target_val));
+    for(const k of ['_categoryNameAutoValue','_categoryNameStatus','_categoryNameMethod','_categoryNameSource','_categoryNameBrand','_categoryNameRevision','_categoryNameChoices'])allowed.add(k);
+    const validKey=k=>typeof k==='string'&&!['__proto__','constructor','prototype'].includes(k.toLowerCase())&&allowed.has(k);
     for(let offset=0;offset<rows.length;offset+=1000) {
-      const batch=rows.slice(offset,offset+1000);
+      const batch=rows.slice(offset,offset+1000),payload=this.encodeRuleRows(batch);
       const result=await this._fetch('/catalog/enrich-rules',{method:'POST',timeout:120000,
-        body:JSON.stringify({rows:batch,rules,context:{version:context ? context.version : ''}})});
-      if(!result.rows || result.rows.length!==batch.length) throw new Error('Неполный ответ правил обогащения SQLite');
-      batch.forEach((p,i)=>{const r=result.rows[i];
-        if(!r || p.article!==r.article || (p.brand || '')!==r.brand) throw new Error('Порядок правил обогащения изменился');});
-      batch.forEach((p,i)=>{const r=result.rows[i];for(const k of r.removed || []) delete p[k];Object.assign(p,r.fields);
-        for(const [k,v] of Object.entries(r.nonfinite || {})) p[k]=v==='positive' ? Infinity : v==='negative' ? -Infinity : NaN;});
+        body:JSON.stringify({...payload,rules,context:{version:context ? context.version : ''}})});
+      if(!Array.isArray(result.rows)||result.rows.length!==batch.length)throw new Error('Неполный ответ правил обогащения SQLite');
+      for(let i=0;i<batch.length;i++){
+        const r=result.rows[i],p=batch[i];
+        if(!r||p.article!==r.article||(p.brand||'')!==r.brand||!r.fields||typeof r.fields!=='object'||Array.isArray(r.fields)||!Array.isArray(r.removed)||[...Object.keys(r.fields),...r.removed].some(k=>!validKey(k)))throw new Error('Неверный ответ правил обогащения SQLite');
+        const specials=r.special_values ?? Object.entries(r.nonfinite||{}).map(([k,kind])=>({path:[k],kind}));
+        if(!Array.isArray(specials)||specials.some(e=>!Array.isArray(e?.path)||!validKey(e.path[0])))throw new Error('Неверные типы чисел правил обогащения');
+        staged.push({p,fields:this.decodeRuleFields(r.fields,specials),removed:r.removed});
+      }
     }
+    if(this.processingMode()!==mode||JSON.stringify([rules,context?.version,S.settings])!==config||S.rows!==catalogRows||(S.catalogVersion||0)!==version||rows.some((p,i)=>fingerprint(p)!==before[i]))throw new Error('Данные изменились во время правил обогащения');
+    for(const {p,fields,removed} of staged){for(const k of removed)delete p[k];Object.assign(p,fields);}
   },
   async enrichCategoryKinds(context, enabled, rows, operation='apply', categoryConfirmed=false) {
     const changed=new Set();
@@ -33539,8 +33638,14 @@ const OzonExport = {
 
   /* Рендеринг встроенной панели на странице #v-export */
   renderInView() {
+    const request=this._renderInViewRequest=(this._renderInViewRequest||0)+1;
+    return this._renderInView(request).catch(e=>{Toast.err('Подготовка Ozon не выполнена',String(e.message||e));});
+  },
+  async _renderInView(request) {
     const scope = $('#ozViewScope')?.value || 'filter';
     const rows = this.getRows(scope);
+    await PyEngine.prepareOzonTyping(rows);
+    if(request!==this._renderInViewRequest)return;
     const countEl = $('#ozViewCountSku');
     if (countEl) countEl.innerHTML = `${fmt(rows.length)} SKU (из ${fmt(S.rows.length)} всего)`;
 
@@ -33763,7 +33868,7 @@ const OzonExport = {
     const partNumber = String(p.originalArticle || p.article || '').trim();
     /* v12: «Тип*» берётся из справочника OZON (7 категорий, 1718 типов),
        который проставляется автоматически при импорте и пересчёте каталога. */
-    if (!p.ozon_type && !p.ozon_category && !p._ozonNameStatus && typeof OzonAuto !== 'undefined') OzonAuto.applyPreferred(p);
+    if (PyEngine.processingMode()!=='sql' && !p.ozon_type && !p.ozon_category && !p._ozonNameStatus && typeof OzonAuto !== 'undefined') OzonAuto.applyPreferred(p);
     const pairDecision = OzonReference.exportPair(p);
     const itemType = pairDecision.type; /* только буквальная строка разрешённой пары, без legacy-полей */
     const modelName = p.group_articles || p.model || p.article || '';
@@ -33866,9 +33971,12 @@ const OzonExport = {
 
   /* v12.9.11 · Проверка массовой загрузки: считает сводку по обязательным полям шаблона,
      показывает её в панели и запоминает в this.lastValidation для отчёта. */
-  validateNow(show) {
+  async validateNow(show) {
+    const request=this._validationRequest=(this._validationRequest||0)+1;
     const scope = $('#ozViewScope')?.value || 'filter';
     const rows = this.getRows(scope);
+    await PyEngine.prepareOzonTyping(rows);
+    if(request!==this._validationRequest)return null;
     if (!rows.length) {
       const box = $('#ozValidateBox');
       if (box) box.innerHTML = '<span class="hint" style="color:var(--amber)">нет строк для проверки — ' + esc(this.emptyReason(catalogSelectionStats(scope))) + '</span>';
@@ -33903,8 +34011,8 @@ const OzonExport = {
     return res;
   },
   /* Отчёт проверки: по строке на SKU + колонки «Ошибка»/«Недочёты» */
-  validationReport() {
-    const res = this.lastValidation || this.validateNow(false);
+  async validationReport() {
+    const res = await this.validateNow(false);
     if (!res) return;
     const scope = $('#ozViewScope')?.value || 'filter';
     const opts = this.getViewOptions('csv_utf8');
@@ -33929,8 +34037,14 @@ const OzonExport = {
 
   /* Обновление сводки и предпросмотра */
   updatePreview() {
+    const request=this._updatePreviewRequest=(this._updatePreviewRequest||0)+1;
+    return this._updatePreview(request).catch(e=>{Toast.err('Подготовка Ozon не выполнена',String(e.message||e));});
+  },
+  async _updatePreview(request) {
     const scope = $('#ozScope')?.value || 'filter';
     const rows = this.getRows(scope);
+    await PyEngine.prepareOzonTyping(rows);
+    if(request!==this._updatePreviewRequest)return;
     const st = catalogSelectionStats(scope);
     const countEl = $('#ozCountInfo');
     if (countEl) {
@@ -34002,6 +34116,7 @@ const OzonExport = {
 
   /* Формирование CSV */
   async generateCsv(rows, opts, prog) {
+    await PyEngine.prepareOzonTyping(rows);
     opts=Object.assign({},opts,{_chzRules:(opts && opts._chzRules) || ChzTnved.rules()});
     const delim = ';';
     const isCp1251 = opts.fmt === 'csv_cp1251';
@@ -34057,6 +34172,7 @@ const OzonExport = {
 
   /* Формирование XLSX */
   async generateXlsx(rows, opts, prog) {
+    await PyEngine.prepareOzonTyping(rows);
     opts=Object.assign({},opts,{_chzRules:(opts && opts._chzRules) || ChzTnved.rules()});
     if (prog) prog('Ozon XLSX: построение листа по шаблону…');
     this._resetTruncated();
@@ -36367,7 +36483,7 @@ const OzonAssignmentCloud = {
 /* v11-аудит: разбор строки товара из GAS в строку каталога.
  * Пользовательские (динамические) колонки листа больше не теряются при pull:
  * всё, что не входит в стандартную схему, складывается в p.custom. */
-function mapServerProduct(p) {
+function mapServerProduct(p, deferKind=false) {
   const serverSources = (() => { try { return typeof p._sources === 'string' ? JSON.parse(p._sources || '{}') : (p._sources || {}); } catch (e) { return {}; } })();
   const hasVolumeFlag = p._uc_volume_explicit !== undefined && p._uc_volume_explicit !== null && p._uc_volume_explicit !== '';
   const volumeExplicit = hasVolumeFlag
@@ -36405,7 +36521,7 @@ function mapServerProduct(p) {
     'description','currency','marketSku','marketSkuName','marketCategoryId','marketCategoryName','marketVendorCode','marketCardStatus','marketParams','marketParamsText','ozon_realfbs_delivery']);
   const categoryTnvedRestored=!!CategoryTnved.decodeCloud(p._uc_category_tnved_v1), ozonRestored=!!OzonAssignmentCloud.decode(p[OzonAssignmentCloud.key]), recommendedRestored=!!RecommendedPrice.decode(p[RecommendedPrice.cloudKey]);
   Object.keys(p).forEach(k => { if (!known.has(k) && !(k==='_uc_category_tnved_v1' && categoryTnvedRestored) && !(k===OzonAssignmentCloud.key && ozonRestored) && !(k===RecommendedPrice.cloudKey && recommendedRestored) && p[k] !== '' && p[k] !== null && p[k] !== undefined) o.custom[k] = p[k]; });
-  if (categoryTnvedRestored) CategoryTnved.hydrateCloud(o,p._uc_category_tnved_v1);
+  if (categoryTnvedRestored) CategoryTnved.hydrateCloud(o,p._uc_category_tnved_v1,deferKind);
   if (ozonRestored) OzonAssignmentCloud.hydrate(o,p[OzonAssignmentCloud.key]);
   if (recommendedRestored) RecommendedPrice.hydrate(o,p[RecommendedPrice.cloudKey]);
   return o;
@@ -36557,7 +36673,10 @@ const Cloud = {
       if (r.exclusions) S.excs = r.exclusions.map(x => ({ id: x.id || uid('e'), field: x.field, op: x.op, value: x.value, action:x.action || 'exclude', enabled: num(x.enabled) || 1 }));
       if (r.suppliers) S.sups = r.suppliers.map(x => ({ id: x.id || uid('s'), name: x.name, inn: x.inn, term_days: num(x.term_days), prepay_pct: num(x.prepay_pct), rating: num(x.rating), delivery_days: num(x.delivery_days), active: 1 }));
       if (r.products && r.products.length) {
-        S.rows = AnomalyOE.carryPullAudit(oeAuditPlan,r.products.map(mapServerProduct));
+        const sqlHydration=PyEngine.processingMode()==='sql';
+        const pulledRows=AnomalyOE.carryPullAudit(oeAuditPlan,r.products.map(p=>mapServerProduct(p,sqlHydration)));
+        if(sqlHydration)await PyEngine.enrichCategoryKinds(null,false,pulledRows,'hydrate');
+        S.rows=pulledRows;
       }
       UI.setConn('on');
       await runPipeline(true); UI.fillFilters(); Dash.render(); UE.renderTariffTable(); Cats.render(); Supply.render();
@@ -40105,6 +40224,7 @@ function exportInputSheetKeys() { return new Set(['weight','length','width','hei
 function exportCatalogCellValue(c, p) {
       let v = c.src ? c.src(p) : c.custom ? (p.custom || {})[c.custom] : (p[c.k] ?? '');
       if (exportCellUnavailable(p, c.k, c.g)) v = '';
+      if (c.custom && c.txt && v instanceof Date) v = Number.isFinite(v.getTime()) ? v.toISOString() : '';
       if (c.txt) return (v == null ? '' : String(v)); /* кодовые колонки — только текст */
       if (v instanceof Date) v = num(v);
       else if (c.f && v !== '' && v !== null && v !== undefined) v = num(v);
@@ -40267,7 +40387,7 @@ function exportCatalog() {
     { g: 'ana', k: 'policyAction', n: 'Действие товарной политики', w: 23 },
     { g: 'ana', k: 'policyReason', n: 'Причина товарной политики', w: 32 }
   ];
-  S.custom.filter(supportedCustomColumn).forEach(c => C.push({ g: 'custom', k: 'c_' + c.key, n: c.name, w: Math.max(14, c.name.length + 4), custom: c.key, type: c.type, f: c.type === 'num' ? '#,##0.00' : '@' }));
+  S.custom.filter(supportedCustomColumn).forEach(c => C.push({ g: 'custom', k: 'c_' + c.key, n: c.name, w: Math.max(14, c.name.length + 4), custom: c.key, type: c.type, txt: c.type !== 'num', f: c.type === 'num' ? '#,##0.00' : '@' }));
   /* v12.9.10: колонки, собранные шаблонизатором Liquid ({{oem}}, {{brand}}, {{make_name}}…).
      Значение считается по строке через Tpl.render, формул Excel у таких колонок нет. */
   (S.settings.tplCols || []).forEach((t, i) => {
@@ -41158,7 +41278,7 @@ const Exp = {
         throw new Error('Колонка «' + c.n + '», строка ' + R + ': больше ' + XLSX_CELL_MAX + ' символов. Используйте CSV или сократите список.');
       const unavailable = exportCellUnavailable(p, c.k, c.g);
       if (unavailable) v = '';
-      if (v instanceof Date) v = 0;
+      if (v instanceof Date) v = c.custom && c.txt ? (Number.isFinite(v.getTime()) ? v.toISOString() : '') : 0;
       if (c.txt) v = (v == null ? '' : String(v));
       else if (c.f && v !== '' && v !== null && v !== undefined && typeof v !== 'number') v = num(v);
       let fml = null;
@@ -44047,9 +44167,64 @@ const AnomalyOE = {
   invalidate() {
     /* Отменяем незавершённый поиск: его результат уже не относится к каталогу. */
     this._token=(this._token||0)+1;
+    this._sqlToken=null;this._sqlFound=null;this._sqlRows=null;
     this.preview=[]; this.page=0; this._found=false; this._lastErrors=0; this.render();
   },
+  async findSql(options={}) {
+    const automatic=options.automatic===true;
+    if(this.busy)return automatic?{checked:0,changed:0,noChoice:0,pending:0,error:'Поиск по OE уже выполняется; повторите проверку после его завершения.'}:undefined;
+    this.busy=true;
+    const runToken=(this._token||0)+1;this._token=runToken;
+    const rows=S.rows,revision=S.catalogVersion||0,hvcRevision=HVC.ozonRevision||0;
+    try {
+      const indices=new Map(rows.map((p,i)=>[p,i]));
+      const found=AnomalyDetector.found.filter(f=>indices.has(f.p)).map(f=>({index:indices.get(f.p),selected:!!f._sel}));
+      const snapshot=PyEngine.dimensionOeSnapshot(found,automatic);
+      const result=await PyEngine.dimensionOeRequest(snapshot);
+      if(this._token!==runToken || S.rows!==rows || (S.catalogVersion||0)!==revision || (HVC.ozonRevision||0)!==hvcRevision)throw new Error('Каталог изменился во время поиска OE. Повторите поиск.');
+      if(typeof result.token!=='string'||!Array.isArray(result.preview)||!result.summary)throw new Error('Неполный ответ поиска OE SQL');
+      const seen=new Set(),foundIndices=new Set(found.map(f=>f.index));
+      result.preview.forEach(x=>{if(!Number.isInteger(x.targetIndex)||!foundIndices.has(x.targetIndex)||seen.has(x.targetIndex)||typeof x.signature!=='string'||typeof x.status!=='string'||!Array.isArray(x.codes))throw new Error('Неверный ответ поиска OE SQL');seen.add(x.targetIndex);});
+      this._sqlToken=result.token;this._sqlFound=found;this._sqlRows=rows;this._sqlAutomatic=automatic;
+      this.catalogVersion=revision;this.hvcRevision=hvcRevision;this._lastErrors=result.summary.errors||0;
+      this.preview=result.preview.map(x=>({...x,p:rows[x.targetIndex],checked:automatic&&!!x.choice}));
+      this.page=0;this._found=true;this.render();
+      if(automatic){
+        if(!this.preview.some(x=>x.choice))return result.summary;
+        const done=await this.applySql({automatic:true,fromSearch:true,onProgress:options.onProgress});
+        return {...result.summary,...done};
+      }
+      Toast.info('Предложения готовы',`${result.summary.checked-result.summary.noChoice} из ${result.summary.checked} SKU · отметьте подходящие после проверки источника`);
+    } finally {this.busy=false;}
+  },
+  async applySql(options={}) {
+    const automatic=options.automatic===true;
+    if(this.busy&&!options.fromSearch)return automatic?{changed:0,error:'Поиск по OE занят.'}:undefined;
+    const chosen=this.preview.map((x,i)=>({x,i})).filter(e=>e.x.checked&&e.x.choice);
+    if(!chosen.length){if(!automatic)Toast.warn('Отметьте предложения','Проверьте источник и выберите подходящие строки.');return {changed:0};}
+    if(!this._sqlToken||this._sqlRows!==S.rows||this._sqlAutomatic!==automatic||(S.catalogVersion||0)!==this.catalogVersion||(HVC.ozonRevision||0)!==this.hvcRevision){this.invalidate();throw new Error('Предложения устарели; повторите поиск по OE');}
+    if(!automatic&&!confirm(`Подставить выбранные (меньшие допустимые) вес и габариты для ${chosen.length} SKU? Источник — тот же артикул и бренд или схожий OE. SKU останутся в карантине до отдельного подтверждения измерений.`))return {changed:0};
+    this.busy=true;
+    const token=this._sqlToken,rows=S.rows,revision=S.catalogVersion||0,hvcRevision=HVC.ozonRevision||0;
+    try {
+      const snapshot=PyEngine.dimensionOeSnapshot(this._sqlFound,automatic);
+      const result=await PyEngine.dimensionOeRequest(snapshot,'apply',token,chosen.map(e=>e.i));
+      if(this._sqlToken!==token||S.rows!==rows||(S.catalogVersion||0)!==revision||(HVC.ozonRevision||0)!==hvcRevision)throw new Error('Каталог изменился во время применения OE. Повторите поиск.');
+      const allowed=new Set(['weight','length','width','height','volume','_volumeExplicit','_sources','_dimensionOeReview','dimensionAnomalyAck']);
+      if(!Array.isArray(result.rows)||result.rows.length!==chosen.length)throw new Error('Неполный ответ применения OE SQL');
+      result.rows.forEach((r,i)=>{const p=chosen[i].x.p;if(r.targetIndex!==chosen[i].x.targetIndex||rows[r.targetIndex]!==p||r.article!==p.article||r.brand!==(p.brand||'')||!r.fields||!Array.isArray(r.removed)||[...Object.keys(r.fields),...r.removed].some(k=>!allowed.has(k)))throw new Error('Неверный ответ применения OE SQL');});
+      const changed=[];
+      result.rows.forEach((r,i)=>{const p=chosen[i].x.p;for(const k of r.removed)delete p[k];Object.assign(p,r.fields);if(r.log)AnomalyDetector.log.push(r.log);changed.push(p);});
+      this._sqlToken=null;AnomalyDetector.save();
+      const small=changed.length<rows.length;
+      try {await runPipeline(true,{changedRows:new WeakSet(changed),smallDelta:small,persistChangedOnly:small,changedList:changed,skipGroups:true,onProgress:options.onProgress});}
+      catch(e){S._cacheWriteError=S._cacheWriteError||'После подстановки ОВХ сохранение/пересчёт не завершены';throw e;}
+      AnomalyDetector.renderLog();Toast.warn(automatic?'Автосверка по OE: нужна проверка':'Данные подставлены на проверку',`${changed.length} SKU · сверьте упаковку и подтвердите каждый SKU в разделе аномалий.`);
+      return {changed:changed.length};
+    } finally {this.busy=false;}
+  },
   async find(options) {
+    if(typeof PyEngine!=='undefined'&&PyEngine.processingMode()==='sql')return this.findSql(options||{});
     options=options || {};
     const automatic=options.automatic === true;
     if (this.busy) return automatic ? {checked:0,changed:0,noChoice:0,pending:0,error:'Поиск по OE уже выполняется; повторите проверку после его завершения.'} : undefined;
@@ -44284,6 +44459,7 @@ const AnomalyOE = {
       this.full(this.tuple(entry.evidence)) && this.exactTuple(this.tuple(entry.evidence),entry.tuple));
   },
   async apply(options) {
+    if(typeof PyEngine!=='undefined'&&PyEngine.processingMode()==='sql')return this.applySql(options||{});
     options=options || {};
     const automatic=options.automatic === true;
     if(this.busy && !options.fromSearch) return automatic ? {changed:0,error:'Поиск по OE занят.'} : undefined;
@@ -46781,11 +46957,11 @@ function bindAll() {
   };
   /* --- v12.9.11 · проверка шаблона Ozon (массовая загрузка) --- */
   const ozvb = $('#ozValidateBtn');
-  if (ozvb) ozvb.onclick = () => { try { OzonExport.validateNow(true); } catch (e) { Toast.err('Проверка не выполнена', String(e && e.message || e)); } };
+  if (ozvb) ozvb.onclick = async () => { try { await OzonExport.validateNow(true); } catch (e) { Toast.err('Проверка не выполнена', String(e && e.message || e)); } };
   const ozvr = $('#ozValidateReport');
-  if (ozvr) ozvr.onclick = () => { try { OzonExport.validationReport(); } catch (e) { Toast.err('Отчёт не сформирован', String(e && e.message || e)); } };
+  if (ozvr) ozvr.onclick = async () => { try { await OzonExport.validationReport(); } catch (e) { Toast.err('Отчёт не сформирован', String(e && e.message || e)); } };
   const ozvs = $('#ozViewScope');
-  if (ozvs) ozvs.addEventListener('change', () => { setTimeout(() => { try { OzonExport.validateNow(false); } catch (e) {} }, 60); });
+  if (ozvs) ozvs.addEventListener('change', () => { setTimeout(async () => { try { await OzonExport.validateNow(false); } catch (e) {} }, 60); });
 
   /* --- v12.9.11 · словари из Excel --- */
   const dcl = $('#dictCatLoad');

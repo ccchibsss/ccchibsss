@@ -23,3 +23,18 @@ class PolicyParity(unittest.TestCase):
         self.assertTrue(result['rows'][1]['fields']['excluded'])
         self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_policy_state').fetchone()[0],3)
         conn.close()
+
+    def test_order_prefix_numbers_and_null_reason_against_browser(self):
+        path=pathlib.Path(__file__).resolve().parents[2]/'tests/product-policies-reference.js'
+        rows=[{'article':'A','brand':'B','name':'x'}]
+        groups=[[
+            dict(enabled=True,field='name',op='eq',value='x',action='hide',order_no='2 kg'),
+            dict(enabled=True,field='name',op='eq',value='x',action='warn',order_no=1)],
+            [dict(enabled=True,field='price',op='empty',value=None,action='warn')]]
+        for rules in groups:
+            expected=json.loads(subprocess.check_output(['node',str(path)],input=json.dumps(dict(rows=rows,rules=rules)),text=True))
+            conn=sqlite3.connect(':memory:')
+            try:
+                result=apply_product_policies(conn,rows,rules)
+                for row,r,want in zip(rows,result['rows'],expected):self.assertEqual({**row,**r['fields']},want)
+            finally:conn.close()

@@ -7,4 +7,7 @@ const action=html.match(/const mc = MarkStatus\.check\(p\.markStatus[\s\S]*?p\.p
 const context={S:{settings:input.settings||{}}};
 vm.createContext(context);
 vm.runInContext(html.slice(start,end)+'\nthis.run=p=>{'+action+';return {row:p,result:mc};};',context);
-process.stdout.write(JSON.stringify(input.rows.map(p=>context.run(p))));
+context.input=input;
+vm.runInContext(`for(const e of input.special_values||[]){let p=input;for(const k of e.path.slice(0,-1))p=p[k];p[e.path.at(-1)]=e.kind==='date'?(e.milliseconds===null?new Date(NaN):new Date(e.milliseconds)):e.kind==='positive'?Infinity:e.kind==='negative'?-Infinity:NaN;}`,context);
+const rows=input.rows.map(p=>context.run(p));
+process.stdout.write(JSON.stringify(input.include_unknown?{rows,unknown:vm.runInContext('[...MarkStatus.unknown]',context)}:rows));

@@ -41,3 +41,18 @@ class CategoryTnvedParity(unittest.TestCase):
             model=CategoryTnved(reference['rows'],reference['revision'],reference['source'])
             actual=[dict(zip(('row','result'),model.apply(p,enabled,'2026-01-01T00:00:00Z'))) for p in rows]
             self.assertEqual(actual,expected)
+
+    def test_browser_numeric_codes_and_nonstring_inputs(self):
+        reference={'rows':[['Фильтры','Масляный','8421230000']],'revision':'test','source':'test.csv'}
+        values=[0,False,True,8421230000.0,1e21,[],[1],{},None,'']
+        rows=[]
+        for v in values:
+            for field in ['tnved','category_type','category']:
+                rows.append({'category':'Фильтры','category_type':'Масляный',field:v})
+        path=pathlib.Path(__file__).resolve().parents[2]/'tests/category-tnved-reference.js'
+        expected=json.loads(subprocess.check_output(['node',str(path)],input=json.dumps({'rows':rows,'reference':reference}),text=True))
+        model=CategoryTnved(reference['rows'],reference['revision'],reference['source'])
+        for i,p in enumerate(rows):
+            with self.subTest(row=p):
+                actual=dict(zip(('row','result'),model.apply(p,True,'2026-01-01T00:00:00Z')))
+                self.assertEqual(actual,expected[i])
