@@ -5814,6 +5814,14 @@ class Handler(BaseHTTPRequestHandler):
                 WHERE p.rowid IN (SELECT rowid FROM products_fts WHERE products_fts MATCH ?) LIMIT 100''',
                 ('"' + q.replace('"', '') + '"',)).fetchall() if q else []
             return self._send(200, {'ok': True, 'rows': [dict(r) for r in rows]})
+        if self.path.startswith('/app/catalog'):
+            from urllib.parse import urlparse, parse_qs
+            qs=parse_qs(urlparse(self.path).query)
+            try:
+                args={'part':int((qs.get('part') or ['0'])[0])}
+                if 'revision' in qs:args['revision']=qs['revision'][0]
+                return self._send(200,{'ok':True,**app_catalog_state(conn,'read',args)})
+            except (ValueError,TypeError) as e:return self._send(409,{'ok':False,'error':str(e)})
         if self.path.startswith('/catalog/products'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -5878,6 +5886,8 @@ class Handler(BaseHTTPRequestHandler):
                 n = import_rows(conn, body.get('rows') or [], body.get('source', 'app'),
                                 rebuild_fts=body.get('final') is not False)
                 return self._send(200, {'ok': True, 'imported': n})
+            if self.path == '/app/catalog':
+                return self._send(200,{'ok':True,**app_catalog_state(conn,body.get('action'),body)})
             if self.path == '/catalog/enrich':
                 return self._send(200, {'ok': True, **enrich_oe(conn)})
             if self.path == '/donors/import':
@@ -6045,6 +6055,60 @@ def watch_loop():
         except Exception as e:
             print('watch error:', e)
         time.sleep(300)
+
+
+def app_catalog_state(conn, action, body):
+    """Versioned complete application rows, separate from normalized calc tables."""
+    import secrets
+    conn.execute('CREATE TABLE IF NOT EXISTS app_catalog_head(id INTEGER PRIMARY KEY CHECK(id=1),revision TEXT NOT NULL,metadata TEXT NOT NULL,total INTEGER NOT NULL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS app_catalog_chunks(revision TEXT NOT NULL,part INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(revision,part))')
+    conn.execute('CREATE TABLE IF NOT EXISTS app_catalog_upload(token TEXT PRIMARY KEY,base TEXT NOT NULL,total INTEGER NOT NULL,metadata TEXT NOT NULL,created REAL NOT NULL)')
+    head=conn.execute('SELECT revision,metadata,total FROM app_catalog_head WHERE id=1').fetchone()
+    current=head[0] if head else ''
+    if action=='read':
+        revision=body.get('revision',current)
+        if revision!=current:raise ValueError('Каталог SQLite изменился во время чтения; повторите загрузку')
+        part=body.get('part',0)
+        if type(part) is not int or part<0:raise ValueError('Неверный номер части')
+        chunk=conn.execute('SELECT data FROM app_catalog_chunks WHERE revision=? AND part=?',(revision,part)).fetchone()
+        return {'revision':current,'metadata':json.loads(head[1]) if head else {},'total':head[2] if head else 0,'chunk':json.loads(chunk[0]) if chunk else None,'exists':bool(head)}
+    if action=='begin':
+        total=body.get('total');metadata=body.get('metadata',{})
+        if type(total) is not int or total<0 or not isinstance(metadata,dict):raise ValueError('Неверный каталог')
+        if body.get('base','')!=current:raise ValueError('Каталог SQLite изменён другим клиентом; запись отменена')
+        stale=[r[0] for r in conn.execute('SELECT token FROM app_catalog_upload WHERE created<?',(time.time()-86400,))]
+        with conn:
+            for old in stale:
+                conn.execute('DELETE FROM app_catalog_chunks WHERE revision=?',(old,))
+                conn.execute('DELETE FROM app_catalog_upload WHERE token=?',(old,))
+        token=secrets.token_hex(24)
+        with conn:
+            conn.execute('INSERT INTO app_catalog_upload VALUES(?,?,?,?,?)',(token,current,total,json.dumps(metadata,ensure_ascii=False,allow_nan=False),time.time()))
+        return {'token':token}
+    token=body.get('token','')
+    upload=conn.execute('SELECT base,total,metadata FROM app_catalog_upload WHERE token=?',(token,)).fetchone()
+    if not upload:raise ValueError('Загрузка каталога не найдена')
+    if action=='chunk':
+        part=body.get('part');chunk=body.get('chunk')
+        if type(part) is not int or part<0 or not isinstance(chunk,dict) or not isinstance(chunk.get('rows'),list) or len(chunk['rows'])>1000:raise ValueError('Неверная часть каталога')
+        decoded=decode_special(chunk['rows'],chunk.get('special_values',[]))
+        if any(not isinstance(row,dict) for row in decoded):raise ValueError('Неверная строка каталога')
+        with conn:conn.execute('INSERT OR REPLACE INTO app_catalog_chunks VALUES(?,?,?)',(token,part,json.dumps(chunk,ensure_ascii=False,allow_nan=False)))
+        return {'saved':len(decoded)}
+    if action!='commit':raise ValueError('Неизвестная операция каталога')
+    # Lock and compare again inside the publishing transaction. Interrupted uploads
+    # never replace the previous committed head (including an empty catalogue).
+    with conn:
+        conn.execute('UPDATE app_catalog_head SET revision=revision WHERE id=1')
+        latest=conn.execute('SELECT revision FROM app_catalog_head WHERE id=1').fetchone()
+        if (latest[0] if latest else '')!=upload[0]:raise ValueError('Конфликт версии каталога SQLite')
+        chunks=conn.execute('SELECT part,data FROM app_catalog_chunks WHERE revision=? ORDER BY part',(token,)).fetchall()
+        if [r[0] for r in chunks]!=list(range(len(chunks))):raise ValueError('Пропущена часть каталога')
+        if sum(len(json.loads(r[1])['rows']) for r in chunks)!=upload[1]:raise ValueError('Неполная загрузка каталога')
+        conn.execute('INSERT OR REPLACE INTO app_catalog_head VALUES(1,?,?,?)',(token,upload[2],upload[1]))
+        conn.execute('DELETE FROM app_catalog_upload WHERE token=?',(token,))
+        conn.execute('DELETE FROM app_catalog_chunks WHERE revision!=? AND revision NOT IN (SELECT token FROM app_catalog_upload)',(token,))
+    return {'revision':token,'total':upload[1]}
 
 
 def run_sqlite_poc():
