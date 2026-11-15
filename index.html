@@ -26915,6 +26915,9 @@ const PyEngine = {
       const j = await r.json().catch(() => ({}));
       if (!r.ok || j.ok === false) throw new Error('HTTP '+r.status+' '+path+': '+storageErrorText(j.error || j));
       return j;
+    } catch(e) {
+      if(e && (e.name==='TypeError'||e.name==='AbortError'))throw new Error('Нет ответа SQL: '+path+' ('+storageErrorText(e)+'). Соединение прервано или истёк срок ожидания. Проверьте окно Python-движка; операция не завершена.');
+      throw e;
     } finally { clearTimeout(to); }
   },
   async health() {
@@ -27784,6 +27787,41 @@ const PyEngine = {
         for(const k of r.removed || []) delete p[k]; Object.assign(p,r.fields); });
     }
   },
+  async uploadHvcReference(reference,prog) {
+    const started=Date.now();
+    const fields=['parts','oe','byArt','byOe','unsafeKeys','unsafeOe'];
+    const total=fields.reduce((n,k)=>n+reference[k].length,0);
+    const start=await this._fetch('/catalog/hvc-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'begin',total,groupSeparator:reference.groupSeparator})});
+    if(typeof start.token!=='string'||!start.token.startsWith('chunked:'))throw new Error('Неверный токен справочника HVC');
+    let part=0,sent=0;
+    const send=async(field,items)=>{
+      const result=await this._fetch('/catalog/hvc-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'chunk',token:start.token,part,field,items})});
+      if(result.saved!==items.length)throw new Error('Часть справочника HVC не подтверждена');
+      part++;sent+=items.length;
+      if(prog)prog('SQL: передача справочника HVC '+sent+' из '+total);
+    };
+    try {
+      for(const field of fields){
+        let items=[],bytes=0;
+        for(const item of reference[field]){
+          // UTF-8 uses at most three bytes per UTF-16 code unit. Bound the
+          // request without allocating another full-graph JSON string.
+          const size=JSON.stringify(item).length*3+3;
+          if(size>1024*1024)throw new Error('Одна запись справочника HVC слишком велика; поле '+field);
+          if(items.length&&(bytes+size>1024*1024||items.length>=2000)){await send(field,items);items=[];bytes=0;}
+          items.push(item);bytes+=size;
+        }
+        if(items.length)await send(field,items);
+      }
+      const result=await this._fetch('/catalog/hvc-reference',{method:'POST',timeout:120000,body:JSON.stringify({action:'commit',token:start.token})});
+      if(result.reference_id!==start.token)throw new Error('Неверная версия справочника HVC');
+      console.info('[UC] HVC SQL: справочник '+total+' записей, '+part+' частей, '+(Date.now()-started)+' мс');
+      return result.reference_id;
+    }catch(e){
+      try{await this._fetch('/catalog/hvc-reference',{method:'POST',body:JSON.stringify({action:'release',token:start.token})});}catch(cleanup){}
+      throw e;
+    }
+  },
   async enrichHvcRows(rows,prog,mode) {
     if(!rows.length)return 0;
     await this.processingAvailable();
@@ -27792,11 +27830,13 @@ const PyEngine = {
     for(const p of S.rows)if(HVC.identityUnsafe(p,scope))unsafe.add(HVC.keyOf(p));
     const reference={parts:[...HVC.parts],oe:[...HVC.oe],byArt:[...HVC.byArt].map(([k,v])=>[k,[...v]]),byOe:[...HVC.byOe].map(([k,v])=>[k,[...v]]),unsafeKeys:[...unsafe],unsafeOe:[...HVC.oe.keys()].filter(k=>HVC.identityUnsafeOe(k)),groupSeparator:OE_DELIMITERS[oeMode()].join};
     const before=rows.map(p=>JSON.stringify(p)),catalog=S.rows,staged=[];
-    let changed=0,referenceId;
+    let changed=0;
+    const referenceId=await this.uploadHvcReference(reference,prog);
+    try {
     for(let off=0;off<rows.length;off+=1000){
       const batch=rows.slice(off,off+1000);
-      const result=await this._fetch('/catalog/enrich-hvc-rows',{method:'POST',timeout:120000,body:JSON.stringify({rows:batch,reference:off===0?reference:undefined,reference_id:referenceId,mode:mode||HVC.enrichMode(),cat_mode:HVC.enrichCatMode(),columns:Object.fromEntries(HVC.EN_COLS.map(k=>[k,HVC.enCol(k)])),policy:{limits:AnomalyDetector.limits||[]}})});
-      referenceId=result.reference_id;
+      const result=await this._fetch('/catalog/enrich-hvc-rows',{method:'POST',timeout:120000,body:JSON.stringify({rows:batch,reference_id:referenceId,mode:mode||HVC.enrichMode(),cat_mode:HVC.enrichCatMode(),columns:Object.fromEntries(HVC.EN_COLS.map(k=>[k,HVC.enCol(k)])),policy:{limits:AnomalyDetector.limits||[]}})});
+      if(result.reference_id!==referenceId)throw new Error('Изменилась версия справочника HVC');
       if(!Array.isArray(result.rows)||result.rows.length!==batch.length)throw new Error('Неполный ответ HVC SQLite');
       for(let i=0;i<batch.length;i++){
         const p=batch[i],r=result.rows[i];
@@ -27809,38 +27849,21 @@ const PyEngine = {
     if(S.rows!==catalog||this.processingMode()!=='sql'||rows.some((p,i)=>JSON.stringify(p)!==before[i]))throw new Error('Каталог изменился во время HVC-обогащения');
     for(const {p,fields,removed} of staged){for(const k of removed)delete p[k];Object.assign(p,fields);}
     return changed;
+    }finally{
+      try{await this._fetch('/catalog/hvc-reference',{method:'POST',timeout:10000,body:JSON.stringify({action:'release',token:referenceId})});}catch(e){console.warn('[UC] временный справочник HVC не удалён:',e);}
+    }
   },
   async enrichFull(modeOverride) {
     await this.processingAvailable();
-    return withProgress('SQLite: обогащение HVC', 'синхронизация исходного графа и справочников', async () => {
-      await this._syncCatalog('app-hvc-enrich');
-      const keys = new Set([...HVC.parts.keys(), ...S.rows.map(p => HVC.keyOf(p))]);
-      const scope = HVC.identityScope(S.rows);
-      const unsafe = new Set([...keys].filter(k => HVC.identityUnsafeKey(k)));
-      for (const p of S.rows) if (HVC.identityUnsafe(p,scope)) unsafe.add(HVC.keyOf(p));
-      const reference = {
-        parts:[...HVC.parts], oe:[...HVC.oe], byArt:[...HVC.byArt].map(([k,v]) => [k,[...v]]),
-        byOe:[...HVC.byOe].map(([k,v]) => [k,[...v]]), unsafeKeys:[...unsafe],
-        unsafeOe:[...HVC.oe.keys()].filter(k => HVC.identityUnsafeOe(k)),
-        groupSeparator:OE_DELIMITERS[oeMode()].join
-      };
-      const result = await this._fetch('/catalog/enrich-hvc', { method:'POST', timeout:600000,
-        body:JSON.stringify({ reference, mode:modeOverride || HVC.enrichMode(), cat_mode:HVC.enrichCatMode(),
-          columns:Object.fromEntries(HVC.EN_COLS.map(k => [k,HVC.enCol(k)])),
-          policy:{limits:AnomalyDetector.limits || []} }) });
-      const byKey = new Map((result.rows || []).map(p => [HVC.keyOf(p),p]));
-      for (const p of S.rows) {
-        const enriched = byKey.get(HVC.keyOf(p)); if (!enriched) continue;
-        for (const k of ['name','applicability','category','tnved','weight','length','width','height',
-          'multiplicity','image_url','barcode','analog_list','group_articles','groupSize','_sources'])
-          if (enriched[k] !== undefined && enriched[k] !== null) p[k] = enriched[k];
-        if (enriched._dimensionOeReview) { p._dimensionOeReview=enriched._dimensionOeReview; delete p.dimensionAnomalyAck; }
-      }
+    return withProgress('SQLite: обогащение HVC', 'пакетная передача графа и строк', async prog => {
+      const processed=S.rows.length;
+      const changed=await this.enrichHvcRows(S.rows,prog,modeOverride || HVC.enrichMode());
       bumpVersion();
       S._econPending=true; persistEconPending();
-      try { await persistNow(); Table.paint(); } catch(e) { Toast.warn('Результат в памяти', String(e.message || e)); }
-      Toast.ok('Обогащение HVC выполнено движком', fmt(result.processed || 0) + ' SKU · исходные справочники и граф сохранены в SQLite');
-      return result;
+      await persistImportOrThrow('Результат обогащения не сохранён');
+      Table.paint();
+      Toast.ok('Обогащение HVC выполнено движком',fmt(processed)+' SKU · изменено '+fmt(changed));
+      return {processed,changed};
     });
   },
   async enrichOe() {
