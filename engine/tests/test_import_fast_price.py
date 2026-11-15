@@ -5,6 +5,8 @@ sys.path.insert(0,str(ROOT/'engine'))
 import uc_engine as E
 
 class FastPriceAndHvc(unittest.TestCase):
+    def test_import_is_enrichment_only_in_both_modes(self):
+        subprocess.check_call(['node',str(ROOT/'tests/import-enrichment-only-client.js')])
     def test_first_price_and_sql_client_routing(self):
         subprocess.check_call(['node',str(ROOT/'tests/import-fast-price-client.js')])
     def test_hvc_row_route_matches_actual_browser_and_reuses_reference(self):

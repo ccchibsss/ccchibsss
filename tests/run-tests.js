@@ -103,7 +103,7 @@ assert(app.includes('СТАНДАРТ-РАСЧЁТ: '), 'стандартные 
 assert(app.includes("dxf('FFFFA07A', false, 'FF000000')"), 'стандартные ОВХ: подсветка #FFA07A в XLSX');
 assert(app.includes("ct('stdDimsCalc', 'СТАНДАРТ-РАСЧЁТ', dStdCalc);"), 'стандартные ОВХ: правило подсветки маркера');
 assert(app.includes("c.k === 'multiplicity' ? 'Кратность, шт' : c.n"), 'повторная загрузка: кратность под стандартным именем');
-assert(app.includes('skipEconomics: lightModeOn'), 'лёгкий импорт: пайплайн получает skipEconomics');
+assert(app.includes('skipEconomics: true'), 'импорт: экономика всегда пропускается');
 assert(app.includes('const skipEcon = options.skipEconomics === true;'), 'лёгкий импорт: флаг пропуска экономики в пайплайне');
 assert(app.includes('if (skipEcon) { internRowStrings(old); continue; }'), 'лёгкий импорт: расчётные массивы строк не выделяются');
 assert(app.includes('async function ensureEconomics()'), 'лёгкий импорт: ленивый досчёт экономики');
@@ -296,8 +296,8 @@ assert(app.includes('if (changedRows && !isChangedRow(p)) { if (!sqlEnrichment &
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
 assert(app.includes('12.9.156-client+dual-processing'), 'версия клиента обновлена');
 
-assert(app.includes("classList.contains('active')) UE.render()"), 'импорт: UE.render только для активного раздела');
-assert(app.includes("classList.contains('active')) Dash.render()"), 'импорт: Dash.render только для активного раздела');
+const importImpl=app.slice(app.indexOf('const Import = {'),app.indexOf('  _relatedRows(',app.indexOf('const Import = {')));
+assert(!importImpl.includes('UE.render()')&&!importImpl.includes('Dash.render()'), 'импорт: расчётные разделы не запускаются');
 
 // v12.9.77: таргетный rebuildIndex эквивалентен полному на OE-графе
 {

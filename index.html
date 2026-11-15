@@ -6743,6 +6743,10 @@ table.plain tbody tr:hover td{background:#1a2039}
 #mCache .f{color:#c8d2e6}
 .mfoot{padding:11px 16px;border-top:1px solid var(--line);display:flex;gap:9px;align-items:center}
 .mfoot .sp{flex:1}
+/* Import diagnostics must remain visible even when mapping fills the viewport. */
+#mImport .mhead,#mImport .mfoot{flex-shrink:0}
+#mImport .mbody{min-height:0}
+#impApplyStatus{flex-shrink:0;max-height:18vh;overflow:auto;padding:10px 16px;border-top:1px solid var(--line);color:var(--amber);white-space:pre-wrap;overflow-wrap:anywhere}
 .maprow{display:grid;grid-template-columns:26px 1.15fr 1.1fr 1.15fr 74px 1fr;gap:7px;align-items:center;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05);font-size:11.5px}
 .maprow:hover{background:#1a2039}
 .maprow .src{font-family:'JetBrains Mono';font-size:11px;color:var(--blue);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -9131,7 +9135,7 @@ try {
       <label style="display:flex;gap:6px;align-items:center;max-width:270px" title="Не скрывает из-за цены/остатка во время импорта; явная видимость, политики и общее автоскрытие после запуска продолжают действовать"><input role="switch" class="uc-switch" id="impKeepVisibility" type="checkbox" style="width:auto"><span class="hint">Не скрывать автоматически при импорте</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:360px" title="Источник — тот же артикул и бренд или схожий OE-номер. Из допустимых полных записей выбирается меньший комплект вес + три стороны, проверенный по лимитам категории. Старые значения сохраняются; товар остаётся в карантине до проверки."><input role="switch" class="uc-switch" id="impAnomOeAuto" type="checkbox" style="width:auto"><span class="hint">Автосверка аномальных ОВХ по OE · с проверкой</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Первый файл — прайс: при пустом каталоге он создаёт SKU. Дальше, пока переключатель включён, любой новый файл (весогабариты, OE-кроссы, категории, цены, остатки) только обогащает SKU текущего прайса; строк вне прайса не добавляет. Выключите, чтобы файл мог создавать новые SKU."><input role="switch" class="uc-switch" id="impEnrichOnly" type="checkbox" style="width:auto"><span class="hint">Только обогащение по текущему прайсу, новых SKU не создавать. Первый файл всегда прайс: он создаёт SKU, все следующие файлы только обогащают его</span></label>
-      <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Импорт загружает и обогащает каталог, но НЕ считает юнит-экономику: каталог после импорта занимает заметно меньше памяти, а импорт проходит быстрее. Экономика посчитается автоматически при первом экспорте или входе в «Данные», дашборд и расчётные разделы."><input role="switch" class="uc-switch" id="impLightMode" type="checkbox" style="width:auto"><span class="hint">Лёгкий импорт: экономику считать при экспорте, а не при загрузке</span></label>
+      <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Импорт загружает и обогащает каталог, но НЕ считает юнит-экономику: каталог после импорта занимает заметно меньше памяти, а импорт проходит быстрее. Экономика посчитается автоматически при первом экспорте или входе в «Данные», дашборд и расчётные разделы."><input role="switch" class="uc-switch" id="impLightMode" type="checkbox" checked disabled style="width:auto"><span class="hint">Импорт: только загрузка и обогащение, без расчёта экономики</span></label>
       <label style="display:flex;gap:6px;align-items:center;max-width:420px" title="Файлы, загружаемые после источника (весогабариты, OE-кроссы, названия), сразу расходятся по уже загруженному каталогу: строки, связанные тем же артикулом или общим OE-номером, получают недостающие поля и стандартные весогабариты. Пустые поля заполняются, существующие значения не меняются."><input role="switch" class="uc-switch" id="impEnrichRelated" type="checkbox" style="width:auto"><span class="hint">Обогащать связанные строки каталога из этого файла</span></label>
       <div style="display:flex;gap:10px;align-items:center;height:28px;flex-wrap:wrap">
         <span class="hint" style="letter-spacing:.08em;text-transform:uppercase">Обогащать по OE:</span>
@@ -9154,9 +9158,9 @@ try {
       <div class="hint" style="margin-bottom:5px;letter-spacing:.1em;text-transform:uppercase">Предпросмотр (первые 5 строк после нормализации)</div>
       <div style="overflow:auto;border:1px solid var(--line);border-radius:9px"><table class="plain" id="impPreview"></table></div>
       <div id="impWarn" style="margin-top:9px"></div>
-      <div id="impApplyStatus" role="status" aria-live="polite" style="margin-top:9px;white-space:pre-wrap" hidden></div>
     </div>
   </div>
+  <div id="impApplyStatus" role="status" aria-live="polite" hidden></div>
   <div class="mfoot"><span class="hint mono" id="impMeta"></span><div class="sp" style="flex:1"></div>
     <button type="button" class="btn gh" data-close>Отмена</button>
     <button type="button" class="btn pri" id="impApply"><i class="fa-solid fa-database"></i> Применить к каталогу</button></div>
@@ -21535,7 +21539,7 @@ function runPipeline(full, options) {
     if (!preserveView && !(deltaFast && options.skipGroups) && typeof HVC !== 'undefined') { try { HVC.groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys); } catch (e) { console.warn('[UC] groupOeByKey:', e); } }
     for (let start = 0; start < total; start += CHUNK) {
       const end = Math.min(start + CHUNK, total);
-      if (prog) prog(`расчёт SKU ${fmt(start + 1)}–${fmt(end)} из ${fmt(total)}`);
+      if (prog) prog(`${skipEcon ? 'обогащение' : 'расчёт'} SKU ${fmt(start + 1)}–${fmt(end)} из ${fmt(total)}`);
       _step(5 + (start / Math.max(total, 1)) * 70);
       /* v12.9.56 · ПОРЯДОК УПАКОВКИ. Обычная строка каталога на первом проходе
          получает ~90 расчётных полей: объект переходит в словарный режим и
@@ -27584,7 +27588,10 @@ const PyEngine = {
     if(!rows.length) return;
     await this.processingAvailable();
     const reference=options.reference || this.ozonProcessingReference();
-    const before=rows.map(p=>JSON.stringify(p)),catalog=S.rows,settings=JSON.stringify(S.settings);
+    // Persistence/cloud metadata may change while a large reference uploads.
+    // Only the effective classifier flag and processing mode affect this call.
+    const before=rows.map(p=>JSON.stringify(p)),catalog=S.rows;
+    const enabled=S.settings.autoCategoryByName!==false,mode=this.processingMode();
     const referenceId=await this.acquireOzonReference(reference);
     const staged=[];
     try {
@@ -27592,7 +27599,7 @@ const PyEngine = {
     for(let offset=0;offset<rows.length;offset+=1000) {
       const batch=rows.slice(offset,offset+1000);
       const result=await this._fetch('/catalog/enrich-ozon-preferred',{method:'POST',timeout:120000,
-        body:JSON.stringify({rows:batch,reference_id:referenceId,enabled:S.settings.autoCategoryByName!==false,
+        body:JSON.stringify({rows:batch,reference_id:referenceId,enabled,
           force:options.force===true,force_name:options.forceName===true})});
       if(!Array.isArray(result.rows)||result.rows.length!==batch.length) throw new Error('Неполный ответ Ozon SQLite');
       result.rows.forEach((r,i)=>{if(!r || r.article!==batch[i].article || r.brand!==(batch[i].brand||'') || !r.fields || !Array.isArray(r.removed)) throw new Error('Неверный порядок или формат ответа Ozon SQLite');
@@ -27600,7 +27607,11 @@ const PyEngine = {
       result.rows.forEach((r,i)=>staged.push({p:batch[i],r}));
       result.rows.forEach((r,i)=>{const p={...batch[i],...r.fields};for(const k of r.removed)delete p[k];stats.total++;if(['manual','import'].includes(p.ozon_type_src))stats.manual++;else if(p.ozon_type_src==='keyword')stats.keyword++;else if(p.ozon_type_src==='auto'){stats.auto++;if(p.ozon_type_basis==='oe')stats.oe++;else if(p.ozon_type_basis==='applicability')stats.applicability++;}else{stats.none++;if(r.result && /conflict/i.test(r.result.reason||''))stats.conflict++;}});
     }
-    if(S.rows!==catalog||JSON.stringify(S.settings)!==settings||rows.some((p,i)=>JSON.stringify(p)!==before[i]))throw new Error('Каталог или настройки изменились во время Ozon-обогащения');
+    if(S.rows!==catalog)throw new Error('Ozon: каталог заменён во время обогащения');
+    if(this.processingMode()!==mode)throw new Error('Ozon: режим обработки изменился во время обогащения');
+    if((S.settings.autoCategoryByName!==false)!==enabled)throw new Error('Ozon: настройка автокатегоризации изменилась во время обогащения');
+    const changedIndex=rows.findIndex((p,i)=>JSON.stringify(p)!==before[i]);
+    if(changedIndex>=0)throw new Error('Ozon: строка '+String(rows[changedIndex]?.article||changedIndex+1)+' изменилась во время обогащения');
     for(const {p,r} of staged){for(const k of r.removed)delete p[k];Object.assign(p,r.fields);}
     return stats;
     }finally{if(!options.reference)await this.releaseOzonReference(reference);}
@@ -27621,9 +27632,9 @@ const PyEngine = {
     const catalogRows=S.rows,version=S.catalogVersion||0,treeVersion=OzonReference.version(),categoryRevision=CategoryTnved.revision;
     const hvcRevision=typeof HVC==='undefined'?0:HVC.ozonRevision||0;
     const fingerprint=p=>JSON.stringify(Object.fromEntries(Object.keys(p).filter(k=>!k.startsWith('_calc')).sort().map(k=>[k,p[k]])));
-    const settings=JSON.stringify(S.settings),before=pending.map(fingerprint),drafts=pending.map(p=>({...p}));
+    const enabled=S.settings?.autoCategoryByName!==false,before=pending.map(fingerprint),drafts=pending.map(p=>({...p}));
     await this.enrichOzonPreferred(drafts);
-    if(S.rows!==catalogRows||(typeof HVC==='undefined'?0:HVC.ozonRevision||0)!==hvcRevision||this.processingMode()!=='sql'||JSON.stringify(S.settings)!==settings||(S.catalogVersion||0)!==version||OzonReference.version()!==treeVersion||CategoryTnved.revision!==categoryRevision||pending.some((p,i)=>fingerprint(p)!==before[i]))throw new Error('Данные изменились во время подготовки Ozon; повторите выгрузку');
+    if(S.rows!==catalogRows||(typeof HVC==='undefined'?0:HVC.ozonRevision||0)!==hvcRevision||this.processingMode()!=='sql'||(S.settings?.autoCategoryByName!==false)!==enabled||(S.catalogVersion||0)!==version||OzonReference.version()!==treeVersion||CategoryTnved.revision!==categoryRevision||pending.some((p,i)=>fingerprint(p)!==before[i]))throw new Error('Данные изменились во время подготовки Ozon; повторите выгрузку');
     drafts.forEach((p,i)=>{for(const k of Object.keys(pending[i]))if((k.startsWith('ozon_')||k.startsWith('_ozonName'))&&!(k in p))delete pending[i][k];for(const [k,v] of Object.entries(p))if(k.startsWith('ozon_')||k.startsWith('_ozonName'))pending[i][k]=v;});
   },
   dimensionOeSnapshot(found, automatic) {
@@ -28672,7 +28683,7 @@ const Import = {
       const keepVis = $('#impKeepVisibility'); if (keepVis) keepVis.checked = true;
       const relSw = $('#impEnrichRelated'); if (relSw) relSw.checked = S.settings.enrichRelatedOnImport !== false;
       const eoSw = $('#impEnrichOnly'); if (eoSw) eoSw.checked = S.settings.importEnrichOnly !== false;
-      const lmSw = $('#impLightMode'); if (lmSw) lmSw.checked = !!S.settings.importLightMode;
+      const lmSw = $('#impLightMode'); if (lmSw) { lmSw.checked = true; lmSw.disabled = true; }
       if ($('#impMode')) $('#impMode').value = 'upsert';
       Import.syncPriceIsCost();
       if (advisorTemplate) {
@@ -28879,9 +28890,9 @@ const Import = {
          расчёт запускается лениво (ensureEconomics) при экспорте или входе в
          расчётные разделы. Каталог до первого расчёта живёт без расчётных
          Float64Array: на больших прайсах это сотни мегабайт heap. */
-      const lightEl = $('#impLightMode');
-      const lightModeOn = lightEl ? !!lightEl.checked : !!S.settings.importLightMode;
-      S.settings.importLightMode = lightModeOn;
+      // Import is always enrichment-only in browser and SQL modes.
+      // Legacy saved settings and DOM checkbox state cannot enable economics.
+      S.settings.importLightMode = true;
       let enrichOnlySkipped = 0;
       const keyMode = S.settings.keyMode;
       /* v12.9.84 → v12.9.85: расширенный поиск SKU прайса для обогащения — только
@@ -29469,7 +29480,7 @@ const Import = {
              дублей (dedup удаляет строки из каталога). Слияния OE по связкам
              и группы артикулов загрузка выводит заново из записанных строк. */
           smallDelta, persistChangedOnly: changedTouched > 0 && !dedup,
-          skipEconomics: lightModeOn,
+          skipEconomics: true,
           changedList, onProgress: prog, stepRange: [78, 97]
         });
       }
@@ -29504,8 +29515,8 @@ const Import = {
          сейчас на экране. Скрытый раздел всё равно перерисует UI.go при входе,
          а полный Dash.agg + UE.render по каталогу после каждого импорта —
          секунды впустую. */
-      if (!isPriceFile && document.getElementById('v-dashboard') && document.getElementById('v-dashboard').classList.contains('active')) Dash.render();
-      if (!isPriceFile && document.getElementById('v-unit') && document.getElementById('v-unit').classList.contains('active')) UE.render();
+      // Do not render calculation views here: import must leave economics pending.
+      // Navigation/export can request economics separately after import completes.
       if (!changedTouched) { Table.paint(); }   /* v12.9.7-mem: вид не менялся */
       $('#mImport').classList.remove('on');
       /* Итог по времени: видно, какой этап «съел» минуты. */
@@ -46795,12 +46806,15 @@ function bindAll() {
     const button = $('#impApply'), status = $('#impApplyStatus');
     if (button.disabled) return;
     button.disabled = true;
+    console.info('[UC] импорт · нажата кнопка применения', {file:S.pending?.file,rows:S.pending?.body?.length});
     if (status) { status.hidden = false; status.textContent = 'Применение импорта… Дождитесь завершения; повторно выбирать файл не нужно.'; }
     try {
       await Import.apply();
       // Validation can return without starting an import and keeps the wizard open.
-      if (status) status.textContent = $('#mImport').classList.contains('on')
-        ? 'Импорт не завершён. Проверьте сопоставление колонок и сообщение проверки.' : '';
+      const stillOpen = $('#mImport').classList.contains('on');
+      if (status) { status.textContent = stillOpen
+        ? 'Импорт не завершён. Проверьте сопоставление колонок и сообщение проверки.' : ''; status.hidden = !stillOpen; }
+      console.info('[UC] импорт · результат применения: '+(stillOpen ? 'мастер остался открыт (проверка не пройдена)' : 'мастер закрыт'));
     } catch (err) {
       console.error('[UC] Import.apply error:', err);
       const reason = storageErrorText(err);
