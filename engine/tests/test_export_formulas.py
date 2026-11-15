@@ -1,5 +1,6 @@
 import io,json,pathlib,sqlite3,subprocess,sys,unittest,zipfile
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from export_formulas import FORMULA_KEYS,cached_formula,column_letter,unavailable
 import uc_engine as E
 

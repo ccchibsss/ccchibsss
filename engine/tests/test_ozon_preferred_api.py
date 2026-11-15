@@ -1,6 +1,7 @@
 import copy,json,pathlib,sqlite3,subprocess,sys,unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 from uc_engine import enrich_ozon_preferred
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from ozon_identity import IdentityGuard
 
 class OzonPreferredAPI(unittest.TestCase):

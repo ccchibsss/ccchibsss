@@ -1,5 +1,6 @@
 import copy,json,pathlib,sqlite3,subprocess,sys,unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from dimension_oe_search import OeSearch
 from dimension_oe_apply import apply_choices
 from dimension_quarantine import compact

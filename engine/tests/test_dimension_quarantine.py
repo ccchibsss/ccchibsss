@@ -1,5 +1,6 @@
 import copy,json,pathlib,subprocess,sys,unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from dimension_quarantine import DimensionQuarantine, compact
 
 class DimensionQuarantineParity(unittest.TestCase):
