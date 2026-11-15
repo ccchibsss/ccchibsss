@@ -8,6 +8,7 @@ from unittest.mock import patch
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'engine'))
 import uc_engine as E
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from hvc_enrichment import norm
 
 AT='2026-01-01T00:00:00Z'

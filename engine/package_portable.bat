@@ -20,6 +20,8 @@ powershell -NoProfile -Command "(Get-Content '%OUT%\python\python312._pth') -rep
 copy /y "%~dp0uc_engine.py" "%OUT%\engine\" >nul
 copy /y "%~dp0ozon_template.json" "%OUT%\engine\" >nul
 copy /y "%~dp0std_dims.json" "%OUT%\engine\" >nul
+copy /y "%~dp0csv_kind_rewrites.json" "%OUT%\engine\" >nul
+copy /y "%~dp0ozon_name_expansions.json" "%OUT%\engine\" >nul
 copy /y "%~dp0..\index.html" "%OUT%\" >nul
 (
 echo @echo off

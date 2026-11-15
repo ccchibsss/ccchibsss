@@ -6,6 +6,7 @@ import subprocess
 import sys
 import unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from name_category import apply
 from uc_engine import match_condition
 

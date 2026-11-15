@@ -1,5 +1,6 @@
 import json,pathlib,shutil,subprocess,sys,unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from csv_kind_matcher import CsvKindMatcher,texts
 
 class CsvKindMatcherParity(unittest.TestCase):

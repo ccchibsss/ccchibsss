@@ -2,6 +2,7 @@
 import copy,json,math,pathlib,sqlite3,subprocess,sys,unittest
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'engine'))
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from enrichment_transport import encode_special,decode_special,equivalent
 from uc_engine import enrich_rule_rows
 

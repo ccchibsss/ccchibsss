@@ -1,5 +1,6 @@
 import copy,itertools,json,pathlib,random,subprocess,sys,unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
+import uc_engine  # Registers the internal modules stored in the single engine file.
 from dimension_policy import source_allowed,similar_oe,pick
 
 class DimensionPolicyParity(unittest.TestCase):

@@ -15,6 +15,2818 @@ UNIT·CONTROL — локальный расчётный движок (Python + S
 Ключи маркетплейсов и пароль почты читаются из переменных окружения или
 engine_data/secrets.json (на Windows рекомендуется DPAPI-обёртка, см. README).
 """
+# Internal modules live in this file; no extracted .py files are needed.
+# Separate module namespaces preserve globals, imports and pickling identities.
+# Explicit stdlib imports keep freezer dependency discovery working even though
+# the internal module bodies are stored as source below.
+import copy as _bundle_copy
+import dataclasses as _bundle_dataclasses
+import unicodedata as _bundle_unicodedata
+import importlib.abc as _bundle_abc
+import importlib.util as _bundle_util
+import sys as _bundle_sys
+
+_BUNDLED_SOURCES = {
+    # ===== category_kind =====
+    'category_kind': """\"\"\"Non-destructive CategoryKindAuto.apply lifecycle port.\"\"\"
+import copy,json
+from category_tnved import CategoryTnved,norm,text
+from csv_kind_matcher import CsvKindMatcher
+from name_category import apply as name_apply, MARKERS
+
+ALIASES={
+      'подвеска':['подвеска и рулевое управление'],
+      'рулевое управление':['подвеска и рулевое управление','резинотехнические изделия','насосы и компрессоры','ремкомплекты'],
+      'двигатель':['детали двигателя','ремни и ролики двигателя','резинотехнические изделия','фильтры','насосы и компрессоры','подшипники','свечи и высоковольтные провода'],
+      'тормозная система':['детали крепежные','ремкомплекты','резинотехнические изделия'],
+      'прокладки и уплотнения':['резинотехнические изделия','детали двигателя','детали кпп'],
+      'ремни и ролики':['ремни и ролики двигателя'],
+      'электрика и электроника':['электрооборудование','свечи и высоковольтные провода'],
+      'электрические аксессуары':['электрооборудование'],
+      'освещение':['детали кузова','электрооборудование'],
+      'стеклоочистители':['детали кузова'],
+      'охлаждение':['система охлаждения','резинотехнические изделия','насосы и компрессоры'],\x20
+      'трансмиссия / кпп':['детали кпп'],
+      'кузовные элементы':['детали кузова'],
+      'крепеж и метизы':['детали крепежные'],
+      'подушки и опоры':['резинотехнические изделия','подвеска и рулевое управление'],
+      'топливная система':['насосы и компрессоры','электрооборудование','фильтры','резинотехнические изделия','ремкомплекты'],
+      'подшипники':['подшипники','детали двигателя','детали кпп','подвеска и рулевое управление']
+  }
+SOURCE="по названию: Категории12131.csv"
+def blank(v): return not text(v).strip() or text(v).strip().lower() in ("без категории","не определено")
+
+def shape(m):
+    keys=("version","name","brand","category","referenceCategory","type","categoryMode","categoryMethod","categoryRevision")
+    return isinstance(m,dict) and all(isinstance(m.get(k),str) and len(m[k])<=4000 for k in keys) and isinstance(m.get("confirmed"),bool) and m.get("categoryMode") in ("explicit","name_auto","csv_auto","rule_auto")
+
+class CategoryKind:
+    def __init__(self,rows,revision,base_categories=()):
+        self.tnved=CategoryTnved(rows,revision);self.matcher=CsvKindMatcher(rows)
+        self.version='csv-kind-name-v1|'+revision
+        self.known={norm(c) for c in base_categories}|{k[0] for k in self.tnved.index}
+    def own(self,p): return shape(p.get('_categoryKindAuto')) and text(p.get('category_type'))==p['_categoryKindAuto']['type']
+    def clear(self,p):
+        if self.own(p) and not p['_categoryKindAuto']['confirmed']: p.pop('category_type',None)
+        p.pop('_categoryKindAuto',None)
+        sources=p.get('_sources')
+        if isinstance(sources,dict) and isinstance(sources.get('category_type'),dict) and sources['category_type'].get('file')==SOURCE: sources.pop('category_type')
+    def apply(self,row,context,enabled,match,at):
+        p=copy.deepcopy(row); self._apply(p,context or {},enabled,match,at); return p
+    def _apply(self,p,ctx,enabled,match,at):
+        m=p.get('_categoryKindAuto')
+        if m and (not shape(m) or m['version']!=self.version):
+            p.update(_categoryKindStatus='foreign_marker',_categoryKindReason='Неизвестный источник вида: сохраните и проверьте его вручную');return
+        owned=self.own(p)
+        if m and not owned: p.pop('_categoryKindAuto',None);m=None
+        if owned and m['confirmed']:
+            if text(p.get('category'))!=m['category']: p.pop('_categoryKindAuto',None);p['_categoryKindStatus']='explicit'
+            else: p['_categoryKindStatus']='confirmed'
+            return
+        if p.get('_categoryTypeCleared'):
+            if owned: self.clear(p)
+            p.update(_categoryKindStatus='disabled',_categoryKindChoices=[]);return
+        explicit=self.tnved.type_info({**p,'category_type':''} if owned else p)
+        if explicit['conflict']:
+            if owned: self.clear(p)
+            p.update(_categoryKindStatus='ambiguous',_categoryKindChoices=[],_categoryKindReason='В исходных данных указаны разные виды');return
+        if explicit['value']:
+            if owned and norm(explicit['value'])==norm(m['type']): m['confirmed']=True;p['_categoryKindStatus']='confirmed'
+            elif owned: self.clear(p);p['_categoryKindStatus']='explicit'
+            else: p['_categoryKindStatus']='explicit'
+            p.update(_categoryKindChoices=[],_categoryKindReason='');return
+        if not enabled:
+            if owned and not self.tnved.kind_current(p): p['_categoryKindStatus']='stale'
+            elif not owned: p['_categoryKindStatus']='disabled'
+            return
+        if owned and self.tnved.kind_current(p): p['_categoryKindStatus']='auto';return
+        g=self.matcher.guess(p)
+        if g['status']!='auto':
+            if owned:
+                self.clear(p)
+                if m['categoryMode']=='csv_auto' and p.get('_categoryNameMethod')=='csv_kind' and p.get('category')==p.get('_categoryNameAutoValue'):
+                    p['category']='Без категории'
+                    for k in MARKERS: p.pop(k,None)
+                    updated=name_apply(p,ctx,True,match);p.clear();p.update(updated)
+            p.update(_categoryKindStatus=g['status'],_categoryKindChoices=g.get('choices',[])[:6],_categoryKindReason=g.get('reason',''),_categoryKindDiscriminators=g.get('discriminators',[])[:8]);return
+        cat=text(p.get('category')); mode='explicit'
+        auto=bool(p.get('_categoryNameAutoValue')) and cat==p['_categoryNameAutoValue']
+        rule=auto and p.get('_categoryNameMethod') in ('rule','enrich')
+        explicit_blank=(p.get('_categoryNameExplicit') or p.get('_categoryExplicitSource')) and bool(cat.strip())
+        if blank(cat) and not explicit_blank:
+            cat=g['category'];mode='csv_auto'
+            p.update(category=cat,_categoryNameAutoValue=cat,_categoryNameSource=text(p.get('name')),_categoryNameBrand=text(p.get('brand')),
+                     _categoryNameRevision=ctx.get('version',''),_categoryNameStatus='auto',_categoryNameMethod='csv_kind',_categoryNameChoices=[])
+        elif auto and not rule: mode='name_auto'
+        else:
+            mode='rule_auto' if rule else 'explicit'
+            compatible=norm(cat)==norm(g['category']) or norm(g['category']) in ALIASES.get(norm(cat),[])
+            if not blank(cat) and norm(cat) in self.known and not compatible:
+                if owned: self.clear(p)
+                p.update(_categoryKindStatus='category_conflict',_categoryKindChoices=[g['category']+' / '+g['type']],_categoryKindReason='Название указывает на другую категорию словаря; сохранённая категория не изменена');return
+        p['category_type']=g['type']
+        p['_categoryKindAuto']={'version':self.version,'name':text(p.get('name')),'brand':text(p.get('brand')),'category':cat,
+            'referenceCategory':g['category'],'type':g['type'],'categoryMode':mode,'categoryMethod':text(p.get('_categoryNameMethod')),
+            'categoryRevision':text(p.get('_categoryNameRevision')),'confirmed':False}
+        p.update(_categoryKindStatus='auto',_categoryKindChoices=[],_categoryKindReason='',_categoryKindDiscriminators=[])
+        sources=p.get('_sources')
+        if isinstance(sources,str):
+            try: sources=json.loads(sources)
+            except ValueError: sources={}
+        p['_sources']=sources if isinstance(sources,dict) else {}
+        p['_sources']['category_type']={'file':SOURCE,'date':at,'category':g['category'],'type':g['type'],'review':'требует проверки'}
+
+    def confirm(self,row,category_confirmed=False,at=''):
+        p=copy.deepcopy(row)
+        if not self.own(p) or p['_categoryKindAuto']['confirmed'] or not self.tnved.kind_current(p): return p,False
+        m=p['_categoryKindAuto'];m['confirmed']=True
+        if category_confirmed: m.update(categoryMode='explicit',categoryMethod='',categoryRevision='')
+        p.update(_categoryKindStatus='confirmed',_categoryKindReason='',_categoryKindChoices=[])
+        sources=p.get('_sources')
+        if isinstance(sources,str):
+            try: sources=json.loads(sources)
+            except ValueError: sources={}
+        p['_sources']=sources if isinstance(sources,dict) else {}
+        p['_sources']['category_type']={'file':'вручную: подтверждён вид из Категории12131.csv','date':at}
+        return p,True
+
+    def explicit_import(self,row,value,source):
+        p=copy.deepcopy(row);m=p.get('_categoryKindAuto')
+        if not text(value).strip() or not shape(m): return p
+        if norm(value)==norm(m['type']): m['confirmed']=True;p['_categoryKindStatus']='confirmed'
+        else: p.pop('_categoryKindAuto',None);p['_categoryKindStatus']='explicit'
+        if isinstance(p.get('_sources'),dict):
+            if source is None: p['_sources'].pop('category_type',None)
+            else: p['_sources']['category_type']=copy.deepcopy(source)
+        return p
+
+    def marker_for_cloud(self,p):
+        m=p.get('_categoryKindAuto')
+        if not m: return None
+        if not shape(m) or m['version']!=self.version:
+            raise ValueError('Неизвестный источник вида для '+text(p.get('article') or 'SKU')+': сохраните резервную копию и проверьте вручную.')
+        return copy.deepcopy(m) if self.own(p) else None
+
+    def hydrate(self,row,marker):
+        p=copy.deepcopy(row)
+        if not marker: p.pop('_categoryKindAuto',None);return p
+        m=copy.deepcopy(marker);p['_categoryKindAuto']=m
+        if not text(p.get('category_type')) and not m.get('confirmed'): p['category_type']=m.get('type')
+        current=self.tnved.kind_current(p)
+        p['_categoryKindStatus']=('confirmed' if m.get('confirmed') else 'auto') if current else 'stale'
+        if m.get('categoryMode') in ('name_auto','csv_auto','rule_auto') and p.get('category')==m.get('category'):
+            p.update(_categoryNameAutoValue=m.get('category'),_categoryNameSource=m.get('name'),_categoryNameBrand=m.get('brand'),
+                _categoryNameRevision=m.get('categoryRevision'),_categoryNameMethod=m.get('categoryMethod'),
+                _categoryNameStatus='auto' if current else 'stale',_categoryNameChoices=[])
+        return p
+""",
+    # ===== category_tnved =====
+    'category_tnved': """\"\"\"Port of CategoryTnved apply/typeInfo/lookup provenance contract.\"\"\"
+import copy
+import re
+import unicodedata
+from enrichment_formula import string as js_string
+
+TYPE_KEY = re.compile(r'^(?:вид[\\s_-]+категор(?:ии|изации)|тип[\\s_-]+категории|подкатегория|category[\\s_-]*type|sub[\\s_-]*category)$',re.I)
+CODE_KEY = re.compile(r'^(?:тн[\\s_-]*вэд(?:[\\s_-]*(?:код|коды))?(?:[\\s_-]*еаэс)?|код[\\s_-]*тн[\\s_-]*(?:вэд|вд)(?:[\\s_-]*еаэс)?|тнвд(?:[\\s_-]*еаэс)?|tnved(?:[\\s_-]*eaes)?|hs[\\s_-]*code)$',re.I)
+CODE_KEYS = ['tnved','tnved_eaes','tnvedEaes','hs_code','hsCode','ТН ВЭД код ЕАЭС','ТН ВЭД коды ЕАЭС','ТН ВЭД','Код ТН ВЭД','ТНВД']
+
+def text(v):
+    return '' if v is None else js_string(v)
+
+def norm(v): return re.sub(r'\\s+',' ',unicodedata.normalize('NFKC',text(v)).strip().lower().replace('ё','е'))
+
+class CategoryTnved:
+    def __init__(self, rows, revision, source='Категории12131.csv'):
+        self.revision,self.source=revision,source
+        self.index={}
+        for category,kind,code,*_ in rows:
+            category,kind,code=(text(x).strip() for x in (category,kind,code))
+            if not category or not kind or not re.fullmatch(r'[0-9]{10}',code): continue
+            key=(norm(category),norm(kind))
+            old=self.index.get(key)
+            if old and old['code']!=code: old['conflict']=True
+            if not old: self.index[key]={'category':category,'type':kind,'code':code,'categoryKey':key[0],'typeKey':key[1],'conflict':False}
+    def lookup(self,category,kind):
+        if not norm(category) or not norm(kind): return {'status':'incomplete'}
+        hit=self.index.get((norm(category),norm(kind)))
+        if not hit: return {'status':'not_found'}
+        if hit['conflict']: return {'status':'ambiguous'}
+        return {'status':'match',**{k:v for k,v in hit.items() if k!='conflict'}}
+    def kind_current(self,p):
+        m=p.get('_categoryKindAuto')
+        keys=['version','name','brand','category','referenceCategory','type','categoryMode','categoryMethod','categoryRevision']
+        if not isinstance(m,dict) or not all(isinstance(m.get(k),str) and len(m[k])<=4000 for k in keys): return False
+        if not isinstance(m.get('confirmed'),bool) or m['categoryMode'] not in ('explicit','name_auto','csv_auto','rule_auto'): return False
+        if m['version']!='csv-kind-name-v1|'+self.revision or text(p.get('category_type'))!=m['type'] or text(p.get('category'))!=m['category'] or p.get('_categoryTypeCleared'): return False
+        if self.lookup(m['referenceCategory'],m['type'])['status']!='match': return False
+        return m['confirmed'] or (text(p.get('name'))==m['name'] and text(p.get('brand'))==m['brand'])
+    def type_info(self,p):
+        if p.get('_categoryTypeCleared') and not text(p.get('category_type')).strip(): return {'value':'','conflict':False}
+        found={}
+        def add(v):
+            if isinstance(v,(dict,list)) or v is None: return
+            v=text(v).strip()
+            if norm(v): found.setdefault(norm(v),v)
+        m=p.get('_categoryKindAuto')
+        stale=isinstance(m,dict) and not m.get('confirmed') and text(p.get('category_type'))==m.get('type') and not self.kind_current(p)
+        if not stale: add(p.get('category_type'))
+        for k in ('categoryType','sub_category'): add(p.get(k))
+        for box in (p.get('custom'),p.get('enriched'),p.get('attributes')):
+            if isinstance(box,dict):
+                for k,v in box.items():
+                    if TYPE_KEY.fullmatch(k.strip()): add(v)
+        result={'value':next(iter(found.values())) if len(found)==1 else '', 'conflict':len(found)>1}
+        if stale: result['stale']=True
+        return result
+    def lookup_for(self,p,info):
+        if info['conflict']: return {'status':'ambiguous_type'}
+        hit=self.lookup(p.get('category'),info['value'])
+        if hit['status']=='match': return hit
+        m=p.get('_categoryKindAuto')
+        if m and self.kind_current(p) and norm(m['type'])==norm(info['value']):
+            via=self.lookup(m['referenceCategory'],info['value'])
+            if via['status']=='match': return {**via,'viaName':True}
+        return hit
+    def find_code(self,p,skip=False):
+        for box in (p,p.get('custom'),p.get('enriched'),p.get('attributes')):
+            if not isinstance(box,dict): continue
+            for key in CODE_KEYS+[k for k in box if k not in CODE_KEYS and CODE_KEY.fullmatch(k.strip())]:
+                if skip and box is p and key=='tnved': continue
+                v=box.get(key)
+                if v is not None and not isinstance(v,(dict,list)) and text(v).strip(): return text(v).strip()
+        return ''
+    def current(self,p):
+        a=p.get('_categoryTnvedAuto')
+        if not isinstance(a,dict) or text(p.get('tnved')).strip()!=text(a.get('code')) or self.find_code(p,True): return False
+        info=self.type_info(p)
+        if info['conflict'] or info.get('stale'): return False
+        hit=self.lookup_for(p,info)
+        return hit['status']=='match' and a.get('revision')==self.revision and all(a.get(k)==hit[k] for k in ('categoryKey','typeKey','code'))
+    def apply(self,source,enabled=True,timestamp=''):
+        p=copy.deepcopy(source); a=p.get('_categoryTnvedAuto')
+        if a and (not isinstance(a,dict) or a.get('revision')!=self.revision): return p,{'status':'foreign_marker'}
+        if a and text(p.get('tnved')).strip()!=text(a.get('code')): p.pop('_categoryTnvedAuto',None); a=None
+        if a and self.current(p): return p,{'status':'auto','code':text(a['code'])}
+        if a and p.get('_categoryKindAuto') and not self.kind_current(p) and not enabled: return p,{'status':'stale'}
+        if a:
+            if text(p.get('tnved')).strip()==text(a.get('code')): p.pop('tnved',None)
+            p.pop('_categoryTnvedAuto',None)
+            sm=p.get('_sources') or {}
+            if isinstance(sm,str):
+                import json
+                try: sm=json.loads(sm)
+                except ValueError: sm={}
+            for k in ('tnved','ТН ВЭД код ЕАЭС'):
+                if isinstance(sm.get(k),dict) and sm[k].get('file')=='справочник: '+self.source: sm.pop(k)
+            p['_sources']=sm
+        if p.get('_tnvedNoAutofill'): return p,{'status':'disabled'}
+        info=self.type_info(p)
+        if info['conflict'] or info.get('stale'): return p,{'status':'ambiguous_type'}
+        hit=self.lookup_for(p,info)
+        if hit['status']!='match': return p,hit
+        explicit=self.find_code(p)
+        if explicit: return p,{'status':'preserved','code':explicit}
+        p['tnved']=hit['code']
+        p['_categoryTnvedAuto']={'revision':self.revision,**{k:hit[k] for k in ('categoryKey','typeKey','code')}}
+        if not isinstance(p.get('_sources'),dict):
+            import json
+            try: p['_sources']=json.loads(p['_sources']) if isinstance(p.get('_sources'),str) else {}
+            except ValueError: p['_sources']={}
+            if not isinstance(p['_sources'],dict): p['_sources']={}
+        p['_sources']['tnved']={'file':'справочник: '+self.source,'date':timestamp,'category':hit['category'],'type':hit['type'],'review':'требует проверки'}
+        return p,{'status':'filled','code':hit['code']}
+""",
+    # ===== csv_kind_lexicon =====
+    'csv_kind_lexicon': """\"\"\"CsvNameMatcher lexical rules, ported from the browser reference.\"\"\"
+import re
+import unicodedata
+from name_category import ALIASES, stem as base_stem
+from category_tnved import norm
+
+STOP=set(['и','или','для','под','над','на','к','по','от','без','с','из','в','the','and','of','for','авто','автомобильный','автомобильная','автомобильные','автомобилей','автомобиля','система','системы','систем','систему','новый','новая','новые','оригинал'])
+WEAK=re.compile('^(?:передн|задн|верхн|нижн|лев|прав|боков|внутрен|наружн|внешн|нов|оригин|универс|комплект|набор|установ|креплен|крепеж|детал|запчаст|шт|размер|сторон|сбор|штуч|бренд|модел|компонент)')
+STEM_RULES=[('^рем(?:ень|ен[ьяюем]|н(?:и|я|ей|ями|ях|ю|ем))$', 'ремень'), ('^порш(?:ень|ен[ьяюем]|н(?:и|я|ей|ями|ях|ю|ем))$', 'поршень'), ('^воздуш|^воздух', 'воздух'), ('^топлив', 'топлив'), ('^масл(?:о|а|у|ом|е|ы|ами|ах|ян[а-я]*)$', 'масл'), ('^салон', 'салон'), ('^тормоз', 'тормоз'), ('^двигател|^двс$', 'двигател'), ('^ступиц|^ступич', 'ступиц'), ('^накал', 'накал'), ('^дверн|^двер', 'двер'), ('^передн', 'передн'), ('^задн', 'задн'), ('^натяжн|^натяжител', 'натяж'), ('^рейк|^реек', 'рейк'), ('^крыл(?:о|а|у|е|ом|ья|ьев|ьям|ьями|ьях)$', 'крыл'), ('^ковр(?:ик[а-я]*|ы|ов|ам|ами|ах|а)?$', 'ковр'), ('^(?:поликлинов|ручейков)', 'ручейк')]
+
+def stem(word):
+    w=str(word or "").lower().replace("ё","е")
+    w=ALIASES.get(w,w)
+    for pattern,result in STEM_RULES:
+        if re.search(pattern,w): return result
+    return base_stem(w)
+
+def words(value):
+    s=unicodedata.normalize("NFKC",str(value or "")).lower().replace("ё","е")
+    s=re.sub(r"ремонтн[а-я]*\\s+комплект[а-я]*","ремкомплект",s)
+    return [w for w in re.sub("[^a-zа-я0-9]+"," ",s).split() if len(w)>=2 and not re.fullmatch("[0-9]+",w) and w not in STOP]
+
+def head(ws):
+    for w in ws:
+        adj=not re.search("(?:ение|ание|тие|ствие)$",w) and re.search("(?:ый|ий|ой|ая|яя|ое|ее|ые|ие|ых|их|ого|его|ому|ему|ыми|ими|ую|юю)$",w)
+        if adj or re.match("^(?:комплект|набор|оригинал)",w): continue
+        k=stem(w)
+        if len(k)>=2: return k
+    return ""
+
+def variant(ws):
+    h=head(ws); needs=list(dict.fromkeys(stem(w) for w in ws if len(stem(w))>=2))
+    return {"head":h,"needs":needs} if h and needs else None
+
+
+def build_index(rows):
+    by_head,by_exact,features={},{},set()
+    def add(entry,ws,kind,seen):
+        v=variant(ws)
+        if not v: return
+        key=v['head']+'|'+'|'.join(sorted(v['needs']))
+        if key in seen: return
+        seen.add(key)
+        by_head.setdefault(v['head'],[]).append({'entry':entry,**v,'variantKind':kind})
+        features.update(w for w in v['needs'] if len(w)>=3 and not WEAK.search(w))
+    for category,typ,code,*_ in rows:
+        if not category or not typ or not re.fullmatch('[0-9]{10}',str(code)): continue
+        if re.search('прочие|другие|разные|различные|универсальные',typ,re.I):
+            features.update(stem(w) for w in words(typ) if len(stem(w))>=3 and not WEAK.search(stem(w)))
+            continue
+        entry={'category':category,'type':typ,'code':code,'categoryWords':set(map(stem,words(category)))}
+        by_exact.setdefault(norm(typ),[]).append(entry)
+        pieces=[p.strip() for p in re.split(r'\\s+(?:и|или)\\s+|[/,;]+',typ,flags=re.I) if p.strip()]
+        seen=set();add(entry,words(typ),'full',seen)
+        if len(pieces)>1:
+            all_words=list(map(words,pieces));first=all_words[0]
+            for i,part in enumerate(all_words):
+                if not part: continue
+                if i==0 and len(first)==1 and any(len(a)>1 for a in all_words[1:]):
+                    for right in all_words[1:]:
+                        if len(right)>1: add(entry,first+right[1:],'shared',seen)
+                elif i>0 and len(first)>1:
+                    anchor=next((w for w in first if stem(w)==head(first)),first[0])
+                    add(entry,[anchor]+part,'shared',seen)
+                else: add(entry,part,'part',seen)
+    return {'byHead':by_head,'byExact':by_exact,'features':features}
+""",
+    # ===== csv_kind_matcher =====
+    'csv_kind_matcher': """\"\"\"Conservative CSV kind candidate ranking; no row mutations.\"\"\"
+import json
+import pathlib
+import re
+from csv_kind_lexicon import build_index, words, stem, head, WEAK
+from category_tnved import norm
+
+TEXT_RULES=[('(^|[^a-zа-яё0-9])опор[а-яё]*\\\\s+(?:двигател[а-яё]*|двс)(?=$|[^a-zа-яё0-9])', '$1подушка двигателя'), ('(^|[^a-zа-яё0-9])стойк[а-яё]*\\\\s+стабилизатор[а-яё]*(?=$|[^a-zа-яё0-9])', '$1тяга стабилизатора'), ('(^|[^a-zа-яё0-9])(?:насос[а-яё]*\\\\s+водян[а-яё]*|водян[а-яё]*\\\\s+насос[а-яё]*|насос[а-яё]*\\\\s+охлаждающ[а-яё]*\\\\s+жидкост[а-яё]*|помп[а-яё]*\\\\s+систем[а-яё]*\\\\s+охлаждени[а-яё]*)(?=$|[^a-zа-яё0-9])', '$1помпа водяная'), ('(^|[^a-zа-яё0-9])(?:щ[её]тк[а-яё]*\\\\s+дворник[а-яё]*|дворник[а-яё]*)(?=$|[^a-zа-яё0-9])', '$1щетка стеклоочистителя'), ('(^|[^a-zа-яё0-9])дмрв(?=$|[^a-zа-яё0-9])', '$1расходомер'), ('(^|[^a-zа-яё0-9])(?:рулев[а-яё]*\\\\s+наконечник[а-яё]*|наконечник[а-яё]*\\\\s+рулев[а-яё]*)(?=$|[^a-zа-яё0-9])', '$1наконечник рулевой тяги'), ('(^|[^a-zа-яё0-9])насос[а-яё]*\\\\s+гидроусилител[а-яё]*(?=$|[^a-zа-яё0-9])', '$1насос ГУР'), ('(^|[^a-zа-яё0-9])форсунк[а-яё]*\\\\s+стеклоомывател[а-яё]*(?=$|[^a-zа-яё0-9])', '$1форсунка омывателя'), ('(^|[^a-zа-яё0-9])сальник[а-яё]*\\\\s+(?:коленчат[а-яё]*\\\\s+вал[а-яё]*|коленвал[а-яё]*|распредвал[а-яё]*|распределительн[а-яё]*\\\\s+вал[а-яё]*)(?=$|[^a-zа-яё0-9])', '$1сальник двигателя'), ('(^|[^a-zа-яё0-9])болт[а-яё]*\\\\s+головк[а-яё]*\\\\s+блок[а-яё]*\\\\s+цилиндр[а-яё]*(?=$|[^a-zа-яё0-9])', '$1болт ГБЦ'), ('(^|[^a-zа-яё0-9])кольц[а-яё]*\\\\s+поршн[а-яё]*(?=$|[^a-zа-яё0-9])', '$1кольцо поршневое'), ('(^|[^a-zа-яё0-9])фильтр[а-яё]*\\\\s+(?:очистк[а-яё]*\\\\s+)?топлив[а-яё]*(?=$|[^a-zа-яё0-9])', '$1фильтр топливный'), ('(^|[^a-zа-яё0-9])фильтр[а-яё]*\\\\s+(?:моторн[а-яё]*\\\\s+)?масл[а-яё]*(?=$|[^a-zа-яё0-9])', '$1фильтр масляный'), ('(^|[^a-zа-яё0-9])фильтр[а-яё]*\\\\s+(?:очистк[а-яё]*\\\\s+)?воздух[а-яё]*(?=$|[^a-zа-яё0-9])', '$1фильтр воздушный'), ('(^|[^a-zа-яё0-9])прокладк[а-яё]*\\\\s+головк[а-яё]*\\\\s+блок[а-яё]*\\\\s+цилиндр[а-яё]*(?=$|[^a-zа-яё0-9])', '$1прокладка ГБЦ')]
+UNSAFE='\\\\b(?:filter|pump|pad|pads|disc|caliper|motor|starter|alternator|mount|arm|sensor|coil|radiator|joint|wiper|link|belt)[\\\\s,;:()\\\\[\\\\]\\\\/_–—-]+(?:(?:wear|pressure|mounting|retaining|drive)\\\\s+)?(?:housing|bracket|gasket|seal|cover|cap|pulley|bearing|bushing|bush|boot|bolt|relay|sensor|switch|solenoid|wire|wiring|connector|harness|clip|adapter|fuse|wrench|tool|repair\\\\s+kit)\\\\b'
+SENSITIVE=set(['клапан','форсунк','кронштей','крышк','заглушк','пробк','втулк','шестерн','пружин','трубк','патрубк','датчик','кольц','вал','вентилят','мотор','опор','подушк','пыльник','муфт','шкив','поршень','ремкомпл','накладк','решетк','реле','радиатор','насос','фильтр','шланг','тяга','тяг','рычаг','ролик','ламп','стекл'])
+REWRITES=json.loads(pathlib.Path(__file__).with_name("csv_kind_rewrites.json").read_text(encoding="utf-8"))
+
+
+def rewrite(value):
+    text=str(value or '')
+    for r in REWRITES:
+        if r['needles'] and not all(n in text.lower() for n in r['needles']): continue
+        text=re.sub(r['pattern'],lambda m:m[1]+r['target'],text,flags=re.I)
+    return text
+
+
+def texts(name):
+    raw=str(name or ''); result=[raw,rewrite(raw)]; s=raw
+    for pattern,target in TEXT_RULES:
+        s=re.sub(pattern,target.replace('$1',r'\\g<1>'),s,flags=re.I)
+    if s!=raw: result.append(s)
+    x=rewrite(s)
+    if x!=s: result.append(x)
+    return list(dict.fromkeys(result))
+
+
+def name_lead(name,brand):
+    lead=re.split(r'(?:^|\\s)(?:для|под|от|на|к|for|совместим(?:ый|ая|ые|о)?|подходит|применимость)(?=\\s|$)',str(name or ''),flags=re.I)[0]
+    brand=str(brand or '').strip()
+    if brand and lead.lower().startswith(brand.lower()):
+        suffix=lead[len(brand):]
+        if re.match(r'^[\\s,:;/—–-]+',suffix): lead=re.sub(r'^[\\s,:;/—–-]+','',suffix)
+    else:
+        lead=re.sub(r'^([A-Z][A-Z0-9&._-]{1,29})[\\s,:;/—–-]+(?=[А-ЯЁа-яё])','',lead)
+    return lead
+
+
+def choices(entries): return [x['category']+' / '+x['type'] for x in entries[:6]]
+
+
+class CsvKindMatcher:
+    def __init__(self,rows): self.index=build_index(rows)
+
+    def candidates(self,name,brand=''):
+        name=str(name or '').strip(); brand=str(brand or '').strip(); idx=self.index
+        if not name: return {'status':'empty','matches':[],'choices':[]}
+        exact=idx['byExact'].get(norm(name))
+        if exact: return {'status':'matches','matches':exact,'choices':choices(exact)}
+        if re.search(UNSAFE,name_lead(name,brand),re.I|re.ASCII): return {'status':'none','matches':[],'choices':[]}
+        matches={}; near={}; all_tokens={}
+        for text in texts(name):
+            hw=head(words(name_lead(text,brand))); tokens=set(map(stem,words(text)))
+            if not hw: continue
+            all_tokens.update(dict.fromkeys(map(stem,words(text))))
+            for x in idx['byHead'].get(hw,[]):
+                entry=x['entry']; key=(norm(entry['category']),norm(entry['type']))
+                overlap=sum(n in tokens for n in x['needs'])
+                if key not in near or overlap>near[key]['overlap']: near[key]={'entry':entry,'overlap':overlap,'need':len(x['needs'])}
+                if not all(n in tokens for n in x['needs']): continue
+                score=len(x['needs'])*100+(5 if text==name else 0)
+                if key not in matches or score>matches[key]['score']: matches[key]={'entry':entry,'score':score,'needs':x['needs'],'head':hw}
+        ranked=sorted(matches.values(),key=lambda x:-x['score'])
+        multi=re.search(r'(?:\\sи\\s|\\sand\\s|\\s\\+\\s|\\s&\\s)|[а-яё]\\s*[,;/+&]\\s*(?=[а-яё])',name,re.I)
+        if multi and ranked:
+            present=[t for t in all_tokens if t in idx['byHead']]; top=[x for x in ranked if x['score']==ranked[0]['score']]
+            if len(present)>1 and any(any(h!=x['head'] and h not in x['needs'] for h in present) for x in top):
+                return {'status':'ambiguous','matches':[],'choices':choices([x['entry'] for x in top])}
+        if ranked:
+            top=[x for x in ranked if x['score']==ranked[0]['score']]
+            if len(top)==1 and len(top[0]['needs'])==1:
+                hit=top[0]; entry=hit['entry']
+                if hit['head']=='ремкомпл' and re.search('пороги.*арки.*ремкомплекты',entry['type'],re.I):
+                    return {'status':'ambiguous','matches':[],'choices':choices([entry]),'reason':'Название не подтверждает, что ремкомплект относится к порогам или аркам'}
+                extra=[t for t in all_tokens if t in idx['features'] and t!=hit['head'] and t not in entry['categoryWords'] and not WEAK.search(t)]
+                if hit['head'] in SENSITIVE and extra:
+                    return {'status':'ambiguous','matches':[],'choices':choices([entry]),'discriminators':extra[:8],'reason':'Название уточняет систему или деталь, а вид в словаре слишком общий'}
+            entries=[x['entry'] for x in top]
+            return {'status':'matches','matches':entries,'choices':choices(entries)}
+        possible=sorted(near.values(),key=lambda x:(-x['overlap'],x['need']))
+        if possible: return {'status':'ambiguous','matches':[],'choices':choices([x['entry'] for x in possible]),'reason':'Название не уточняет вид достаточно для однозначного выбора'}
+        return {'status':'none','matches':[],'choices':[]}
+
+    def guess(self,p):
+        got=self.candidates(p.get('name'),p.get('brand'))
+        if got['status']!='matches': return got
+        m=got['matches']; category=norm(p.get('category'))
+        blank=not str(p.get('category') or '').strip() or str(p.get('category') or '').strip().lower() in ('без категории','не определено')
+        if not blank and (not p.get('_categoryNameAutoValue') or p.get('category')!=p['_categoryNameAutoValue']):
+            same=[x for x in m if norm(x['category'])==category]
+            if same: m=same
+        if len(m)>1 and len({norm(x['type']) for x in m})==1:
+            title=set(map(stem,words(p.get('name'))))
+            ranks=[sum(w in title and not WEAK.search(w) for w in x['categoryWords']) for x in m]
+            best=max(ranks)
+            if best>0 and ranks.count(best)==1: m=[m[ranks.index(best)]]
+        if len(m)==1: return {'status':'auto','category':m[0]['category'],'type':m[0]['type'],'code':m[0]['code'],'choices':[]}
+        return {'status':'ambiguous','choices':choices(m),'reason':'Название соответствует нескольким видам из Категории12131.csv'}
+""",
+    # ===== dimension_oe =====
+    'dimension_oe': """\"\"\"AnomalyOE evidence/tuple guards for independent OE donor search.
+
+The catalogue/HVC search index and apply lifecycle are not implemented here yet.
+\"\"\"
+import copy
+from enrichment_formula import truth
+from dimension_policy import DIMS
+from dimension_quarantine import number, explicit, direct_codes, compact
+from ozon_identity import pair, codes
+
+
+def tuple_of(p):return {k:number(p.get(k)) for k in DIMS}
+
+
+def full(t):return all(number(t.get(k))>0 for k in DIMS)
+
+
+def exact_tuple(a,b):
+    return isinstance(a,dict) and isinstance(b,dict) and all(number(a.get(k))==number(b.get(k)) for k in DIMS)
+
+
+def tuple_key(t):return compact([t['weight']]+sorted([t[k] for k in ('length','width','height')],reverse=True))
+
+
+def auto_evidence(p):
+    e=p.get('_dimensionAutoEvidence')
+    return e if isinstance(e,dict) and not truth(p.get('_dimensionAutoConflict')) and not truth(p.get('_dimensionOeReview')) and not p.get('_dimensionImportIssues') and e.get('file') and e.get('identity')==pair(p) and full(e) and exact_tuple(e,tuple_of(p)) else None
+
+
+def current_codes(p,automatic=False,mode='auto'):
+    if automatic:return direct_codes(p,mode)
+    out=list(codes([p.get('oe_numbers'),p.get('oe_list')],mode))
+    return out or list(codes(p.get('oe_norm'),mode))
+
+
+def issue_free(model,p,t):
+    exp=explicit(p)
+    candidate={'category':p.get('category') or '',**t,'net_weight':p.get('net_weight'),
+               'volume':p.get('volume') if exp else 0,'_volumeExplicit':bool(p.get('_volumeExplicit')),
+               '_sources':copy.deepcopy(p.get('_sources') or {})}
+    return not model.evaluate(candidate)['issues']
+
+
+def target_signature(model,p,mode='auto'):
+    e=model.evaluate(p)
+    return model.signature(p,e)+'|'+'\\x1f'.join(sorted(current_codes(p,False,mode)))+'|'+str(p.get('oeSource') or '')
+""",
+    # ===== dimension_oe_apply =====
+    'dimension_oe_apply': """\"\"\"Validated OE proposal application; leaves proposed packaging quarantined.\"\"\"
+import copy
+from dimension_oe_search import OeSearch,identity
+from dimension_oe import exact_tuple,full,tuple_of,issue_free,current_codes,auto_evidence,target_signature
+from dimension_policy import source_allowed,similar_oe,rounded
+from dimension_quarantine import explicit
+from enrichment_formula import truth
+from ozon_identity import key
+
+
+def live(search,entry,target,automatic):
+    if entry['kind']=='row':
+        i=entry.get('donorIndex')
+        if not isinstance(i,int) or not 0<=i<len(search.rows):return False
+        ref=search.rows[i]
+    else:
+        ref=dict(search.ref.get('parts') or []).get(entry.get('partKey'))
+    if ref is None or ref is target:return False
+    verdict=source_allowed(target,ref,entry.get('matchedCode',''),search.mode)
+    if not verdict['ok']:return False
+    def oe_ok(cs):return any(similar_oe(key(c),verdict['oe']) for c in cs)
+    if entry['kind']=='row':
+        if ref.get('excluded') or ref.get('dimensionAnomalyBlocked'):return False
+        if verdict['tier']=='oe' and not oe_ok(current_codes(ref,automatic,search.mode)):return False
+        if automatic and not auto_evidence(ref):return False
+        t=tuple_of(ref)
+        return full(t) and exact_tuple(t,entry['tuple']) and issue_free(search.model,ref,t)
+    evidence=ref.get('_dimensionEvidence') or {}
+    if automatic:
+        if not evidence.get('singleRow') or not evidence.get('file') or evidence.get('identity')!=entry['identity']:return False
+        if verdict['tier']=='oe' and not (isinstance(evidence.get('oeCodes'),list) and oe_ok(evidence['oeCodes'])):return False
+        # The automatic owner restrictions are already rechecked by find().
+    link=dict(search.ref.get('cross') or []).get(entry.get('linkKey'))
+    code_ok=verdict['tier']=='sku' or bool(link and similar_oe(key(link.get('oeNorm')),verdict['oe']))
+    return code_ok and full(tuple_of(evidence)) and exact_tuple(tuple_of(evidence),entry['tuple'])
+
+
+def apply_choices(search,proposals,selected,automatic,timestamp):
+    if len(selected)!=len(set(selected)):raise ValueError('Повторные предложения OE')
+    chosen=[]
+    for i in selected:
+        if isinstance(i,bool) or not isinstance(i,int) or not 0<=i<len(proposals):raise ValueError('Неверный индекс предложения OE')
+        x=proposals[i];p=search.rows[x['targetIndex']];c=x['choice']
+        if not c or not p.get('dimensionAnomalyBlocked') or p.get('excluded') or (automatic and truth(p.get('_dimensionOeReview'))) or x['signature']!=target_signature(search.model,p,search.mode) or not live(search,c,p,automatic) or not issue_free(search.model,p,c['tuple']):
+            raise ValueError('Предложения устарели; повторите поиск по OE')
+        chosen.append((x,p,c))
+    results=[]
+    for x,source,c in chosen:
+        p=copy.deepcopy(source)
+        before={k:p[k] for k in ('weight','length','width','height','volume') if k in p}
+        via='по схожему OE '+c['link']['oe'] if c['link'].get('oe') else 'по тому же артикулу и бренду'
+        exp=explicit(p);p.update(c['tuple'])
+        if not exp:p['volume']=rounded(p['length']*p['width']*p['height']/1000,4);p['_volumeExplicit']=False
+        p.pop('dimensionAnomalyAck',None)
+        if not isinstance(p.get('_sources'),dict):p['_sources']={}
+        old_sources={}
+        for k in ('weight','length','width','height'):
+            label=search.labels.get(k,k)
+            old_sources[k]=copy.deepcopy(p['_sources'].get(k) or p['_sources'].get(label))
+            s={'file':('Автосверка ' if automatic else 'Подбор ')+via+' (нужна проверка): '+c['source'],'date':timestamp}
+            p['_sources'][k]=s;p['_sources'][label]=copy.deepcopy(s)
+        review={'oe':c['link'].get('oe') or '', 'source':c['source'],'at':timestamp,'before':before,'beforeSources':old_sources,
+                'after':copy.deepcopy(c['tuple']),'oeProofVersion':1,'method':'авто при импорте' if automatic else 'вручную'}
+        previous=p.get('_dimensionOeReview')
+        if isinstance(previous,dict):
+            history=previous.get('history') if isinstance(previous.get('history'),list) else []
+            review['history']=(history+[{k:v for k,v in previous.items() if k!='history'}])[-20:]
+        p['_dimensionOeReview']=review
+        log={'ts':timestamp,'article':p.get('article'),'category':p.get('category'),'before':before,'after':copy.deepcopy(c['tuple']),
+             'heuristic':('Автосверка ' if automatic else 'Подбор ')+via+' · '+c['source']+' · требуется проверка упаковки'}
+        for k in ('article','category'):
+            if k not in p:log.pop(k,None)
+        results.append({'targetIndex':x['targetIndex'],'row':p,'log':log})
+    return results
+""",
+    # ===== dimension_oe_search =====
+    'dimension_oe_search': """\"\"\"Independent AnomalyOE.find search over raw catalogue and HVC snapshots.\"\"\"
+import copy
+from dimension_oe import tuple_of,full,auto_evidence,exact_tuple,tuple_key,current_codes,issue_free,target_signature
+from dimension_policy import pick,source_allowed,MAX_CANDIDATES
+from dimension_quarantine import DimensionQuarantine,number
+from enrichment_formula import truth
+from ozon_identity import key
+
+
+def identity(p):return key(p.get('article') or p.get('artikul'))+'|'+key(p.get('brand'))
+
+
+def row_source(p,labels):
+    src=p.get('_sources') if isinstance(p.get('_sources'),dict) else {}
+    origins=[src.get(k) or src.get(labels.get(k)) or (src.get('Вес, кг') if k=='weight' else None) for k in ('weight','length','width','height')]
+    first=origins[0]
+    file=first.get('file') if first and all(x and x.get('file') and x.get('file')==first.get('file') and x.get('date')==first.get('date') for x in origins) else ''
+    return ' · '+str(file) if file else ' · общий исходный файл ОВХ не подтверждён'
+
+
+class OeSearch:
+    def __init__(self,rows,reference,limits,mode='auto',labels=None):
+        self.rows=copy.deepcopy(rows);self.ref=copy.deepcopy(reference)
+        self.model=DimensionQuarantine(limits,mode);self.mode=mode;self.labels=labels or {}
+
+    def find(self,target_indices,automatic=False):
+        rows=self.rows;parts=dict(self.ref.get('parts') or []);by_oe=dict(self.ref.get('byOe') or [])
+        registry=dict(self.ref.get('oe') or [])
+        targets=[(i,rows[i]) for i in target_indices]
+        need=list(dict.fromkeys(c for _,p in targets for c in current_codes(p,automatic,self.mode)))
+        needed=set(need);target_ids={identity(p) for _,p in targets}
+        donor_keys=target_ids|{k for c in need for k in by_oe.get(key(c),[])}
+        index={};by_identity={};owners={}
+        def add(c,e):
+            if c not in needed:return
+            bucket=index.setdefault(c,{'entries':{},'overflow':False})
+            if bucket['overflow']:return
+            bucket['entries'].setdefault(e['ekey'],e)
+            if len(bucket['entries'])>64:bucket['entries']={};bucket['overflow']=True
+        def add_identity(e):
+            ident=e['identity']
+            if not ident or ident=='|' or ident not in target_ids:return
+            bucket=by_identity.setdefault(ident,[])
+            if len(bucket)<8 and not any(x['ref'] is e['ref'] and x['ekey']==e['ekey'] for x in bucket):bucket.append(e)
+        for i,q in enumerate(rows):
+            ident=identity(q)
+            if ident not in donor_keys and not truth(q.get('_dimensionAutoOeEvidence')):continue
+            cs=current_codes(q,automatic,self.mode);matches=[x for x in cs if x in needed]
+            if automatic and ident and (ident in target_ids or matches):owners[ident]=None if ident in owners else q
+            if not (matches or ident in target_ids) or q.get('excluded') or q.get('dimensionAnomalyBlocked') or (automatic and truth(q.get('_dimensionOeReview'))):continue
+            t=tuple_of(q);complete=full(t);evidence=auto_evidence(q) if automatic else None
+            if not ((complete and issue_free(self.model,q,t)) or (not complete and any(x>0 for x in t.values()))):continue
+            prior=q.get('_dimensionAutoEvidence')
+            conflict=truth(q.get('_dimensionAutoConflict')) or bool(prior and prior.get('identity')==ident and not exact_tuple(prior,t))
+            source='Каталог: '+str(q.get('article') or 'без артикула')+(' · '+str(q['brand']) if q.get('brand') else '')
+            source+=(' · '+str(evidence['file'])+' · строка данных '+str(evidence.get('row','undefined'))) if evidence else row_source(q,self.labels)
+            e=dict(kind='row',identity=ident,ref=q,donorIndex=i,tuple=t,complete=complete,autoEligible=bool(evidence),conflicting=conflict,tkey=tuple_key(t),source=source)
+            e['ekey']=ident+'|'+e['tkey']
+            for c in matches:add(c,e)
+            if complete:add_identity(e)
+        for c in need:
+            for art_key in by_oe.get(key(c),[]):
+                part=parts.get(art_key);ev=part.get('_dimensionEvidence') if part else None
+                if not ev:continue
+                ident=identity(part);owner=owners.get(ident)
+                if automatic and ident in owners and (not owner or owner.get('excluded') or owner.get('dimensionAnomalyBlocked') or truth(owner.get('_dimensionOeReview')) or key(c) not in current_codes(owner,True,self.mode) or not auto_evidence(owner) or not exact_tuple(owner,ev)):continue
+                t=tuple_of(ev);complete=full(t)
+                if not complete or not issue_free(self.model,{'category':part.get('category') or '', '_volumeExplicit':False},t):continue
+                e=dict(kind='hvc',identity=ident,ref=part,evidence=ev,linkKey=key(c)+'\\x1f'+art_key,partKey=art_key,code=c,tuple=t,complete=complete,tkey=tuple_key(t),
+                       autoEligible=bool(ev.get('singleRow') and ev.get('file') and ev.get('identity')==ident and isinstance(ev.get('oeCodes'),list) and key(c) in [key(x) for x in ev['oeCodes']]),
+                       source='Каталог V: '+str(part.get('artikul') or '')+(' · '+str(part['brand']) if part.get('brand') else '')+(' · '+str(ev['file']) if ev.get('file') else ' · общий исходный файл ОВХ не подтверждён'))
+                e['ekey']=ident+'|'+e['tkey']
+                add(c,e)
+                if ev.get('singleRow'):add_identity(e)
+        result=[]
+        for target_index,p in targets:
+            cs=current_codes(p,automatic,self.mode);own=identity(p);candidates={};overflow=False
+            def take(e,matched):
+                nonlocal overflow
+                if e['ref'] is p or not e['identity'] or e['identity']=='|':return
+                k=e['ekey']
+                if k not in candidates:
+                    if len(candidates)>=MAX_CANDIDATES:overflow=True;return
+                    candidates[k]={**e,'matchedCode':'','matchedCodes':[]}
+                hit=candidates[k]
+                if matched:
+                    if matched not in hit['matchedCodes']:hit['matchedCodes'].append(matched)
+                    if not hit['matchedCode']:hit['matchedCode']=matched
+            has_registry=any(key(c) in registry for c in cs)
+            for c in cs:
+                bucket=index.get(c)
+                if not bucket:continue
+                if bucket['overflow']:overflow=True;continue
+                for e in bucket['entries'].values():take(e,c)
+            for e in by_identity.get(own,[]):take(e,'')
+            candidate_list=list(candidates.values());allowed=[];denied=0
+            for c in candidate_list:
+                verdict=source_allowed(p,c['ref'],c['matchedCode'],self.mode)
+                if verdict['ok']:c['link']=verdict;allowed.append(c)
+                else:denied+=1
+            complete=[c for c in allowed if c['complete']];partial=[c for c in allowed if not c['complete']]
+            valid=[];seen=set();limit_rejected=0
+            for c in complete:
+                if c['tkey'] in seen:continue
+                seen.add(c['tkey'])
+                if not issue_free(self.model,p,c['tuple']):limit_rejected+=1;continue
+                valid.append(c)
+            eligible=[c for c in valid if c['autoEligible']] if automatic else valid
+            picked=pick(eligible);choice=picked['choice']
+            if not candidate_list:
+                status='Нет OE-номера у SKU' if not cs and not by_identity.get(own) else ('Есть сводный OE-реестр, но нет цельной записи с известным источником' if has_registry else 'Нет полной локальной записи донора')
+            elif overflow:status='Слишком много совпадений по OE; нужна ручная проверка'
+            elif not allowed:status='Другой артикул без схожего OE — данные не переносятся'
+            elif not valid:
+                if not complete:status='Только неполные данные: вес и три стороны должны быть из одной записи'
+                elif limit_rejected:
+                    lim=self.model.limits.get(self.model.limit_key(p.get('category'))) or dict(category=p.get('category') or '',maxW=400,maxL=300,maxVol=1000)
+                    fmt=lambda n:format(number(n),',.0f').replace(',','\\u00a0')
+                    status=f"Не проходит лимиты категории «{lim.get('category') or p.get('category') or '—'}»: вес ≤ {fmt(lim.get('maxW'))} кг · габарит ≤ {fmt(lim.get('maxL'))} см · объём ≤ {fmt(lim.get('maxVol'))} л"
+                else:status='Нет полной локальной записи донора'
+            elif not choice:status='Нет подтверждённой полной исходной строки: загрузите данные донора заново'
+            else:
+                n=picked['variants'];status=f'Выбраны меньшие из {n} вариантов · проверьте упаковку' if n>1 else f'Предложение; {n} совпадение с теми же значениями'
+                status+=' · тот же артикул и бренд' if choice['link']['tier']=='sku' else ' · схожий OE'
+                if partial:status+=' · неполные записи не использованы'
+                if denied:status+=f' · отклонено источников: {denied}'
+            # Transport stable source locators, not object references or precomputed browser choices.
+            clean=lambda c:{k:v for k,v in c.items() if k not in ('ref','evidence','owner')}
+            result.append(dict(targetIndex=target_index,signature=target_signature(self.model,p,self.mode),codes=cs,status=status,
+                               choice=clean(choice) if choice else None,checked=False,hasRegistry=has_registry,link=choice['link'] if choice else None))
+        return result
+""",
+    # ===== dimension_policy =====
+    'dimension_policy': """\"\"\"DimPolicy donor authorization and deterministic tuple selection.\"\"\"
+import math
+import re
+from decimal import Decimal, ROUND_HALF_UP
+from dimension_quarantine import number, compact
+from ozon_identity import key, codes
+
+MAX_CODES=64
+MAX_CANDIDATES=240
+DIMS=('weight','length','width','height')
+
+
+def loose_oe(value): return re.sub(r'(^|[^0-9])0+(?=[0-9])',r'\\1',key(value))
+
+
+def similar_oe(a,b):
+    x,y=key(a),key(b)
+    return bool(x and y and (x==y or (len(x)>=5 and len(y)>=5 and loose_oe(x)==loose_oe(y))))
+
+
+def policy_codes(p,mode='auto'):
+    raw=list(codes([p.get('oe_numbers'),p.get('oe_list')],mode))
+    if not raw and p.get('oe_norm'):raw+=list(codes(p['oe_norm'],mode))
+    ev=p.get('_dimensionAutoOeEvidence')
+    if isinstance(ev,dict) and isinstance(ev.get('entries'),list):
+        raw += [key(x['code']) for x in ev['entries'] if isinstance(x,dict) and x.get('code')]
+    return list(dict.fromkeys(x for x in raw if x))[:MAX_CODES]
+
+
+def article(p):return key(p.get('article') if p.get('article') is not None else p.get('artikul'))
+
+
+def source_allowed(target,candidate,matched_code='',mode='auto'):
+    if target is None or candidate is None or target is candidate:
+        return dict(ok=False,tier='',oe='',reason='нет источника')
+    a,b=article(target),article(candidate);ab,bb=key(target.get('brand')),key(candidate.get('brand'))
+    if a and b and a==b and ab and bb and ab==bb:
+        return dict(ok=True,tier='sku',oe='',reason='тот же артикул и бренд')
+    ca,cb=policy_codes(target,mode),policy_codes(candidate,mode);mc=key(matched_code)
+    oe=''
+    if cb:
+        for y in cb:
+            if any(similar_oe(x,y) for x in ca) or (mc and similar_oe(y,mc) and any(similar_oe(x,mc) for x in ca)):
+                oe=y;break
+    elif mc and any(similar_oe(x,mc) for x in ca):oe=mc
+    if oe:return dict(ok=True,tier='oe',oe=oe,reason='схожий OE '+oe)
+    return dict(ok=False,tier='',oe='',reason='другой артикул без схожего OE — данные не переносятся')
+
+
+def js_number(value):
+    # Number(), not the localized num()/parseFloat used by ordinary OVH fields.
+    if value is None:return 0.0
+    if isinstance(value,bool):return float(value)
+    try:
+        if isinstance(value,str):
+            s=value.strip()
+            if not s:return 0.0
+            if re.fullmatch(r'0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+',s):return float(int(s,0))
+        return float(value)
+    except (ValueError,TypeError):return float('nan')
+
+
+def valid_tuple(t):
+    return isinstance(t,dict) and all(k in t and math.isfinite(js_number(t[k])) and js_number(t[k])>0 for k in DIMS)
+
+
+def tuple_key(t):
+    def fixed(v):
+        n=js_number(v)
+        if abs(n)>=1e21:return compact(n)
+        return format(Decimal.from_float(n).quantize(Decimal('0.000001'),rounding=ROUND_HALF_UP),'f')
+    return '|'.join(fixed(t.get(k)) for k in DIMS)
+
+
+def rounded(v,d):
+    if not math.isfinite(v):return 0
+    f=10**d;a=abs(v*f)
+    if not math.isfinite(a):return math.copysign(float('inf'),v)
+    frac=a-math.floor(a)
+    if 0.5-1e-9<frac<0.5:a=float(format(a,'.15g'))
+    return math.copysign(math.floor(a+0.5)/f,v)
+
+
+def measure(t):
+    l,w,h,wt=(js_number(t.get(k)) for k in ('length','width','height','weight'))
+    return (rounded(l*w*h/1000,6),rounded(max(l,w,h),4),rounded(wt,6),rounded(l+w+h,4))
+
+
+def pick(candidates,is_valid=None):
+    seen=set();rows=[];rejected=0
+    for c in candidates:
+        if not c or not c.get('complete') or not valid_tuple(c.get('tuple')):continue
+        k=str(c.get('identity','undefined'))+'|'+tuple_key(c['tuple'])
+        if k in seen:continue
+        seen.add(k)
+        if is_valid and not is_valid(c['tuple']):rejected+=1;continue
+        rows.append(c)
+    rows.sort(key=lambda c:measure(c['tuple']))
+    return dict(choice=rows[0] if rows else None,variants=len(rows),rejected=rejected)
+""",
+    # ===== dimension_quarantine =====
+    'dimension_quarantine': """\"\"\"Independent AnomalyDetector quarantine decisions and acknowledgement signatures.\"\"\"
+import copy
+import json
+import math
+import re
+from enrichment_formula import truth
+from category_tnved import text
+from ozon_identity import codes, pair, key
+
+FIELDS=('weight','net_weight','length','width','height','volume')
+FLAGS=('dimensionAnomalyBlocked','dimensionAnomalySignature','dimensionAnomalyIssues',
+       'dimensionAnomalyLimit','dimensionAnomalyAck','dimensionAnomalyAt')
+EXT={'invalid_number','net_gt_gross','density_high','calc_overflow','import_rejected','import_missing'}
+HARD={'negative','invalid_number','net_gt_gross','calc_overflow','import_missing'}
+
+
+def number(v):
+    if v is None or isinstance(v,bool): return 0
+    if isinstance(v,(float,int)): return v if math.isfinite(v) else 0
+    s=re.sub(r'\\s+','',text(v));s=re.sub('%$','',s)
+    if ',' in s and '.' in s:
+        s=s.replace('.','').replace(',','.',1) if s.rfind(',')>s.rfind('.') else s.replace(',','')
+    elif ',' in s: s=s.replace(',','') if s.count(',')>1 else s.replace(',','.')
+    elif s.count('.')>1: s=s.replace('.','')
+    m=re.match(r'^[+-]?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?',s)
+    if not m: return 0
+    n=float(m[0]);return n if math.isfinite(n) else 0
+
+
+def valid(v):
+    if v is None or v=='': return True
+    if isinstance(v,bool): return False
+    if isinstance(v,(int,float)): return math.isfinite(v)
+    return bool(re.fullmatch(r'[+-]?(?:(?:[0-9]{1,3}(?:[\\s\\u00a0\\u202f][0-9]{3})+)|[0-9]+)(?:[.,][0-9]+)?|[+-]?[.,][0-9]+',text(v).strip()))
+
+
+def explicit(p):
+    flag=p.get('_volumeExplicit')
+    if flag is not None and flag!='':
+        p['_volumeExplicit']=flag is True or (not isinstance(flag,bool) and flag==1) or bool(re.fullmatch('1|true',text(flag),re.I))
+    else:
+        sources=p.get('_sources') or {}
+        if isinstance(sources,str):
+            try: sources=json.loads(sources)
+            except ValueError: sources={}
+        ks=list(sources) if isinstance(sources,(dict,list)) else []
+        p['_volumeExplicit']=(not ks or any(re.search('объ[её]м|volume|литр',k,re.I) for k in ks)) and number(p.get('volume'))>0
+    return p['_volumeExplicit']
+
+
+def direct_codes(p,mode):
+    current=list(dict.fromkeys(list(codes(p.get('oe_numbers'),mode))+list(codes(p.get('oe_list'),mode))))
+    if not current: current=list(codes(p.get('oe_norm'),mode))
+    evidence=p.get('_dimensionAutoOeEvidence')
+    if evidence and evidence.get('identity')!=pair(p): return []
+    entries=evidence.get('entries') if isinstance(evidence,dict) and isinstance(evidence.get('entries'),list) else None
+    if entries is None and p.get('oeSource'):
+        parts=re.split(r'[;,|\\r\\n]+|\\s+/\\s+',p['oeSource']) if mode=='auto' else re.split({'newline':r'\\r?\\n','comma':',','semicolon':';','slash':'/','pipe':r'\\|'}.get(mode,r'[/;,\\n\\r|]+'),p['oeSource'])
+        entries=[dict(code=key(v),pieces=list(codes(v,mode))) for v in parts]
+    if entries is None: return current
+    return list(dict.fromkeys(e['code'] for e in entries if isinstance(e,dict) and e.get('code') and isinstance(e.get('pieces'),list) and e['pieces'] and all(x in current for x in e['pieces'])))
+
+
+def compact(value):
+    # JSON.stringify uses decimal notation for 1e-6 <= abs(n) < 1e21 and
+    # exponent notation without zero-padded exponents outside that range.
+    from decimal import Decimal
+    def encode(v):
+        if isinstance(v,bool) or v is None: return json.dumps(v)
+        if isinstance(v,(int,float)):
+            if not math.isfinite(v): return 'null'
+            if v==0: return '0'
+            if 1e-6<=abs(v)<1e21:
+                if int(v)==v:return str(int(v))
+                return format(Decimal(repr(v)),'f')
+            mantissa,exponent=repr(float(v)).split('e')
+            mantissa=mantissa.removesuffix('.0');exp=int(exponent)
+            return mantissa+'e'+('+' if exp>=0 else '-')+str(abs(exp))
+        if isinstance(v,dict): return '{'+','.join(json.dumps(k,ensure_ascii=False)+':'+encode(x) for k,x in v.items())+'}'
+        if isinstance(v,list): return '['+','.join(encode(x) for x in v)+']'
+        return json.dumps(v,ensure_ascii=False)
+    return encode(value)
+
+
+class DimensionQuarantine:
+    def __init__(self,limits,mode='auto'):
+        self.limits={};self.mode=mode
+        for lim in limits:
+            k=self.limit_key(lim.get('category'))
+            if k and k not in self.limits: self.limits[k]=lim
+
+    @staticmethod
+    def limit_key(v): return re.sub(r'\\s+',' ',text(v).strip().lower().replace('ё','е'))
+
+    def evaluate(self,p):
+        lim=self.limits.get(self.limit_key(p.get('category'))) or dict(category=text(p.get('category')),maxW=400,maxL=300,maxVol=1000)
+        w,net,l,wi,h,pv=[number(p.get(k)) for k in FIELDS]
+        exp=explicit(p);derived=l*wi*h/1000
+        vol=pv if exp and pv>0 else derived or pv
+        issues=[]
+        def add(f,v,limit,t):issues.append(dict(field=f,val=v,limit=limit,type=t))
+        for f,v in zip(FIELDS,(w,net,l,wi,h,pv)):
+            if not valid(p.get(f)): add(f,text(p.get(f))[:120],0,'invalid_number')
+            elif v<0: add(f,v,0,'negative')
+        if w>0 and net>0 and net>w+max(1e-9,w*1e-9): add('net_weight',net,w,'net_gt_gross')
+        rejected=p.get('_dimensionImportIssues')
+        if isinstance(rejected,dict):
+            for f in FIELDS:
+                r=rejected.get(f)
+                if not isinstance(r,dict):continue
+                missing=f in ('weight','length','width','height') and not number(p.get(f))>0
+                detail=text(r.get('reason') or 'ячейка отклонена')[:120]
+                if r.get('value'):detail+=' · значение: '+text(r['value'])[:80]
+                if r.get('file'):detail+=' · файл: '+text(r['file'])[:100]
+                add(f,detail,0,'import_missing' if missing else 'import_rejected')
+        if w>number(lim.get('maxW')):add('weight',w,number(lim.get('maxW')),'weight_high')
+        max_dim=max(l,wi,h);computed=derived if l>0 and wi>0 and h>0 else 0
+        if max_dim>number(lim.get('maxL')):add('dims',max_dim,number(lim.get('maxL')),'dim_high')
+        if computed and not math.isfinite(computed):add('volume',0,0,'calc_overflow')
+        if math.isfinite(computed) and computed>0 and w>0 and w/computed>30:add('density',w/computed,30,'density_high')
+        if vol>number(lim.get('maxVol')):add('volume',vol,number(lim.get('maxVol')),'vol_high')
+        if exp and pv>0 and computed>0 and max(pv/computed,computed/pv)>4:add('volume',pv,computed,'volume_mismatch')
+        src=p.get('_sources') or {}
+        if isinstance(src,dict) and w==0.5 and l==15 and wi==10 and h==5 and src.get('Прайс-лист') and not any(src.get(k) for k in ('weight','Вес, кг','Вес в упаковке, кг')):add('dims',0,0,'legacy_defaults')
+        if truth(p.get('_dimensionOeReview')):add('dims',0,0,'oe_review')
+        fix={};heuristic=[]
+        max_w=number(lim.get('maxW'));max_l=number(lim.get('maxL'));max_v=number(lim.get('maxVol'))
+        if w>max_w and w>=max_w*10 and 0<w/1000<=max_w and valid(p.get('net_weight')) and (net<=0 or net<=w/1000+max(1e-9,(w/1000)*1e-9)):
+            fix['weight']=w/1000;heuristic.append('возможны граммы: масса /1000')
+        if max_dim>max_l and max_dim>200 and l>0 and wi>0 and h>0:
+            cl,cw,ch=l/10,wi/10,h/10;cvol=cl*cw*ch/1000
+            ev=pv if exp and pv>0 else cvol
+            mismatch=exp and ev>0 and cvol>0 and max(ev/cvol,cvol/ev)>4
+            if max(cl,cw,ch)<=max_l and ev<=max_v and not mismatch:
+                fix.update(length=cl,width=cw,height=ch);heuristic.append('возможны мм: все стороны /10')
+        return dict(lim=lim,issues=issues,volume=vol,explicitVolume=exp,fix=fix,heuristic=', '.join(heuristic))
+
+    def signature(self,p,e):
+        lim=e['lim'];review=p.get('_dimensionOeReview')
+        volume=e['volume'];rounded=(math.floor(abs(volume)*1e6+0.5)/1e6*(1 if volume>=0 else -1) if abs(volume)<1e300 else float('inf')) if math.isfinite(volume) else 0
+        sig=dict(v=1,category=text(p.get('category')),**{k:number(p.get(k)) for k in ('weight','length','width','height')},
+            volume=number(p.get('volume')) if e['explicitVolume'] else None,computedVolume=rounded,
+            limits=dict(category=text(lim.get('category')),**{k:number(lim.get(k)) for k in ('maxW','maxL','maxVol')}),oeReview=None)
+        if truth(review):
+            sig['oeReview']=dict(oe=text(review.get('oe')),source=text(review.get('source')),currentOe=sorted(list(codes([p.get('oe_numbers'),p.get('oe_list')],self.mode))))
+            if review.get('oeProofVersion')==1:sig['oeReview']['directOe']=sorted(direct_codes(p,self.mode))
+        new=[i for i in e['issues'] if i['type'] in EXT]
+        if new:
+            ext=dict(v=2,issues=sorted(i['type']+':'+i['field'] for i in new),invalid=[[i['field'],text(p.get(i['field']))[:120]] for i in new if i['type']=='invalid_number'])
+            if any(i['type']=='net_gt_gross' for i in new):ext['netWeight']=number(p.get('net_weight'))
+            if any(i['type'] in ('import_rejected','import_missing') for i in new):
+                ext['importReview']=[[k]+[text((p['_dimensionImportIssues'][k] or {}).get(f)) for f in ('file','field','value','reason','at')] for k in sorted(p['_dimensionImportIssues'])]
+            sig['ext']=ext
+        return compact(sig)
+
+    def apply(self,row,timestamp):
+        p=copy.deepcopy(row)
+        if p.get('excluded') and not p.get('_dimensionImportIssues'):
+            p['dimensionAnomalyBlocked']=False;return p
+        e=self.evaluate(p)
+        if not e['issues']:
+            p['dimensionAnomalyBlocked']=False
+            for k in FLAGS[1:]:p.pop(k,None)
+            return p
+        sig=self.signature(p,e)
+        if p.get('dimensionAnomalySignature')!=sig:
+            p.pop('dimensionAnomalyAck',None);p['dimensionAnomalyAt']=timestamp
+        p['dimensionAnomalySignature']=sig;p['dimensionAnomalyIssues']=e['issues']
+        lim=e['lim'];p['dimensionAnomalyLimit']=dict(category=text(lim.get('category')),**{k:number(lim.get(k)) for k in ('maxW','maxL','maxVol')})
+        p['dimensionAnomalyBlocked']=any(i['type'] in HARD for i in e['issues']) or not (p.get('dimensionAnomalyAck') or {}).get('signature')==sig
+        return p
+
+    def confirm(self,row,timestamp,approved=False,expected_signature=None):
+        \"\"\"Two-phase confirmation: re-evaluate at both preview and approval.\"\"\"
+        p=copy.deepcopy(row)
+        e=self.evaluate(p)
+        if not e['issues']:return p,{'status':'clean'}
+        if any(i['type'] in HARD for i in e['issues']):
+            return self.apply(p,timestamp),{'status':'hard'}
+        sig=self.signature(p,e)
+        if sig!=p.get('dimensionAnomalySignature') or (expected_signature is not None and sig!=expected_signature):
+            return self.apply(p,timestamp),{'status':'stale'}
+        detail={'status':'ready','signature':sig,'values':{k:number(p.get(k)) for k in ('weight','net_weight','length','width','height')},
+                'volume':e['volume'],'issues':e['issues']}
+        if not approved:return p,detail
+        p['dimensionAnomalyAck']={'signature':sig,'at':timestamp}
+        if truth(p.get('_dimensionOeReview')):
+            p['_dimensionOeReview']['reviewedAt']=timestamp
+            p['_dimensionOeReview']['reviewedValues']={k:p[k] for k in ('weight','length','width','height','volume') if k in p}
+        p=self.apply(p,timestamp)
+        detail['status']='confirmed'
+        detail['log']={'ts':timestamp,'article':p.get('article'),
+                       'before':{**{k:number(p.get(k)) for k in ('weight','length','width','height')},'volume':e['volume']},
+                       'after':{'confirmed':True},'heuristic':'Ручное подтверждение аномалии','category':p.get('category')}
+        return p,detail
+
+
+    def fix_units(self,row,timestamp,expected_signature,approved=False,labels=None):
+        p=copy.deepcopy(row);e=self.evaluate(p)
+        if not p.get('dimensionAnomalyBlocked') or expected_signature!=self.signature(p,e) or not e['fix']:
+            return p,{'status':'skipped'}
+        result={'status':'ready','signature':expected_signature,'fix':e['fix'],'heuristic':e['heuristic']}
+        if not approved:return p,result
+        before={k:p[k] for k in ('weight','length','width','height','volume') if k in p}
+        p.update(e['fix'])
+        if not e['explicitVolume'] and any(k in e['fix'] for k in ('length','width','height')):
+            v=number(p.get('length'))*number(p.get('width'))*number(p.get('height'))/1000
+            p['volume']=math.floor(v*1e4+0.5)/1e4;p['_volumeExplicit']=False
+        if not isinstance(p.get('_sources'),dict):p['_sources']={}
+        old_sources={};labels=labels or {}
+        for k in e['fix']:
+            label=labels.get(k,k)
+            old_sources[k]=copy.deepcopy(p['_sources'].get(k) or p['_sources'].get(label))
+            source={'file':'Предположение о единицах (проверить): '+e['heuristic'],'date':timestamp}
+            p['_sources'][k]=source;p['_sources'][label]=copy.deepcopy(source)
+        previous=p.get('_dimensionOeReview')
+        review={'oe':'','source':'Предположение о единицах: '+e['heuristic'],'at':timestamp,
+                'before':before,'beforeSources':old_sources,'after':copy.deepcopy(e['fix'])}
+        if isinstance(previous,dict):
+            snapshot={k:v for k,v in previous.items() if k!='history'}
+            history=previous.get('history') if isinstance(previous.get('history'),list) else []
+            review['history']=(history+[snapshot])[-20:]
+        p['_dimensionOeReview']=review;p.pop('dimensionAnomalyAck',None)
+        result.update(status='applied',log={'ts':timestamp,'article':p.get('article'),'before':before,
+            'after':copy.deepcopy(e['fix']),'heuristic':e['heuristic'],'category':p.get('category')})
+        return p,result
+""",
+    # ===== enrichment_formula =====
+    'enrichment_formula': """\"\"\"Restricted browser ExprLang grammar. Never uses eval/exec.\"\"\"
+import math,re
+from enrichment_transport import JSDate
+
+UNDEFINED=object()
+FORBID=set('''__proto__ constructor prototype getprototypeof setprototypeof defineproperty defineproperties getownpropertydescriptor getownpropertydescriptors getownpropertynames getownpropertysymbols isprototypeof hasownproperty propertyisenumerable __definegetter__ __definesetter__ __lookupgetter__ __lookupsetter__ caller callee arguments tosource valueof tostring tolocalestring toprimitivestring isview buffer object function reflect proxy symbol globalthis global window self top parent frames eval math json process module exports require'''.split())
+
+def string(v):
+    if v is UNDEFINED: return 'undefined'
+    if v is None: return 'null'
+    if v is True: return 'true'
+    if v is False: return 'false'
+    if isinstance(v,float) and not math.isfinite(v): return 'NaN' if math.isnan(v) else 'Infinity' if v>0 else '-Infinity'
+    if isinstance(v,dict): return '[object Object]'
+    if isinstance(v,list): return ','.join('' if x is None or x is UNDEFINED else string(x) for x in v)
+    if isinstance(v,(int,float)):
+        if v==0:return '0'
+        text=repr(float(v)).lower()
+        if 1e-6<=abs(v)<1e21:
+            from decimal import Decimal
+            return format(Decimal(text),'f').rstrip('0').rstrip('.') if '.' in format(Decimal(text),'f') else format(Decimal(text),'f')
+        if 'e' in text:
+            mantissa,exponent=text.split('e');exponent=int(exponent)
+            return mantissa.removesuffix('.0')+'e'+('+' if exponent>=0 else '-')+str(abs(exponent))
+        return text.removesuffix('.0')
+    return str(v)
+
+def truth(v): return False if v is UNDEFINED or v is None or isinstance(v,float) and math.isnan(v) else bool(v) if not isinstance(v,(dict,list)) else True
+
+# ECMAScript whitespace (Python also treats some C0 controls as whitespace).
+JS_SPACE='\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff'
+
+def number(v,allow_date=False):
+    if isinstance(v,JSDate):
+        if not allow_date:raise ValueError('В формуле дата участвует в арифметике')
+        return v.milliseconds or 0
+    if v is UNDEFINED or v is None:return 0
+    if isinstance(v,bool):return 1 if v else 0
+    if isinstance(v,(int,float)):return v if not isinstance(v,float) or not math.isnan(v) else 0
+    if isinstance(v,(dict,list)):v=string(v)
+    if isinstance(v,str):
+        text=v.strip(JS_SPACE)
+        if not text:return 0
+        if text in ('Infinity','+Infinity','-Infinity'):return -math.inf if text[0]=='-' else math.inf
+        if re.fullmatch(r'0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+',text):
+            try:return float(int(text,0))
+            except OverflowError:return math.inf
+        if not re.fullmatch(r'[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?',text):return 0
+        return float(text)
+    return 0
+
+def arithmetic(v):
+    return v if isinstance(v,(int,float)) else number(v)
+
+def finite(v):
+    n=number(v);return n if math.isfinite(n) else 0
+
+def parsed(v):
+    if isinstance(v,JSDate):raise ValueError('В формуле дата участвует в арифметике (num)')
+    m=re.match(r'^[+-]?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?',''.join(c for c in string(v) if c not in JS_SPACE).replace(',','.',1))
+    n=float(m[0]) if m else 0
+    return n if math.isfinite(n) else 0
+
+def power(a,b):
+    x,y=finite(a),finite(b)
+    try:return math.pow(x,y)
+    except OverflowError:return -math.inf if x<0 and float(y).is_integer() and int(y)%2 else math.inf
+    except ValueError:
+        if x==0 and y<0:return -math.inf if math.copysign(1,x)<0 and float(y).is_integer() and int(y)%2 else math.inf
+        return math.nan
+
+def square_root(v):
+    n=finite(v)
+    return math.sqrt(n) if n>=0 else math.nan
+
+def rounded(v,d=2):
+    dd=number(d,allow_date=True)
+    try:p=10.0**dd
+    except OverflowError:p=math.inf
+    x=number(v)*p;a=abs(x)
+    if p==0 or not math.isfinite(p) or math.isnan(x):return math.nan
+    if math.isinf(x):return x
+    if .5-1e-9<a-math.floor(a)<.5:a=float(format(a,'.15g'))
+    return (-1 if x<0 else 1)*math.floor(a+.5)/p
+
+FUNCS={'pi':lambda:math.pi,'e':lambda:math.e,'num':parsed,'round':rounded,
+ 'min':lambda *a:min(map(number,a),default=math.inf),'max':lambda *a:max(map(number,a),default=-math.inf),
+ 'abs':lambda v:abs(finite(v)),'ceil':lambda v:math.ceil(finite(v)),'floor':lambda v:math.floor(finite(v)),
+ 'pow':power,'sqrt':square_root,'int':lambda v:math.trunc(finite(v)),
+ 'len':lambda v:len(('' if v is None or v is UNDEFINED else string(v)).encode('utf-16-le',errors='surrogatepass'))//2,
+ 'lower':lambda v:('' if v is None or v is UNDEFINED else string(v)).lower(),
+ 'upper':lambda v:('' if v is None or v is UNDEFINED else string(v)).upper(),
+ 'contains':lambda h,n:('' if n is None or n is UNDEFINED else string(n)).lower() in ('' if h is None or h is UNDEFINED else string(h)).lower(),
+ 'isBlank':lambda v:v is None or v is UNDEFINED or v=='',
+ 'coalesce':lambda *a:next((v for v in a if v is not None and v is not UNDEFINED and v!=''),'')}
+PRECEDENCE={'||':1,'&&':2,'==':3,'===':3,'!=':3,'!==':3,'<':4,'>':4,'<=':4,'>=':4,'+':5,'-':5,'*':6,'/':6,'%':6}
+
+class Parser:
+    def __init__(self,expr):
+        if any(c.isspace() and c not in JS_SPACE for c in expr):raise ValueError('Недопустимый пробельный символ')
+        expr=''.join(' ' if c in JS_SPACE else c for c in expr)
+        if len(expr)>400 or not re.fullmatch(r'[0-9\\s.\\+\\-*/%(),<>=!&|?:_a-zA-Zа-яА-ЯёЁ]*',expr): raise ValueError('Недопустимая формула')
+        self.tokens=[];pos=0
+        pattern=re.compile(r'\\s+|(?:\\d[\\d.]*|\\.\\d[\\d.]*)|[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*|===|!==|<=|>=|==|!=|&&|\\|\\||[+*/%(),?:.<>-]')
+        while pos<len(expr):
+            m=pattern.match(expr,pos)
+            if not m: raise ValueError('Неизвестный токен')
+            if not m[0].isspace(): self.tokens.append(m[0])
+            pos=m.end()
+        self.pos=0
+    def peek(self): return self.tokens[self.pos] if self.pos<len(self.tokens) else ''
+    def pop(self):
+        v=self.peek()
+        if not v: raise ValueError('Конец формулы')
+        self.pos+=1;return v
+    def expect(self,v):
+        if self.pop()!=v: raise ValueError('Ожидалось '+v)
+    def expression(self,minimum=0):
+        tk=self.pop()
+        if tk in ('+','-'): node=('unary',tk,self.expression(7))
+        elif tk=='(': node=self.expression();self.expect(')')
+        elif tk[0].isdigit() or tk.startswith('.') and len(tk)>1: node=('number',float(tk))
+        elif re.fullmatch('[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*',tk):
+            if self.peek()=='(':
+                if tk not in FUNCS and tk!='if': raise ValueError('Неизвестная функция')
+                self.pop();args=[]
+                if self.peek()!=')':
+                    args.append(self.expression())
+                    while self.peek()==',': self.pop();args.append(self.expression())
+                self.expect(')');node=('call',tk,args)
+            else:
+                path=[tk]
+                while self.peek()=='.':
+                    self.pop();key=self.pop()
+                    if not re.fullmatch('[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*',key):raise ValueError('Ожидалось имя поля')
+                    path.append(key)
+                if any(k.lower() in FORBID for k in path): raise ValueError('Запрещённое поле')
+                node=('field',path)
+        else: raise ValueError('Неожиданный токен')
+        while self.peek() in PRECEDENCE and PRECEDENCE[self.peek()]>=minimum:
+            op=self.pop();node=('binary',op,node,self.expression(PRECEDENCE[op]+1))
+        if minimum==0 and self.peek()=='?':
+            self.pop();yes=self.expression();self.expect(':');node=('ternary',node,yes,self.expression())
+        return node
+
+def run(node,scope):
+    kind=node[0]
+    if kind=='number': return node[1]
+    if kind=='field':
+        v=scope
+        for k in node[1]:
+            v=v.get(k,UNDEFINED) if isinstance(v,dict) else len(v) if isinstance(v,list) and k=='length' else UNDEFINED
+        return v
+    if kind=='unary': return arithmetic(run(node[2],scope))*(-1 if node[1]=='-' else 1)
+    if kind=='ternary': return run(node[2] if truth(run(node[1],scope)) else node[3],scope)
+    if kind=='call':
+        name,args=node[1:]
+        if name=='if':
+            i=1 if args and truth(run(args[0],scope)) else 2
+            return run(args[i],scope) if len(args)>i else ''
+        values=[run(a,scope) for a in args]
+        if name not in ('min','max','coalesce'):
+            arity=0 if name in ('pi','e') else 2 if name in ('round','pow','contains') else 1
+            values=(values+[UNDEFINED]*arity)[:arity]
+            if name=='round' and values[1] is UNDEFINED:values[1]=2
+        return FUNCS[name](*values)
+    op=node[1]
+    # Browser ExprLang evaluates the denominator first and does not evaluate
+    # the numerator at all for a falsy divisor (including NaN and signed zero).
+    if op in ('/','%'):
+        y=arithmetic(run(node[3],scope))
+        if not truth(y):return math.inf if op=='/' else 0
+        x=arithmetic(run(node[2],scope))
+        if op=='/':return x/y
+        return math.nan if math.isinf(x) else math.fmod(x,y)
+    a=run(node[2],scope)
+    if op=='&&': return run(node[3],scope) if truth(a) else a
+    if op=='||': return a if truth(a) else run(node[3],scope)
+    b=run(node[3],scope)
+    if op in ('==','===','!=','!=='):
+        equal=(a is b if isinstance(a,(dict,list)) or isinstance(b,(dict,list)) else type(a)==type(b) and a==b) or string(a)==string(b)
+        return not equal if op.startswith('!') else equal
+    x=a if isinstance(a,(int,float)) else number(a)
+    y=b if isinstance(b,(int,float)) else number(b)
+    if op=='+': return x+y
+    if op=='-': return x-y
+    if op=='*': return x*y
+    return {'<':lambda:x<y,'>':lambda:x>y,'<=':lambda:x<=y,'>=':lambda:x>=y}[op]()
+
+def evaluate(expr,row):
+    parser=Parser(str(expr or ''));node=parser.expression()
+    if parser.peek(): raise ValueError('Лишний токен')
+    return run(node,{**row,'p':row})
+""",
+    # ===== enrichment_rules =====
+    'enrichment_rules': """\"\"\"Ordered user enrichment rules, preserving explicit category assignments.\"\"\"
+import copy,math
+from enrichment_formula import evaluate,UNDEFINED,string
+from category_kind import blank
+
+
+def apply_rules(row,rules,context,match):
+    p=copy.deepcopy(row)
+    for r in rules:
+        if r.get('kind')!='enrich' or not r.get('enabled'): continue
+        target=r.get('target_val')
+        if not isinstance(target,str) or target.lower() in ('__proto__','constructor','prototype'): continue
+        if target=='category' and (p.get('_categoryNameExplicit') or
+            (p.get('category') and not blank(p['category']) and p['category']!=p.get('_categoryNameAutoValue'))): continue
+        if not match(p,r.get('field'),r.get('op'),r.get('value')): continue
+        try: value=evaluate(r.get('formula'),p)
+        except (ValueError,TypeError,OverflowError,ZeroDivisionError): continue
+        before=p.get(target,UNDEFINED)
+        if value is UNDEFINED: p.pop(target,None)
+        else: p[target]=value
+        if target=='category':
+            p['category']='' if value is UNDEFINED or value is None else string(value).strip()
+            if p['category']!=before and p['category'].strip():
+                p.update(_categoryNameAutoValue=p['category'],_categoryNameStatus='auto',_categoryNameMethod='enrich',
+                    _categoryNameSource=string(p.get('name') or ''),_categoryNameBrand=string(p.get('brand') or ''),
+                    _categoryNameRevision=(context or {}).get('version',''),_categoryNameChoices=[])
+    return p
+""",
+    # ===== enrichment_transport =====
+    'enrichment_transport': """\"\"\"Lossless nonfinite-number sidecars for JSON enrichment requests/responses.\"\"\"
+import copy
+import math
+import re
+from dataclasses import dataclass
+
+KINDS={'nan':math.nan,'positive':math.inf,'negative':-math.inf}
+FORBIDDEN={'__proto__','constructor','prototype'}
+
+
+@dataclass(frozen=True)
+class JSDate:
+    milliseconds: object
+    text: str
+    json_value: object
+
+    def __str__(self):return self.text
+
+
+def date_value(value,entry):
+    ms=entry.get('milliseconds');text=entry.get('text')
+    if not isinstance(text,str) or len(text)>256:raise ValueError('Неверное строковое представление Date')
+    if ms is None:
+        if value is not None or text!='Invalid Date':raise ValueError('Неверный Invalid Date')
+    elif type(ms) not in (int,float) or not math.isfinite(ms) or ms!=int(ms) or abs(ms)>8640000000000000 or not isinstance(value,str) or not re.fullmatch(r'(?:[0-9]{4}|[+-][0-9]{6})-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z',value):
+        raise ValueError('Неверное значение Date')
+    if ms is not None:
+        year_s,month,day,hour,minute,second,milli=re.fullmatch(r'([+-]?[0-9]+)-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\\.([0-9]{3})Z',value).groups()
+        year,month,day,hour,minute,second,milli=map(int,(year_s,month,day,hour,minute,second,milli))
+        canonical_year=f'{year:04}' if 0<=year<=9999 else ('+' if year>0 else '-')+f'{abs(year):06}'
+        if year_s!=canonical_year or not 1<=month<=12 or not 0<=hour<24 or not 0<=minute<60 or not 0<=second<60:raise ValueError('Неканонический Date')
+        leap=year%4==0 and (year%100!=0 or year%400==0)
+        if not 1<=day<=[31,29 if leap else 28,31,30,31,30,31,31,30,31,30,31][month-1]:raise ValueError('Неверный день Date')
+        # Proleptic Gregorian epoch conversion, including JS years outside
+        # datetime's 1..9999 range. Python // is the required floor division.
+        y=year-(month<=2);era=y//400;yoe=y-era*400
+        doy=(153*(month+(-3 if month>2 else 9))+2)//5+day-1
+        days=era*146097+yoe*365+yoe//4-yoe//100+doy-719468
+        if (((days*24+hour)*60+minute)*60+second)*1000+milli!=ms:raise ValueError('Date не соответствует миллисекундам')
+    return JSDate(ms,text,value)
+
+
+def encode_special(value):
+    entries=[]
+    def visit(v,path):
+        if isinstance(v,JSDate):
+            entries.append({'path':path,'kind':'date','milliseconds':v.milliseconds,'text':v.text})
+            return v.json_value
+        if isinstance(v,float) and not math.isfinite(v):
+            entries.append({'path':path,'kind':'nan' if math.isnan(v) else 'positive' if v>0 else 'negative'})
+            return None
+        if isinstance(v,dict):return {k:visit(x,path+[k]) for k,x in v.items()}
+        if isinstance(v,list):return [visit(x,path+[i]) for i,x in enumerate(v)]
+        return v
+    return visit(value,[]),entries
+
+
+def decode_special(value,entries):
+    if not isinstance(entries,list):raise ValueError('Неверные типы чисел обогащения')
+    output=copy.deepcopy(value);seen=set()
+    for entry in entries:
+        if not isinstance(entry,dict) or not isinstance(entry.get('kind'),str) or entry['kind'] not in (*KINDS,'date'):raise ValueError('Неверный специальный тип числа')
+        path=entry.get('path')
+        if not isinstance(path,list) or not path or len(path)>128 or any(type(k) not in (int,str) or isinstance(k,str) and k in FORBIDDEN for k in path):raise ValueError('Неверный путь специального числа')
+        identity=tuple(path)
+        if identity in seen:raise ValueError('Повторяющийся путь специального числа')
+        seen.add(identity);parent=output
+        for key in path[:-1]:
+            if isinstance(parent,list) and type(key) is int and 0<=key<len(parent):parent=parent[key]
+            elif isinstance(parent,dict) and isinstance(key,str) and key in parent:parent=parent[key]
+            else:raise ValueError('Путь специального числа отсутствует')
+        key=path[-1]
+        if isinstance(parent,list) and type(key) is int and 0<=key<len(parent):pass
+        elif isinstance(parent,dict) and isinstance(key,str) and key in parent:pass
+        else:raise ValueError('Путь специального числа отсутствует')
+        if entry['kind']=='date':parent[key]=date_value(parent[key],entry)
+        else:
+            if parent[key] is not None:raise ValueError('Специальное число должно заменять JSON null')
+            parent[key]=KINDS[entry['kind']]
+    return output
+
+
+def equivalent(a,b):
+    \"\"\"Value equality for copied JSON rows, treating preserved NaN as unchanged.\"\"\"
+    if isinstance(a,bool) or isinstance(b,bool):return type(a) is type(b) and a==b
+    if isinstance(a,dict) and isinstance(b,dict):return a.keys()==b.keys() and all(equivalent(a[k],b[k]) for k in a)
+    if isinstance(a,list) and isinstance(b,list):return len(a)==len(b) and all(equivalent(x,y) for x,y in zip(a,b))
+    if isinstance(a,float) and isinstance(b,float) and math.isnan(a) and math.isnan(b):return True
+    return a==b
+""",
+    # ===== export_custom =====
+    'export_custom': """\"\"\"Independent general-export custom-cell conversion, matching exportCatalogCellValue.\"\"\"
+import math
+import re
+from enrichment_formula import JS_SPACE, UNDEFINED, string
+
+
+def export_number(value):
+    if isinstance(value,(int,float)) and not isinstance(value,bool):
+        return value if math.isfinite(value) else 0
+    if value is None or value is UNDEFINED or value=='':return 0
+    text=''.join(c for c in string(value) if c not in JS_SPACE)
+    if text.endswith('%'):text=text[:-1]
+    comma,dot=',' in text,'.' in text
+    if comma and dot:
+        text=text.replace('.','').replace(',','.',1) if text.rfind(',')>text.rfind('.') else text.replace(',','')
+    elif comma:text=text.replace(',','') if text.count(',')>1 else text.replace(',','.',1)
+    elif text.count('.')>1:text=text.replace('.','')
+    match=re.match(r'^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?',text.lstrip(JS_SPACE))
+    n=float(match[0]) if match else 0
+    return n if math.isfinite(n) else 0
+
+
+def custom_cell(raw,key,formatted,date_keys=(),nonfinite_keys=(),textual=False,special=None):
+    value=raw.get(key,UNDEFINED)
+    if textual:
+        if key in nonfinite_keys:return (special or {}).get(key,'Infinity')
+        return '' if value is None or value is UNDEFINED else string(value)
+    # Older descriptors without c.txt retain the generic formatter contract.
+    if key in date_keys:return 0
+    if key in nonfinite_keys:return 0 if formatted else None
+    if formatted and value is not None and value is not UNDEFINED and value!='':return export_number(value)
+    return None if value is UNDEFINED else value
+""",
+    # ===== export_formulas =====
+    'export_formulas': """\"\"\"Independent catalogue Excel formula generation. No eval or browser formulas.\"\"\"
+import math
+import re
+
+ROUND_FIELDS = dict(zip(
+    'revenue cogs acquiring lastMile logistics scDelivery packaging storage returnStorage penalties nonStd lateShip listing returns tax perUnitNet'.split(),
+    'effPrice costMult agencyFeePerSku buyerDeliveryUnit uLog uSc uPack storageUnit returnStorageUnit slaPenaltyPerUnit nonStdUnit lateShipUnit listingUnit uRet taxUnit netProfit'.split()))
+PERCENT_FIELDS={'commission':'commPct','paymentTransfer':'acqPct','boost':'boostPct','cofin':'cofinPct'}
+NET_FIELDS='revenue cogs commission specialFee acquiring paymentTransfer lastMile boost logistics scDelivery packaging storage processing returns returnStorage penalties listing tax cofin nonStd lateShip'.split()
+TEMPLATES={
+ 'deficit':'{stock}-{minStock}',
+ 'shipReady':'IF(AND({stock}>0,{visible}="да",{stock}>={minStock}),"да","нет")',
+ 'status':'IF(OR({weight}<=0,{length}<=0,{width}<=0,{height}<=0),"Заблокировано системой",IF({excluded}="да","Исключён",IF({deletePending}="да","На удаление",IF(AND({markRequired}="да",{markCompliant}="нет"),"Ошибка маркировки",IF({visible}="нет",IF(OR({visibleReason}="virtual_stock_low",{visibleReason}="min_stock_threshold"),"Скрыт (мало остатка)","Скрыт (витрина)"),IF({deficit}<0,"Дефицит",IF({shipReady}="да","Готов к отгрузке","Норма")))))))',
+ 'specialFee':'IF({cheapFbsFlag}="да",ROUND(ROUND({effPrice}*{cheapFbsRate}/100,2),2),0)',
+ 'processing':'ROUND(({uTransitPack}+{prUnit}),2)',
+ 'costPerUnit':'ROUND({effPrice}-{netProfit},2)',
+ 'margin':'IFERROR(ROUND(IF({revenue}>0,{netProfit}/{revenue}*100,IFERROR({perUnitNet}/{price}*100,0)),1),0)',
+ 'roi':'IFERROR(ROUND(IF({cogs}>0,{netProfit}/{cogs}*100,IFERROR({perUnitNet}/{cost}*100,0)),1),0)',
+ 'costMult':'ROUND(MAX(0,{cost})*{multUsed},2)',
+ 'priceByMarkup':'ROUND({costMult}*(1+{markupPct}/100),2)',
+ 'markupOnCost':'IFERROR(IF({tgtPrice}>0,ROUND(({tgtPrice}/{costMult}-1)*100,1),""),"")',
+ 'markupMargin':'IFERROR(ROUND(({price}-{costMult})/{costMult}*100,1),0)',
+ 'markupProfit':'IFERROR(ROUND({netProfit}/{cogs}*100,1),0)',
+}
+FORMULA_KEYS=frozenset(TEMPLATES)|ROUND_FIELDS.keys()|PERCENT_FIELDS.keys()|{'volume','netProfit'}
+
+
+def formula(key,row,refs,dim_unit='cm'):
+    \"\"\"Missing selected dependency means a cached-value-only cell.\"\"\"
+    class Refs(dict):
+        def __missing__(self,k):return refs[k]+str(row)
+    r=Refs()
+    try:
+        if key in ROUND_FIELDS:raw='ROUND('+r[ROUND_FIELDS[key]]+',2)'
+        elif key in PERCENT_FIELDS:raw='ROUND(ROUND('+r['effPrice']+'*'+r[PERCENT_FIELDS[key]]+'/100,2),2)'
+        elif key=='netProfit':raw='ROUND('+'-'.join(r[k] for k in NET_FIELDS if k not in ('specialFee','penalties') or k in refs)+',2)'
+        elif key=='volume':raw=('IF({volumeExplicit}="да",{volumeInput},ROUND({length}*{width}*{height}/'+('1000000' if dim_unit=='mm' else '1000')+',4))').format_map(r)
+        elif key in TEMPLATES:raw=TEMPLATES[key].format_map(r)
+        else:return None
+        return raw
+    except KeyError:return None
+
+
+def column_letter(index):
+    text='';index+=1
+    while index:index,n=divmod(index-1,26);text=chr(65+n)+text
+    return text
+
+
+def references(meta,sheets):
+    refs={}
+    for si,sheet in enumerate(sheets):
+        name=sheet['name'].replace("'","''")
+        for ci,index in enumerate(sheet['indices']):
+            key=meta[index].get('key')
+            if key=='article' and key in refs:continue
+            refs[key]=('' if si==0 else "'"+name+"'!")+column_letter(ci)
+    return refs
+
+
+def cached_formula(key,row,refs,value,unavailable=False,dim_unit='cm'):
+    if unavailable:return None
+    raw=formula(key,row,refs,dim_unit)
+    if raw and (len(raw)>8192 or re.search(r'[\\x00-\\x08\\x0b-\\x1f\\x7f\\[\\]{};`|]',raw) or not re.fullmatch(r'''[0-9A-Za-zА-Яа-яЁё_$.,:!<>=+\\-*/%()?'"\\s]+''',raw)):return None
+    if raw and isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and not raw.upper().startswith('IFERROR('):
+        raw='IFERROR('+raw+',"")'
+    return raw
+
+INVALID_FIELDS=frozenset(['revenue', 'cogs', 'commission', 'specialFee', 'acquiring', 'paymentTransfer', 'lastMile', 'boost', 'cofin', 'logistics', 'scDelivery', 'packaging', 'storage', 'processing', 'returns', 'returnStorage', 'penalties', 'nonStd', 'lateShip', 'listing', 'tax', 'netProfit', 'perUnitNet', 'margin', 'roi', 'costPerUnit', 'fcProfit', 'breakEvenPrice', 'tgtPrice', 'priceToSet', 'priceForApi', 'profitWB', 'marginWB', 'beWB', 'tgtWB', 'profitOzon', 'marginOzon', 'beOzon', 'tgtOzon', 'profitYM', 'marginYM', 'beYM', 'tgtYM', 'profitMM', 'marginMM', 'profitAvito', 'marginAvito', 'beAvito', 'tgtAvito', 'profitDiff', 'effPrice', 'contribution', 'breakEvenUnits', 'fcSales', 'fcRevenue', 'markupProfit', 'uRet', 'uLog', 'uSc', 'uPack', 'uTransitPack', 'storageUnit', 'taxUnit', 'listingUnit', 'prUnit', 'buyerDeliveryUnit', 'returnStorageUnit', 'nonStdUnit', 'lateShipUnit', 'logWB', 'retWB', 'ozonIsKgt', 'ozonLiters', 'dropoffOzon', 'midMileOzon', 'lastMileOzon', 'logOzon', 'retOzon', 'handOverOzon', 'realFbsServiceOzon', 'nonStdOzon', 'lateShipOzon', 'shipDiscOzon', 'retStoreOzon'])
+YM_FIELDS=frozenset('returnLogK returnPerKg returnFixed returnStorageDays returnStoragePerDay slaPenaltyPerUnit tariffLastMileP tariffCategoryPath tariffSource tariffQuality tariffQuoteAgeDays tariffQuoteReasons'.split())
+MARKET_FIELDS={prefix+suffix:mp for suffix,mp in [('WB','WB'),('Ozon','OZON'),('YM','YM'),('MM','MM'),('Avito','AVITO')] for prefix in ['profit','margin','be','tgt']}
+
+
+def marketplace(key,group):
+    if key in YM_FIELDS:return 'YM'
+    if group=='ozn' or re.match(r'^ozon_',key,re.I) or re.search(r'^ozon[A-Z]|Ozon$',key):return 'OZON'
+    for suffix,mp in [('WB','WB'),('YM','YM'),('MM','MM'),('Avito','AVITO')]:
+        if key.endswith(suffix):return mp
+    if key.startswith('cheapFbs'):return 'YM'
+    return ''
+
+
+def unavailable(p,key,group='calc'):
+    from enrichment_formula import truth
+    if truth(p.get('modelReviewRequired')) and group=='calc':return True
+    if (truth(p.get('noBuyInconsistent')) or truth(p.get('modelReviewRequired'))) and key in INVALID_FIELDS:return True
+    mp=MARKET_FIELDS.get(key)
+    markets=p.get('mp') or {}
+    if mp:
+        result=markets.get(mp)
+        if truth(p.get('noBuyInconsistent')) or truth(p.get('modelReviewRequired')) or result is None or truth(result.get('returnRateInvalid')) or truth(result.get('inputUnavailable')) or result.get('comparisonEligible') is False:return True
+    selected=mp or (marketplace(key,group) if group=='calc' else '')
+    result=markets.get(selected) or {}
+    if selected and (truth(result.get('inputUnavailable')) or result.get('comparisonEligible') is False):return True
+    if truth(p.get('priceInputsIncomplete')) and key in ('priceForApi','priceToSet','breakEvenPrice','tgtPrice'):return True
+    return truth(p.get('missingTariffBlocked')) and not selected and key in INVALID_FIELDS
+
+
+def prepare_options(meta,sheets,options):
+    if not isinstance(options,dict) or type(options.get('enabled')) is not bool or options.get('dim_unit','cm') not in ('cm','mm'):
+        raise ValueError('Неверные настройки Excel-формул')
+    if not isinstance(meta,list) or any(not isinstance(m,dict) or not isinstance(m.get('key'),str) for m in meta):
+        raise ValueError('Неверные описания колонок формул')
+    for m in meta:
+        if m.get('server_formula') and m['key'] not in FORMULA_KEYS:raise ValueError('Формула не поддерживается движком: '+m['key'])
+    if not options['enabled']:return {}
+    if not isinstance(sheets,list) or not 1<=len(sheets)<=10:raise ValueError('Неверные листы формул')
+    for sheet in sheets:
+        if not isinstance(sheet,dict) or not isinstance(sheet.get('name'),str) or not sheet['name'] or len(sheet['name'])>31 or re.search(r'[\\[\\]:*?/\\\\]',sheet['name']):raise ValueError('Неверное имя листа формул')
+        indices=sheet.get('indices')
+        if not isinstance(indices,list) or any(type(i) is not int or not 0<=i<len(meta) for i in indices) or len(set(indices))!=len(indices):raise ValueError('Неверные колонки листа формул')
+    return references(meta,sheets)
+""",
+    # ===== hvc_enrichment =====
+    'hvc_enrichment': """\"\"\"Server implementation of HVC.enrichOne using an explicit HVC reference snapshot.
+
+References are inputs (parts/OE/byArt/byOe), never browser-computed enrichments.
+The legacy donors API is deliberately not used: it cannot represent HVC's graph.
+\"\"\"
+import copy
+import math
+import re
+
+DIMS = ('weight', 'length', 'width', 'height')
+EXACT_PLACEHOLDERS = {'Без категории', 'Разное', 'Прочее', 'Не определено'}
+PLACEHOLDERS = {'без категории', 'разное', 'прочее', 'не определено'}
+
+
+def norm(value):
+    return re.sub('[^A-Z0-9А-ЯЁ]', '', str(value or '').upper())
+
+
+def enrich_rows(rows, reference, mode='auto', cat_mode='artbrand', columns=None,
+                timestamp='', number=float, rounded=round, allowed=None):
+    parts = dict(reference.get('parts') or [])
+    registry = dict(reference.get('oe') or [])
+    by_art = dict(reference.get('byArt') or [])
+    by_oe = dict(reference.get('byOe') or [])
+    unsafe = set(reference.get('unsafeKeys') or [])
+    unsafe_oe = set(reference.get('unsafeOe') or [])
+    separator = reference.get('groupSeparator', ' / ')
+    columns = columns or {}
+    def enabled(k): return bool(columns.get(k, True))
+    def num(v):
+        try: return number(v)
+        except (ValueError, TypeError): return 0
+    def meaningful(v, category=False):
+        text = str(v or '').strip()
+        return '' if category and text.lower() in PLACEHOLDERS else text
+    def complete(t):
+        return bool(t) and all(math.isfinite(num(t.get(k))) and num(t.get(k)) > 0 for k in DIMS)
+    def measure(t):
+        w, l, wi, h = (num(t.get(k)) for k in DIMS)
+        return (rounded(l * wi * h / 1000, 6), rounded(max(l, wi, h), 4), rounded(w, 6), rounded(l + wi + h, 4))
+    cache = {}
+    def aggregate(key):
+        oes = by_art.get(key, [])
+        cache_key = tuple(oes)
+        if cache_key in cache: return cache[cache_key]
+        rep = None
+        agg = {}
+        categories = set()
+        smallest = None
+        smallest_oe = ''
+        analogs, seen = [], set()
+        self_art = key.split('|')[0]
+        for oe in oes:
+            record = registry.get(oe) if oe not in unsafe_oe else None
+            # Same guard as _oeAggOf; tnved alone does not make a representative.
+            if record and (record.get('name') or record.get('applicability') or (record.get('category') and str(record['category']).strip() not in EXACT_PLACEHOLDERS)
+                           or record.get('length') or record.get('dimensions_str')):
+                if rep is None: rep = record
+            if record and record.get('category') and str(record['category']).strip() not in EXACT_PLACEHOLDERS: categories.add(str(record['category']).strip())
+            per_oe = []
+            per_seen = set()
+            for holder in by_oe.get(oe, []):
+                if holder in unsafe: continue
+                part = parts.get(holder)
+                if not part: continue
+                evidence = part.get('_dimensionEvidence')
+                if complete(evidence) and (smallest is None or measure(evidence) < measure(smallest)):
+                    smallest, smallest_oe = evidence, oe
+                for field in ('name', 'applicability', 'category', 'tnved'):
+                    # Browser OE aggregate does not populate tnved from parts.
+                    if field == 'tnved': continue
+                    value = meaningful(part.get(field), field == 'category')
+                    if not agg.get(field) and value: agg[field] = value
+                if part.get('category') and str(part['category']).strip() not in EXACT_PLACEHOLDERS: categories.add(str(part['category']).strip())
+                art = part.get('artikul') or part.get('article') or ''
+                an = norm(art)
+                if an and an not in per_seen:
+                    per_seen.add(an)
+                    if len(per_oe) < 40: per_oe.append((an, art))
+            for an, art in per_oe:
+                if an != self_art and an not in seen:
+                    seen.add(an)
+                    if len(analogs) < 40: analogs.append(art)
+        result = {'rep': rep or {}, 'agg': agg, 'conflict': len(categories) > 1,
+                  'smallest': smallest, 'smallestOe': smallest_oe, 'analogs': ', '.join(analogs)}
+        cache[cache_key] = result
+        return result
+    result = []
+    for source in rows:
+        p = copy.deepcopy(source)
+        key = norm(p.get('article')) + '|' + norm(p.get('brand'))
+        if key in unsafe:
+            result.append(p); continue
+        pt = parts.get(key)
+        raw_oe = str(p.get('oe_norm') or '').strip()
+        known = any(oe in registry or oe in by_oe for oe in [raw_oe] + re.split(r'[/;,|\\s\\x01]+', raw_oe) if oe)
+        pair_known = bool(norm(p.get('article')) and norm(p.get('brand')) and pt is not None)
+        h = aggregate(key)
+        def group():
+            out, seen = [], set()
+            def push(k):
+                if len(out) >= 500 or k in unsafe: return
+                part = parts.get(k)
+                art = (part.get('artikul') or part.get('article')) if part else k.split('|')[0]
+                an = norm(art)
+                if an and an not in seen:
+                    seen.add(an); out.append(art)
+            push(key)
+            for oe in by_art.get(key, []):
+                holders = by_oe.get(oe, [])
+                if len(holders) > 2000: continue
+                for holder in holders: push(holder)
+            return out
+        def run_pass(selected, cat_only):
+            if selected == 'oe' and not known: return
+            if selected != 'oe' and not pair_known: return
+            if not cat_only:
+                if enabled('analog_list'): p['analog_list'] = h['analogs']
+                if enabled('group_articles'):
+                    entries = group()
+                    p['group_articles'], p['groupSize'] = separator.join(entries), len(entries)
+            for field in (('category', 'tnved') if cat_only else ('name', 'applicability')):
+                occupied = meaningful(p.get(field))
+                if field == 'category': occupied = occupied and occupied not in EXACT_PLACEHOLDERS
+                if not enabled(field) or occupied: continue
+                if selected == 'oe':
+                    if field == 'category' and h['conflict']: continue
+                    options = [(h['rep'].get(field), 'OE-реестр'), (h['agg'].get(field), 'аналоги по OE')]
+                else:
+                    options = [((pt or {}).get(field), 'Артикул + Бренд')]
+                for value, label in options:
+                    value = meaningful(value, field == 'category')
+                    if value:
+                        p[field] = value
+                        p.setdefault('_sources', {})[field] = {'file': 'Каталог V (' + ('OE' if selected == 'oe' else 'Артикул + Бренд') + '): ' + label, 'date': timestamp}
+                        break
+            if cat_only: return
+            candidates = []
+            if pt and complete(pt.get('_dimensionEvidence')):
+                candidates.append((pt['_dimensionEvidence'], 'снимок того же артикула и бренда', ''))
+            if selected == 'oe' and complete(h['smallest']):
+                candidates.append((h['smallest'], 'меньший комплект по схожему OE', h['smallestOe']))
+            passing = []
+            for t, label, oe in candidates:
+                if any(num(p.get(k)) > 0 and num(p.get(k)) != num(t.get(k)) for k in DIMS): continue
+                if allowed and not allowed(p, t): continue
+                passing.append((t, label, oe))
+            if (passing and not p.get('_dimensionOeReview') and not p.get('dimensionAnomalyBlocked')
+                    and any(enabled(k) and num(p.get(k)) <= 0 for k in DIMS)):
+                t, label, oe = min(passing, key=lambda x: measure(x[0]))
+                before = {k: p.get(k, 0) for k in DIMS}
+                for k in DIMS:
+                    if enabled(k) and num(p.get(k)) <= 0:
+                        p[k] = num(t[k])
+                        p.setdefault('_sources', {})[k] = {'file': 'Каталог V: ' + label + ' (нужна проверка)', 'date': timestamp}
+                p['_dimensionOeReview'] = {'oe': oe, 'source': 'Каталог V: ' + label + ' · сверьте упаковку',
+                    'at': timestamp, 'before': before, 'after': {k: p.get(k, 0) for k in DIMS}}
+                p.pop('dimensionAnomalyAck', None)
+            if pt:
+                if not p.get('multiplicity'): p['multiplicity'] = pt.get('multiplicity', 0)
+                if not p.get('image_url') and pt.get('image_url'): p['image_url'] = pt['image_url']
+                if enabled('barcode') and not p.get('barcode') and pt.get('barcode'): p['barcode'] = pt['barcode']
+        for selected, cat_only in ((mode, False), (cat_mode, True)):
+            passes = ('oe', 'artbrand') if selected == 'auto' else (selected,)
+            for current in passes: run_pass(current, cat_only)
+        result.append(p)
+    return result
+""",
+    # ===== js_regex =====
+    'js_regex': """\"\"\"Translate common non-Unicode ECMAScript RegExp constructs to Python re.
+
+Used by matchCond (no flags other than i). No JavaScript runtime is invoked.
+This is not a complete ECMAScript regexp implementation; see audit limitations.
+\"\"\"
+import re
+from functools import lru_cache
+from enrichment_formula import JS_SPACE
+
+
+def utf16(text):
+    data=text.encode('utf-16-le',errors='surrogatepass')
+    return ''.join(chr(data[i]|data[i+1]<<8) for i in range(0,len(data),2))
+
+
+def canonical(char):
+    # ECMA Canonicalize without /u: uppercase, but do not fold a non-ASCII
+    # code unit to ASCII or expand one code unit to several (e.g. sharp s).
+    upper=char.upper()
+    return char if len(upper)!=1 or ord(char)>=128 and ord(upper)<128 else upper
+
+
+SPACE=''.join(re.escape(c) for c in JS_SPACE)
+WORD='A-Za-z0-9_'
+
+
+def class_pattern(p,start):
+    \"\"\"Parse a legacy JS class as UTF-16 sets before case canonicalization.\"\"\"
+    i=start;negative=i<len(p) and p[i]=='^'
+    if negative:i+=1
+    atoms=[]
+    predefined={'d':set(map(ord,'0123456789')),
+                'w':set(map(ord,'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_')),
+                's':set(map(ord,JS_SPACE))}
+    while i<len(p) and p[i]!=']':
+        c=p[i];i+=1;dash=c=='-'
+        if c=='\\\\':
+            if i==len(p):raise ValueError('Trailing class escape')
+            c=p[i];i+=1;dash=False
+            if c.lower() in predefined:
+                chars=predefined[c.lower()]
+                atoms.append((chars if c.islower() else set(range(65536))-chars,None,False));continue
+            if c in 'xu':
+                n=2 if c=='x' else 4;digits=p[i:i+n]
+                if len(digits)==n and re.fullmatch('[0-9a-fA-F]+',digits):c=chr(int(digits,16));i+=n
+            elif c=='c' and i<len(p) and (p[i].isascii() and (p[i].isalnum() or p[i]=='_')):
+                c=chr(ord(p[i].upper())%32);i+=1
+            elif c in '01234567':
+                digits=c
+                while i<len(p) and p[i] in '01234567' and len(digits)<(3 if digits[0] in '0123' else 2):digits+=p[i];i+=1
+                c=chr(int(digits,8))
+            else:c={'b':'\\b','f':'\\f','n':'\\n','r':'\\r','t':'\\t','v':'\\v'}.get(c,c)
+        atoms.append(({ord(c)},ord(c),dash))
+    if i==len(p):raise ValueError('Unclosed character class')
+    chars=set();j=0
+    while j<len(atoms):
+        if j+2<len(atoms) and atoms[j+1][2]:
+            left,right=atoms[j][1],atoms[j+2][1]
+            if left is not None and right is not None:
+                if left>right:raise ValueError('Invalid class range')
+                chars.update(range(left,right+1));j+=3;continue
+        chars.update(atoms[j][0]);j+=1
+    codes=sorted({ord(canonical(chr(n))) for n in chars})
+    if not codes:return ('[\\\\s\\\\S]' if negative else '(?!)'),i+1
+    # Compress the explicit set; escape every endpoint so Python class syntax
+    # (including set-operation-looking punctuation) cannot alter its meaning.
+    ranges=[];first=last=codes[0]
+    def emit(a,b):
+        esc=lambda n:'\\\\u%04x'%n
+        return esc(a) if a==b else esc(a)+esc(b) if b==a+1 else esc(a)+'-'+esc(b)
+    for n in codes[1:]:
+        if n==last+1:last=n
+        else:ranges.append(emit(first,last));first=last=n
+    ranges.append(emit(first,last))
+    return '['+('^' if negative else '')+''.join(ranges)+']',i+1
+
+
+def capture_layout(p):
+    starts={};ends={};names={};stack=[];i=0
+    while i<len(p):
+        c=p[i];i+=1
+        if c=='\\\\':i+=1;continue
+        if c=='[':
+            while i<len(p) and p[i]!=']':
+                if p[i]=='\\\\':i+=1
+                i+=1
+            i+=1;continue
+        if c=='(':
+            name=None
+            capture=p[i:i+1]!='?'
+            if p[i:i+2]=='?<' and p[i+2:i+3] not in ('=','!'):
+                end=p.find('>',i+2)
+                if end<0:raise ValueError('Invalid named capture')
+                name=p[i+2:end];capture=True
+            number=len(starts)+1 if capture else None
+            if capture:
+                starts[i-1]=number
+                if name is not None:
+                    if not name or not name.replace('$','_').isidentifier() or name in names:raise ValueError('Invalid or duplicate capture name')
+                    names[name]=number
+            stack.append(number)
+        elif c==')':
+            if not stack:raise ValueError('Unmatched closing group')
+            number=stack.pop()
+            if number is not None:ends[number]=i
+    if stack:raise ValueError('Unclosed group')
+    return starts,ends,names
+
+
+def reference(number,position,ends):
+    # In legacy JS a reference to a not-yet-participating capture succeeds
+    # with the empty string. Python instead fails on unmatched captures.
+    if ends.get(number,position+1)>position:return '(?:)'
+    return '(?(js%d)(?P=js%d)|)'%(number,number)
+
+
+@lru_cache(maxsize=512)
+def compile_pattern(pattern):
+    p=utf16(pattern);out=[];i=0
+    captures,ends,names=capture_layout(p)
+    while i<len(p):
+        c=p[i];i+=1
+        if c=='\\\\':
+            if i==len(p):raise ValueError('Trailing escape')
+            e=p[i];i+=1
+            classes={'d':'0-9','D':'^0-9','w':WORD,'W':'^'+WORD,'s':SPACE,'S':'^'+SPACE}
+            if e in classes:
+                out.append('['+classes[e]+']');continue
+            if e in ('b','B'):
+                out.append('(?a:\\\\'+e+')');continue
+            if e in ('x','u'):
+                size=2 if e=='x' else 4;digits=p[i:i+size]
+                if len(digits)==size and re.fullmatch('[0-9a-fA-F]+',digits):
+                    out.append(re.escape(canonical(chr(int(digits,16)))));i+=size
+                else:out.append(re.escape(canonical(e)))
+                continue
+            if e=='c':
+                if i<len(p) and p[i].isascii() and p[i].isalpha():
+                    out.append(re.escape(chr(ord(p[i].upper())%32)));i+=1
+                else:out.append(re.escape('\\\\c'))
+                continue
+            if e in 'fnrtv':
+                out.append(re.escape({'f':'\\f','n':'\\n','r':'\\r','t':'\\t','v':'\\v'}[e]));continue
+            if e in '0123456789':
+                end=i
+                while end<len(p) and p[end] in '0123456789':end+=1
+                digits=e+p[i:end];number=int(digits)
+                if e!='0' and number<=len(captures):
+                    out.append(reference(number,i-2,ends));i=end;continue
+                if e in '01234567':
+                    octal=e
+                    while i<len(p) and p[i] in '01234567' and len(octal)<(3 if e in '0123' else 2):octal+=p[i];i+=1
+                    out.append(re.escape(canonical(chr(int(octal,8)))))
+                else:out.append(e)
+                continue
+            if e=='k' and i<len(p) and p[i]=='<' and names:
+                end=p.find('>',i+1);name=p[i+1:end]
+                if end<0 or name not in names:raise ValueError('Invalid named reference')
+                out.append(reference(names[name],i-2,ends));i=end+1;continue
+            # Identity escapes (\\a, \\z, ...) are literals in legacy JS mode.
+            out.append(re.escape(canonical(e)));continue
+        if c=='[':
+            translated,i=class_pattern(p,i);out.append(translated);continue
+        if c=='.':out.append('[^\\n\\r\\u2028\\u2029]');continue
+        if c=='$':out.append('\\\\Z');continue
+        if c=='(' and i-1 in captures:
+            out.append('(?P<js%d>'%captures[i-1])
+            if p[i:i+2]=='?<':i=p.index('>',i+2)+1
+            continue
+        if c=='(' and i<len(p) and p[i]=='?':
+            if p[i:i+2] in ('?:','?=','?!'):out.append('('+p[i:i+2]);i+=2;continue
+            if p[i:i+3] in ('?<=','?<!'):out.append('('+p[i:i+3]);i+=3;continue
+            raise ValueError('Non-ECMAScript group')
+        if c in '*+?}' and i<len(p) and p[i]=='+':raise ValueError('Possessive quantifier is not ECMAScript')
+        out.append(canonical(c))
+    return re.compile(''.join(out))
+
+
+def search(pattern,text):
+    try:return compile_pattern(pattern).search(''.join(map(canonical,utf16(text)))) is not None
+    except (ValueError,re.error,OverflowError,RecursionError):return False
+""",
+    # ===== mark_status =====
+    'mark_status': """\"\"\"MarkStatus.check and its pipeline hide action; independent of legal classification.\"\"\"
+import copy
+import re
+
+
+from enrichment_formula import string, truth, JS_SPACE
+
+
+def js_string(v):return '' if v is None else string(v)
+
+
+def normalize(v): return js_string(v).strip(JS_SPACE).lower().replace('ё','е')
+
+VALID = set(map(normalize, ['введён в оборот','введен в оборот','в обороте','активен','активно','проверен','валиден','валидный','valid','ok']))
+INVALID = set(map(normalize, ['выведен из оборота','выведен','выбыл','выбытие','продан','продано','реализован',
+    'списан','списание','возвращён','возвращен','возврат','аннулирован','отозван','отменён','отменен',
+    'просрочен','истёк','истек','недействителен','не действителен','не введён в оборот','не введен в оборот',
+    'ошибка маркировки','ошибка','error','invalid','expired','cancelled','canceled','withdrawn']))
+
+
+def check(status, code, required, settings=None):
+    if not truth(required): return {'ok':True,'kind':'skip'}
+    cfg=settings or {}
+    s=normalize(status)
+    # JS String.length counts UTF-16 code units, not Python Unicode characters.
+    has_code=len(js_string(code).strip(JS_SPACE).encode('utf-16-le',errors='surrogatepass'))//2>=8
+    if cfg.get('markRequireCode') is not False and not has_code:
+        return {'ok':False,'kind':'code','reason':'нет кода маркировки'}
+    if not s: return {'ok':False,'kind':'empty','reason':'статус маркировки не указан'}
+    def split(v): return {normalize(x) for x in re.split('[;,]',js_string(v)) if normalize(x)}
+    if s in INVALID or s in split(cfg.get('markInvalidStatuses')):
+        return {'ok':False,'kind':'invalid','reason':'недопустимый статус маркировки: '+js_string(status if truth(status) else '')}
+    if s in VALID or s in split(cfg.get('markValidStatuses')): return {'ok':True,'kind':'valid'}
+    return {'ok':True,'kind':'unknown'}
+
+
+def apply(row, settings=None):
+    p=copy.deepcopy(row)
+    cfg=settings or {}
+    outcome=check(p.get('markStatus'),p.get('markCode'),truth(p.get('markRequired')),cfg)
+    p['markCompliant']=outcome['ok']
+    if truth(cfg.get('autoHideMark')) and truth(p.get('markRequired')) and not outcome['ok']:
+        p.update(visible=False,visibleReason='честный_знак',policyAction='Скрыть с витрины',policyReason=outcome['reason'])
+    return p,outcome
+""",
+    # ===== name_category =====
+    'name_category': """\"\"\"NameCategory selection and non-destructive apply, using raw dictionary inputs.\"\"\"
+import copy
+import re
+from name_category_expansions import EXPANSIONS
+
+ALIASES = dict(filter='фильтр', oil='масляный', air='воздушный', cabin='салонный', fuel='топливный', water='водяной', brake='тормозной', pads='колодки', pad='колодки', disc='диск', pump='насос', headlight='фара')
+STOP = set('для или под над без при как the and на по of из в с a авто'.split())
+MARKERS = ('_categoryNameAutoValue','_categoryNameSource','_categoryNameBrand','_categoryNameRevision','_categoryNameStatus','_categoryNameChoices','_categoryNameMethod')
+
+def norm(v): return str(v or '').lower().replace('ё','е')
+def words(v): return [w for w in re.sub('[^a-zа-я0-9]+',' ',norm(v)).split() if len(w)>=3]
+def stem(word):
+    x = word
+    if re.fullmatch('[а-я]+',x):
+        x = re.sub('(?:иями|ями|ами|ого|его|ому|ему|ыми|ими|иях|иях|ий|ый|ой|ая|яя|ое|ее|ые|ие|ых|их|ую|юю|ов|ев|ей|ам|ям|ах|ях)$','',x)
+        if len(x)>=4: x=re.sub('[аеёиоуыэюяь]$','',x)
+    if x=='колодок': x='колодк'
+    return x[:8]
+
+def tokens(value):
+    text=str(value or '')
+    if re.search('водян[а-я]*',text,re.I):
+        text=re.sub(EXPANSIONS[0][0],r'\\g<1>насос',text,flags=re.I)
+    if re.search('сальник[а-я]*\\s+(?:коленвал|распредвал)',text,re.I): text+=' двигателя'
+    if re.search(r'(?:мотоцикл|скутер|мопед|снегоход|квадроцикл|(?:^|\\s)мото(?=\\s|$))',text,re.I): text+=' мототехника'
+    for pattern,replacement in EXPANSIONS[1:]:
+        text=re.sub(pattern,replacement.replace('$1',r'\\g<1>'),text,flags=re.I)
+    text=re.sub('ремонтн[а-я]*\\s+комплект[а-я]*','ремкомплект',norm(text))
+    return [ALIASES.get(w,w) for w in re.sub('[^a-zа-я0-9]+',' ',text).split()
+            if len(ALIASES.get(w,w))>=2 and ALIASES.get(w,w) not in STOP and not re.match('^(автомобил|легков|машин)',ALIASES.get(w,w))]
+
+def guess(p, context, match):
+    name=str(p.get('name') or '').strip()
+    if not name: return {'status':'empty','choices':[]}
+    lower, brand=norm(name),norm(p.get('brand'))
+    ws=words(name); stems=[stem(ALIASES.get(w,w)) for w in ws]
+    dictionary=[]; anchors=set()
+    for c in context.get('categories',[]):
+        if not c.get('active') or not c.get('name'): continue
+        terms=[words(t) for t in re.split('[|,;]',str(c.get('keywords') or ''))]; terms=[t for t in terms if t]
+        cs=[[stem(ALIASES.get(w,w)) for w in term] for term in terms]
+        dictionary.append((c,terms,cs))
+        if c.get('kind')=='base': anchors.update(x for t in cs for x in t)
+    title=tokens(name)
+    if title and title[0].startswith('ремкомплект'): title.pop(0)
+    head=''; known=set(context.get('heads',[]))
+    for w in title:
+        adj=not re.search('(?:ение|ание|тие|ствие)$',w) and re.search('(?:ый|ий|ой|ая|яя|ое|ее|ые|ие|ых|их|ого|его|ому|ему|ыми|ими|ую|юю)$',w)
+        if adj or re.match('^(комплект|набор|оригинал)',w): continue
+        k=stem(w)
+        if k in known: head=k; break
+    anchor=head if head in anchors and head not in ('рычаг','стойк','опор','тяг','кольц','подуш','подушк') else ''
+    for r in context.get('rules',[]):
+        if r.get('kind')=='cat' and r.get('enabled') and r.get('target_val') and match({'src':lower,'brand':brand},'brand' if r.get('field')=='brand' else 'src',r.get('op'),r.get('value')):
+            return {'status':'auto','category':r['target_val'],'method':'rule','choices':[]}
+    scores=[]
+    for c,terms,cs in dictionary:
+        if c.get('kind')=='base' and c['name']=='Фильтры' and not any(w.startswith(('фильтр','filter')) for w in ws): continue
+        best=-1; unique=set()
+        for term,ts in zip(terms,cs):
+            if anchor and c.get('kind')=='base' and anchor not in ts: continue
+            used=set()
+            for part,part_stem in zip(term,ts):
+                found=next((i for i,w in enumerate(ws) if i not in used and (w.startswith(part) or stems[i]==part_stem)),None)
+                if found is None: break
+                used.add(found)
+            else:
+                if c.get('kind')=='base' and c['name']=='Топливная система' and len(term)==1 and term[0] in ('форсунк','распылител'):
+                    if re.search('(?:стекло)?омывател',lower) or not re.search(r'(?:топлив|дизел|бензин|инжектор|впрыск|fuel|injector|тнвд|газов|гбо|common[\\s-]*rail)',lower,re.I): continue
+                if c.get('kind')=='base' and c['name']=='Жидкости и масла' and term==['масл'] and not any(re.fullmatch('(масло|масла|маслу|маслом)',w) for w in ws): continue
+                unique.update(used); best=max(best,len(term)*1000+sum(min(len(x),12) for x in term)*10)
+        if best>=0: scores.append((c['name'],best+min(len(unique),9)))
+    scores.sort(key=lambda x:-x[1])
+    if not scores: return {'status':'none','choices':[]}
+    top=[x[0] for x in scores if x[1]==scores[0][1]]
+    return {'status':'ambiguous','choices':top[:6]} if len(top)>1 else {'status':'auto','category':top[0],'method':'dictionary','choices':[]}
+
+def apply(p,context,enabled,match):
+    p=copy.deepcopy(p)
+    auto=bool(p.get('_categoryNameAutoValue')) and p.get('category')==p['_categoryNameAutoValue']
+    if p.get('_categoryNameAutoValue') and not auto:
+        for k in MARKERS: p.pop(k,None)
+    category=str(p.get('category') or '')
+    blank=not category.strip() or category.strip().lower() in ('без категории','не определено')
+    # Explicit-source recognition is passed as an input verdict from FIELD_ALIAS.
+    if not auto and (not blank or ((p.get('_categoryNameExplicit') or p.get('_categoryExplicitSource')) and category.strip())): return p
+    if not enabled:
+        if auto and (p.get('_categoryNameSource')!=str(p.get('name') or '') or p.get('_categoryNameBrand')!=str(p.get('brand') or '')): p['_categoryNameStatus']='stale'
+        return p
+    if auto and p.get('_categoryNameSource')==str(p.get('name') or '') and p.get('_categoryNameBrand')==str(p.get('brand') or '') and p.get('_categoryNameRevision')==context.get('version') and p.get('_categoryNameStatus')!='stale': return p
+    g=guess(p,context,match)
+    p.update(_categoryNameSource=str(p.get('name') or ''),_categoryNameBrand=str(p.get('brand') or ''),_categoryNameRevision=context.get('version',''),_categoryNameStatus=g['status'],_categoryNameMethod=g.get('method',''),_categoryNameChoices=g.get('choices',[])[:6])
+    if g.get('category'): p['category']=g['category']; p['_categoryNameAutoValue']=g['category']
+    else:
+        if auto or not category.strip(): p['category']='Без категории'
+        p.pop('_categoryNameAutoValue',None)
+    return p
+""",
+    # ===== name_category_expansions =====
+    'name_category_expansions': """# Ordered lexical replacements from OzonAuto._expandRaw.
+EXPANSIONS = [['(^|[^a-zа-я0-9])помп[а-я]*(?=$|[^a-zа-я0-9])', '$1насос'], ['(^|[^a-zа-яё0-9])фильтр[а-яё]*\\\\s+(?:очистк[а-яё]*\\\\s+)?топлив(?:а|о|у|ом|е|н[а-яё]*)(?=$|[^a-zа-яё0-9])', '$1фильтр топливный'], ['(^|[^a-zа-яё0-9])лямбда[\\\\s-]*зонд[а-яё]*(?=$|[^a-zа-яё0-9])', '$1датчик кислорода'], ['(^|[^a-zа-яё0-9])прокладк[а-яё]*\\\\s+головк[а-яё]*\\\\s+блок[а-яё]*\\\\s+цилиндр[а-яё]*(?=$|[^a-zа-яё0-9])', '$1прокладка ГБЦ'], ['(^|[^a-zа-яё0-9])прокладк[а-яё]*\\\\s+клапанн[а-яё]*\\\\s+крышк[а-яё]*(?=$|[^a-zа-яё0-9])', '$1прокладка клапанной крышки двигателя'], ['(^|[^a-zа-яё0-9])помп[а-яё]*\\\\s+охлажден[а-яё]*\\\\s+(?:двигател[а-яё]*|двс)(?=$|[^a-zа-яё0-9])', '$1насос водяной'], ['(^|[^a-zа-яё0-9])насос[а-яё]*\\\\s+охлаждающ[а-яё]*\\\\s+жидкост[а-яё]*(?=$|[^a-zа-яё0-9])', '$1насос водяной'], ['(^|[^a-zа-яё0-9])автоламп[а-яё]*(?=$|[^a-zа-яё0-9])', '$1лампа автомобильная'], ['(^|[^a-zа-яё0-9])трос[а-яё]*\\\\s+(?:ручник[а-яё]*|стояночн[а-яё]*\\\\s+тормоз[а-яё]*)(?=$|[^a-zа-яё0-9])', '$1трос ручного тормоза'], ['(^|[^a-zа-яё0-9])свеч[а-яё]*\\\\s+накал[а-яё]*(?=$|[^a-zа-яё0-9])', '$1свеча накаливания'], ['(^|[^a-zа-яё0-9])сайлент[\\\\s-]+блок[а-яё]*(?=$|[^a-zа-яё0-9])', '$1сайлентблок'], ['(^|[^a-zа-яё0-9])радиатор[а-яё]*\\\\s+(?:двигател[а-яё]*|двс)(?=$|[^a-zа-яё0-9])', '$1радиатор двигателя охлаждения'], ['(^|[^a-zа-яё0-9])форсунк[а-яё]*\\\\s+стеклоомывател[а-яё]*(?=$|[^a-zа-яё0-9])', '$1форсунка омывателя'], ['(^|[^a-zа-яё0-9])(?:жикл[её]р|распылител)[а-яё]*\\\\s+(?:стекло)?омывател[а-яё]*(?=$|[^a-zа-яё0-9])', '$1форсунка омывателя'], ['(^|[^a-zа-я0-9])бензонасос[а-я]*(?=$|[^a-zа-я0-9])', '$1насос топливный'], ['(^|[^a-zа-я0-9])дворник[а-я]*(?=$|[^a-zа-я0-9])', '$1щетка стеклоочистителя'], ['(^|[^a-zа-я0-9])маслофильтр[а-я]*(?=$|[^a-zа-я0-9])', '$1фильтр масляный'], ['(^|[^a-zа-я0-9])фильтр[а-я]*\\\\s+салон[а-я]*(?=$|[^a-zа-я0-9])', '$1фильтр салонный'], ['(^|[^a-zа-я0-9])фильтр[а-я]*\\\\s+масла(?=$|[^a-zа-я0-9])', '$1фильтр масляный'], ['(^|[^a-zа-я0-9])wiper\\\\s+blades?(?=$|[^a-zа-я0-9])', '$1щетка стеклоочистителя'], ['(^|[^a-zа-я0-9])spark\\\\s+plugs?(?=$|[^a-zа-я0-9])', '$1свеча зажигания'], ['(^|[^a-zа-я0-9])timing\\\\s+belts?(?=$|[^a-zа-я0-9])', '$1ремень грм'], ['(^|[^a-zа-я0-9])timing\\\\s+chains?(?=$|[^a-zа-я0-9])', '$1цепь грм']]
+""",
+    # ===== ozon_auto =====
+    'ozon_auto': """\"\"\"Ozon preferred-assignment lifecycle; lexical inference is injected separately.
+
+This is not yet a standalone name classifier. The detail callback must implement
+OzonAuto.detailWithCategory, not supply browser-generated presentation values.
+\"\"\"
+import copy
+import re
+
+MARKERS = ('SourceName', 'SourceBrand', 'Version', 'Status', 'Choices',
+           'SuggestedType', 'CategorySignature', 'Reason')
+PREFIX = '_ozonName'
+
+
+def apply_preferred(model, row, *, detail, version, category_signature,
+                    registry=None, applicability=None, force=False,
+                    enabled=True, force_name=False, identity_unsafe=False,
+                    reference_version=0):
+    p = copy.deepcopy(row)
+    if identity_unsafe:
+        return p, dict(category=p.get('ozon_category') or '', type=p.get('ozon_type') or '',
+                       source=p.get('ozon_type_src') or 'none',
+                       reason='неоднозначный SKU или OE-источник — автоматическая типизация пропущена')
+    old = copy.deepcopy(p) if p.get('ozon_type_src') == 'keyword' and (p.get('ozon_type') or p.get('ozon_category')) else None
+    if not p.get('ozon_type_src') and (p.get('ozon_type') or p.get('ozon_category')):
+        p.update(ozon_type_src='import', ozon_type_basis='import', ozon_type_conf='unverified')
+    p, r = model.apply(p, registry, applicability, force, reference_version)
+    if r and r['source'] in ('auto', 'manual', 'import'):
+        if r['source'] in ('manual', 'import'):
+            p['ozon_error'] = ''
+        for key in MARKERS:
+            p.pop(PREFIX + key, None)
+        return p, r
+    if r and re.search(r'conflict|invalid_(?:oe|applicability)_mapping', r.get('reason', ''), re.I):
+        p[PREFIX+'Status'] = 'oe_conflict' if re.search('conflict', r['reason'], re.I) else 'oe_invalid'
+        p[PREFIX+'Choices'] = []
+        for key in ('SourceName', 'SourceBrand', 'Version', 'CategorySignature', 'Reason'):
+            p.pop(PREFIX+key, None)
+        return p, r
+    name, brand = str(p.get('name') or ''), str(p.get('brand') or '').strip()
+    current = bool(old and old.get(PREFIX+'SourceName') == name and old.get(PREFIX+'SourceBrand') == brand
+                   and old.get(PREFIX+'Version') == version and old.get(PREFIX+'CategorySignature') == category_signature)
+
+    def result():
+        return dict(category=p.get('ozon_category') or '', type=p.get('ozon_type') or '', source='keyword',
+                    basis=p.get('ozon_type_basis') or 'keyword', score=p.get('ozon_type_score') or 0,
+                    confidence='low', reason='', oe='', applicability='')
+
+    def restore():
+        for key in ('ozon_category', 'ozon_type'):
+            if key in old:
+                p[key] = old[key]
+            else:
+                p.pop(key, None)
+        p.update(ozon_type_score=old.get('ozon_type_score') or 0, ozon_type_src='keyword',
+                 ozon_type_conf='low', ozon_type_basis=old.get('ozon_type_basis') or 'keyword', ozon_error='')
+        for key in ('ozon_description_category_id', 'ozon_type_id'):
+            if old.get(key) is not None:
+                p[key] = old[key]
+            else:
+                p.pop(key, None)
+        for key, default in (('Choices', []), ('SuggestedType', ''), ('CategorySignature', ''), ('Reason', '')):
+            p[PREFIX+key] = old.get(PREFIX+key) or default
+
+    if not (enabled or force_name):
+        if old:
+            restore()
+            p[PREFIX+'Status'] = (old.get(PREFIX+'Status') or 'auto') if current else 'stale'
+            return p, result()
+        if PREFIX+'SourceName' in p and any(p.get(PREFIX+k) != v for k,v in
+                (('SourceName',name), ('SourceBrand',brand), ('Version',version), ('CategorySignature',category_signature))):
+            p[PREFIX+'Status'] = 'stale'
+        return p, r
+    if current and old.get(PREFIX+'Status') != 'stale':
+        restore()
+        p[PREFIX+'Status'] = old.get(PREFIX+'Status') or 'auto'
+        return p, result()
+    d = detail(p)
+    p.update({PREFIX+'SourceName':name, PREFIX+'SourceBrand':brand, PREFIX+'Version':version,
+              PREFIX+'CategorySignature':category_signature, PREFIX+'Reason':d.get('reason') or '',
+              PREFIX+'Status':d['status'], PREFIX+'Choices':(d.get('choices') or [])[:6],
+              PREFIX+'SuggestedType':d.get('suggestedType') or ''})
+    match = d.get('match')
+    if not match:
+        p.pop('ozon_description_category_id', None)
+        p.pop('ozon_type_id', None)
+        if d['status'] != 'category_ambiguous' or not d.get('suggestedType'):
+            return p, r
+        p.update(ozon_category='', ozon_type=d['suggestedType'], ozon_type_score=0)
+    else:
+        p.update(ozon_category=match['cat'], ozon_type=match['type'], ozon_type_score=match['score'])
+        if match.get('catId') and match.get('typeId'):
+            p.update(ozon_description_category_id=match['catId'], ozon_type_id=match['typeId'])
+        else:
+            p.pop('ozon_description_category_id', None)
+            p.pop('ozon_type_id', None)
+    p.update(ozon_type_src='keyword', ozon_type_conf='low', ozon_type_basis=d.get('basis') or 'keyword', ozon_error='')
+    return p, result()
+""",
+    # ===== ozon_category =====
+    'ozon_category': """\"\"\"Ozon name proposals checked against internal category/kind dictionary.\"\"\"
+import re
+from category_tnved import CategoryTnved, norm
+from csv_kind_lexicon import stem as csv_stem, words as csv_words
+from csv_kind_matcher import name_lead, UNSAFE
+from ozon_name import OzonNameClassifier, tokens, stem, head
+from ozon_reference import strict_key
+
+PREFERENCE = {'фильтры': 'Автофильтры', 'детали крепежные': 'Автомобильный крепеж', 'автохимия и автокосметика': 'Автохимия и автокосметика', 'тормозная система': 'Запчасти для легковых автомобилей', 'подвеска': 'Запчасти для легковых автомобилей', 'подвеска и рулевое управление': 'Запчасти для легковых автомобилей', 'сцепление': 'Запчасти для легковых автомобилей', 'освещение': 'Запчасти для легковых автомобилей', 'трансмиссия / кпп': 'Запчасти для легковых автомобилей', 'детали кпп': 'Запчасти для легковых автомобилей', 'двигатель': 'Запчасти для легковых автомобилей', 'детали двигателя': 'Запчасти для легковых автомобилей', 'электрика и электроника': 'Запчасти для легковых автомобилей', 'электрооборудование': 'Запчасти для легковых автомобилей', 'свечи и высоковольтные провода': 'Запчасти для легковых автомобилей', 'система охлаждения': 'Запчасти для легковых автомобилей', 'насосы и компрессоры': 'Запчасти для легковых автомобилей', 'ремни и ролики двигателя': 'Запчасти для легковых автомобилей', 'подшипники': 'Запчасти для легковых автомобилей', 'ремкомплекты': 'Запчасти для легковых автомобилей', 'резинотехнические изделия': 'Запчасти для легковых автомобилей', 'тросы': 'Запчасти для легковых автомобилей', 'трубки': 'Запчасти для легковых автомобилей'}
+
+
+def kind_key(value):
+    ws=tokens(value,literal=True);h=head(ws)
+    ns=sorted(set(stem(w) for w in ws if len(stem(w))>=2))
+    return h+'\\x1f'+'\\x1e'.join(ns) if h and ns else ''
+
+
+class OzonCategoryClassifier(OzonNameClassifier):
+    def __init__(self,types,category_rows,revision):
+        super().__init__(types)
+        self.category=CategoryTnved(category_rows,revision)
+        self.by_kind={};self.kind_categories={};self.csv_words=set()
+        weak=r'^(?:передн|задн|верхн|нижн|лев|прав|боков|внутрен|наружн|внешн|оригин|нов|комплект|набор|универс|легков|автомобил|машин|модел|размер|сторон|детал|издел|проч|различн|раздел|категор)'
+        for row in category_rows:
+            self.kind_categories.setdefault(norm(row[1]),set()).add(norm(row[0]))
+            for w in tokens(row[1],literal=True):
+                k=stem(w)
+                if len(k)>=3 and not re.fullmatch('[0-9]+',k) and not re.search(weak,k): self.csv_words.add(k)
+        for e in self.entries:
+            key=kind_key(e['type'])
+            if key: self.by_kind.setdefault(key,[]).append(e)
+
+    @staticmethod
+    def auto(first):
+        n=len(first['literalNeeds'])
+        return dict(status='auto',choices=[],basis='category_dictionary',match={
+            **{k:first[k] for k in ('cat','type','catId','typeId','score')},'hit':n,'need':n})
+
+    def resolve_category(self,p,d,known=None):
+        if d.get('status')!='category_ambiguous': return None
+        preferred=PREFERENCE.get(norm(p.get('category')));typ=str(d.get('suggestedType') or '').strip()
+        allowed={norm(x) for x in d.get('choices',[])}
+        if not preferred or not typ or norm(preferred) not in allowed: return None
+        selected=[x for x in (self.entries if known is None else known) if strict_key(x['type'])==strict_key(typ) and norm(x['cat']) in allowed and norm(x['cat'])==norm(preferred)]
+        if not selected: return None
+        pairs={self.pair_key(x) for x in selected}
+        return self.auto(selected[0]) if len(pairs)==1 else None
+
+    @staticmethod
+    def pair_key(x):
+        return (x['catId'],x['typeId']) if x['catId'] and x['typeId'] else (x['cat'],x['type'])
+
+    def detail_with_category(self,p):
+        named=self.detail(p);by_name=self.resolve_category(p,named) or named
+        name_result={**by_name,'basis':by_name.get('basis') or 'keyword'}
+        def ambiguous(choices,reason):
+            return dict(status='ambiguous',choices=choices,basis='category_dictionary',reason=reason)
+        if p.get('_categoryKindStatus')=='category_conflict':
+            return ambiguous(p.get('_categoryKindChoices') or [],'Название противоречит сохранённой внутренней категории: проверьте товар')
+        proposed=(by_name.get('match') or {}).get('type') or by_name.get('suggestedType') or ''
+        discriminators=p.get('_categoryKindDiscriminators') or []
+        if p.get('_categoryKindStatus')=='ambiguous' and proposed and discriminators:
+            proposed_words={csv_stem(w) for w in csv_words(proposed)}
+            if any(w not in proposed_words for w in discriminators):
+                return ambiguous([proposed],'Название уточняет деталь, а предложенный тип Ozon слишком общий: проверьте вручную')
+        info=self.category.type_info(p)
+        if info['conflict']:
+            return ambiguous([],'Разные виды категории в исходных данных: уточните вид до подбора Ozon')
+        hit=self.category.lookup_for(p,info)
+        if hit['status']!='match': return name_result
+        kind=hit['type']
+        if re.search(r'[/,;+&|]|\\s(?:и|или)\\s|прочие|разные|универсальн',kind,re.I): return name_result
+        key=kind_key(kind);name_type=proposed
+        if len(self.kind_categories.get(norm(kind),set()))>1:
+            if name_type and kind_key(name_type)!=key: return name_result
+            return ambiguous([name_type] if name_type else [],'Одинаковый вид встречается в разных внутренних категориях; уточните конкретную деталь')
+        matches=self.by_kind.get(key,[])
+        if not matches:
+            if name_type:
+                kind_words=tokens(kind,literal=True);kh=head(kind_words)
+                required={csv_stem(w) for w in kind_words if stem(w)!=kh}
+                cw=tokens(name_type,literal=True);ch=head(cw);cs={csv_stem(w) for w in cw}
+                ah=head(tokens(kind,True))
+                if not required.issubset(cs) or (ch!=kh and ch!=ah):
+                    return ambiguous([name_type],'В доступном справочнике Ozon нет точного соответствия внутреннему виду; проверьте предложенный тип')
+            return name_result
+        types={}
+        for x in matches: types.setdefault(strict_key(x['type']),x['type'])
+        if len(types)!=1:
+            return ambiguous(list(types.values())[:6],'Виду внутренней категории соответствуют несколько типов Ozon; выберите вручную')
+        typ=next(iter(types.values()))
+        choices=list(dict.fromkeys(x for x in [name_type,typ]+by_name.get('choices',[]) if x))[:6]
+        if by_name['status']=='ambiguous' or (name_type and strict_key(name_type)!=strict_key(typ)):
+            return ambiguous(choices,'Название товара и вид из Категории12131.csv допускают разные типы Ozon')
+        name=str(p.get('name') or '');brand=str(p.get('brand') or '').strip()
+        lead=name_lead(name,brand);ph=head(tokens(lead,True));kh=head(tokens(kind,literal=True))
+        if not name.strip() or not ph or re.search(UNSAFE,lead,re.I|re.ASCII) or (ph!=kh and not(name_type and strict_key(name_type)==strict_key(typ))):
+            return ambiguous([typ],'Вид из Категории12131.csv предлагает тип, но название товара не подтверждает его')
+        kw={stem(w) for w in tokens(kind,literal=True)};tw={stem(w) for w in tokens(name,True)}
+        fully=len(kw)>1 and kw.issubset(tw)
+        if not fully and any(w in self.csv_words and w not in kw and w!=ph for w in tw):
+            return ambiguous([typ],'В названии есть признаки другого вида детали: проверьте внутренний вид и тип Ozon')
+        if len({self.pair_key(x) for x in matches})>1:
+            d=dict(status='category_ambiguous',choices=list(dict.fromkeys(x['cat'] for x in matches))[:6],suggestedType=typ,basis='category_dictionary')
+            return self.resolve_category(p,d,matches) or d
+        return self.auto(matches[0])
+""",
+    # ===== ozon_classifier =====
+    'ozon_classifier': """\"\"\"Strict Ozon OE/applicability classification using a canonical historical pair list.\"\"\"
+import re
+from category_tnved import text
+from ozon_reference import OzonReference
+
+MISSING=object()
+CAT_KEYS=('ozon_category','ozonCategory','category_ozon','categoryOzon','category','cat')
+TYPE_KEYS=('ozon_type','ozonType','type_ozon','typeOzon','type')
+NESTED=('ozon','ozon_mapping','ozonMapping')
+SIGNAL_KEYS=CAT_KEYS[:4]+TYPE_KEYS[:4]
+def string(v): return text(v).strip() if not isinstance(v,(dict,list)) else '[object Object]' if isinstance(v,dict) else ','.join(map(string,v))
+def norm(v): return re.sub('[^0-9a-zа-я]+',' ',string(v).lower().replace('ё','е')).strip()
+def norm_oe(v): return re.sub('[^0-9A-ZА-ЯЁ]','',string(v).upper())
+def hvc_key(v): return re.sub(r'\\s+',' ',re.sub(r'[^0-9a-zа-яё`\\-\\s]','',string(v).replace("'",'').lower())).strip()
+def first(v,keys): return next((v[k] for k in keys if string(v.get(k))),'')
+def conflict(v): return isinstance(v,dict) and (bool(v.get('conflict') or v.get('ozon_conflict')) or any(isinstance(v.get(k),dict) and (v[k].get('conflict') or v[k].get('ozon_conflict')) for k in ('ozon','ozon_mapping')))
+def declared(v):
+    if isinstance(v,list): return len(v)>=2 and bool(string(v[0]) and string(v[1]))
+    if not isinstance(v,dict): return False
+    return any(declared(v.get(k)) for k in NESTED) or bool(string(first(v,CAT_KEYS)) and string(first(v,TYPE_KEYS)))
+def signal(v):
+    if isinstance(v,str): return bool(v.strip())
+    if isinstance(v,list): return any(map(signal,v))
+    if not isinstance(v,dict): return False
+    return any(string(v.get(k)) for k in SIGNAL_KEYS) or any(signal(v.get(k)) for k in NESTED)
+def tokens(p):
+    out=[];seen=set()
+    def add(v):
+        if isinstance(v,list):
+            for x in v: add(x)
+            return
+        for raw in re.split(r'[/;,\\r\\n|]+',string(v)):
+            raw=raw.strip();key=norm_oe(raw)
+            if key and key not in seen: seen.add(key);out.append(dict(raw=raw,key=key,hvc=hvc_key(raw)))
+    for k in ('oe_numbers','oe_list','oe_norm','oe_number','oe'): add(p.get(k))
+    return out
+
+def get(store,keys):
+    if not isinstance(store,dict): return MISSING
+    return next((store[k] for k in keys if k and k in store),MISSING)
+
+class OzonClassifier:
+    def __init__(self,pairs,tree=None,scope='auto'):
+        self.reference=OzonReference(tree,scope)
+        self.groups={}
+        for category,typ in pairs: self.groups.setdefault(norm(typ),[]).append({'category':category,'type':typ})
+    def pair(self,v):
+        if not v: return None
+        if isinstance(v,list): return self.pair({'category':v[0],'type':v[1]}) if len(v)>=2 else self.pair(v[0])
+        if isinstance(v,str):
+            if self.reference.has_data:
+                hit=self.reference.unique_type(v)
+                return {'category':hit['cat'],'type':hit['name']} if hit else None
+            matches=self.groups.get(norm(v),[])
+            return matches[0] if len(matches)==1 else None
+        if not isinstance(v,dict) or conflict(v): return None
+        nested=first(v,NESTED)
+        if nested:
+            pair=self.pair(nested)
+            if pair: return pair
+            if declared(nested) or signal(nested) or conflict(nested): return None
+        cat,typ=first(v,CAT_KEYS),first(v,TYPE_KEYS)
+        if self.reference.has_data:
+            hit=self.reference.find_pair(cat,typ) if cat else {'status':'valid','item':self.reference.unique_type(typ)}
+            item=hit.get('item')
+            return {'category':item['cat'],'type':item['type']} if hit['status']=='valid' and item else None
+        matches=self.groups.get(norm(typ),[])
+        if not matches: return None
+        if not cat: return matches[0] if len(matches)==1 else None
+        # Historical dictionary favors the first category; alternatives must be unique.
+        if norm(cat)==norm(matches[0]['category']): return matches[0]
+        same=[m for m in matches if norm(m['category'])==norm(cat)]
+        return same[0] if len(same)==1 else None
+    def classify(self,p,registry=None,applicability=None):
+        ts=tokens(p);links=[]
+        def none(reason):
+            return dict(category='',type='',source='none',basis='none',score=0,matched=len(links),confidence='none',reason=reason,oe=links[0]['token']['raw'] if links else '',applicability='',tokens=len(ts))
+        def success(hit,basis):
+            return {**hit['mapping'],'source':'auto','basis':basis,'score':100 if basis=='oe' else 90,'matched':len(links),'confidence':'high','reason':'','oe':hit['oe'],'applicability':hit.get('applicability','')}
+        if not ts: return none('no_oe')
+        if registry is None: return none('no_oe_registry')
+        stores=[registry[k] for k in ('oe','oeRegistry','oe_registry','registry') if registry.get(k)] or [registry]
+        for token in ts:
+            for store in stores:
+                rec=get(store,[token['raw'],token['key'],token['key'].lower(),token['hvc'],norm(token['raw'])])
+                if rec is not MISSING: links.append(dict(token=token,rec=rec));break
+        if not links: return none('oe_not_found')
+        if any(conflict(x['rec']) for x in links): return none('conflicting_oe_mappings')
+        direct=[]
+        for link in links:
+            rec=link['rec'];pair=self.pair(rec)
+            if pair: direct.append({'mapping':pair,'oe':link['token']['raw']})
+            elif declared(rec) or signal(rec): return none('invalid_oe_mapping')
+        def unique(hits):
+            result=[]
+            for hit in hits:
+                if not any(x['mapping']==hit['mapping'] for x in result): result.append(hit)
+            return result
+        direct=unique(direct)
+        if len(direct)>1: return none('conflicting_oe_mappings')
+        if direct: return success(direct[0],'oe')
+        hits=[];bad=False;ambiguous=False
+        for link in links:
+            rec=link['rec'] if isinstance(link['rec'],dict) else {};apps=[];seen=set()
+            def add(v):
+                if isinstance(v,list):
+                    for x in v: add(x)
+                    return
+                if isinstance(v,dict): v=first(v,('key','value','applicability'))
+                v=string(v);key=norm(v)
+                if key and key not in seen: seen.add(key);apps.append(v)
+            for k in ('applicability','applicability_text','vehicle_applicability','vehicle'): add(rec.get(k))
+            add(p.get('applicability'))
+            appstores=[rec[k] for k in ('ozonByApplicability','applicabilityMap','applicabilityReference') if rec.get(k)]
+            appstores+=[applicability or {}]+[registry[k] for k in ('ozonApplicability','applicabilityReference','applicabilityMap','applicabilityDirectory') if registry.get(k)]
+            for app in apps:
+                tok=link['token'];groups=[[tok['key']+'|'+norm(app),tok['key']+'::'+norm(app),tok['hvc']+'|'+norm(app)],[app,norm(app)]]
+                for keys in groups:
+                    found=None;invalid=False;clash=False
+                    for store in appstores:
+                        raw=get(store,keys)
+                        if raw is MISSING: continue
+                        if conflict(raw): clash=True;break
+                        pair=self.pair(raw)
+                        if not pair and (declared(raw) or signal(raw)): invalid=True;break
+                        if pair and found and pair!=found: clash=True;break
+                        if pair: found=pair
+                    if clash or invalid or found:
+                        ambiguous|=clash;bad|=invalid
+                        if found: hits.append(dict(mapping=found,oe=tok['raw'],applicability=app))
+                        break
+        if ambiguous: return none('conflicting_applicability_mappings')
+        if bad: return none('invalid_applicability_mapping')
+        hits=unique(hits)
+        if len(hits)>1: return none('conflicting_applicability_mappings')
+        return success(hits[0],'applicability') if hits else none('no_applicability_mapping')
+
+    def signature(self,p,registry=None,reference_version=0):
+        ts=tokens(p)
+        if registry is None: stamp='none'
+        else:
+            oe=registry.get('oe');stamp=str(registry.get('ozonRevision') or registry.get('revision') or 0)+'.'+str(registry.get('size') or 0)
+        ref_version=('tree:'+str(self.reference.snapshot.get('revision','undefined'))+':'+self.reference.scope) if self.reference.has_data else getattr(self,'historical_version','historical')
+        out=[','.join(t['key'] for t in ts),norm(p.get('applicability')),stamp,str(reference_version),ref_version]
+        stores=[] if registry is None else [registry[k] for k in ('oe','oeRegistry','oe_registry','registry') if registry.get(k)] or [registry]
+        for token in ts:
+            rec=MISSING
+            for store in stores:
+                rec=get(store,[token['raw'],token['key'],token['key'].lower(),token['hvc'],norm(token['raw'])])
+                if rec is not MISSING: break
+            if rec is MISSING: continue
+            pair=self.pair(rec);mapping=pair['category']+'\\x1f'+pair['type'] if pair else ''
+            apps=[];seen=set()
+            def add(v):
+                if isinstance(v,list):
+                    for x in v: add(x)
+                    return
+                if isinstance(v,dict): v=first(v,('key','value','applicability'))
+                k=norm(v)
+                if k and k not in seen: seen.add(k);apps.append(k)
+            r=rec if isinstance(rec,dict) else {}
+            for k in ('applicability','applicability_text','vehicle_applicability','vehicle'): add(r.get(k))
+            add(p.get('applicability'))
+            out.append(token['key']+'>'+mapping+'>'+','.join(apps))
+        return '\\x1e'.join(out)
+
+    def apply(self,row,registry=None,applicability=None,force=False,reference_version=0):
+        import copy
+        p=copy.deepcopy(row)
+        if not force and not p.get('ozon_type_src') and (p.get('ozon_type') or p.get('ozon_category')):
+            p.update(ozon_type_src='import',ozon_type_basis='import',ozon_type_conf='unverified')
+        if p.get('ozon_type_src') in ('manual','import') and (p.get('ozon_type') or p.get('ozon_category')):
+            source=p['ozon_type_src']
+            return p,dict(category=p.get('ozon_category') or '',type=p.get('ozon_type') or '',source=source,basis=source,score=0,matched=0,confidence='unverified' if source=='import' else 'manual',reason='',oe=p.get('ozon_oe') or '',applicability=p.get('ozon_applicability') or '')
+        sig=self.signature(p,registry,reference_version)
+        if not force and p.get('ozon_sig')==sig and p.get('ozon_type') and p.get('ozon_type_src')=='auto':
+            score=p.get('ozon_type_score')
+            return p,dict(category=p.get('ozon_category'),type=p['ozon_type'],source='auto',basis=p.get('ozon_type_basis') or 'oe',score=score if type(score) in (int,float) else 0,matched=0,confidence=p.get('ozon_type_conf') or 'high',reason='',oe=p.get('ozon_oe') or '',applicability=p.get('ozon_applicability') or '')
+        r=self.classify(p,registry,applicability)
+        p.update(ozon_category=r['category'] or '',ozon_type=r['type'] or '',ozon_type_src=r['source'],
+            ozon_type_conf=r['confidence'],ozon_type_score=r['score'] or 0,ozon_type_basis=r['basis'] or 'none',
+            ozon_oe=r['oe'] or '',ozon_applicability=r['applicability'] or '',ozon_error=r['reason'] or '',ozon_sig=sig)
+        return p,r
+""",
+    # ===== ozon_identity =====
+    'ozon_identity': """\"\"\"HVC identity guards from raw catalogue, parts and byArt snapshots.\"\"\"
+import re
+from category_tnved import text
+
+
+def key(v): return re.sub('[^A-Z0-9А-ЯЁ]','',text(v).upper())
+def pair(p): return key(p.get('article'))+'|'+key(p.get('brand'))
+
+
+def codes(value,mode='auto'):
+    values=value if isinstance(value,list) else [value]
+    seen=set()
+    pattern={'newline':r'\\r?\\n','comma':',','semicolon':';','slash':'/','pipe':r'\\|'}.get(mode,r'[/;,\\n\\r|]+')
+    for value in values:
+        raw_value=','.join(text(x) for x in value) if isinstance(value,list) else text(value)
+        for raw in re.split(pattern,raw_value):
+            raw=raw.strip();compact=re.sub(r'[\\s\\u00a0]','',raw)
+            compact=re.sub(r'^р\\.?','',compact,flags=re.I)
+            if re.fullmatch(r'[0-9]+[.,]0+',compact): raw=re.sub(r'[.,]0+$','',compact)
+            normalized=key(raw)
+            if normalized and normalized not in seen:
+                seen.add(normalized);yield normalized
+
+
+class IdentityGuard:
+    def __init__(self,rows,reference):
+        self.parts=dict(reference.get('parts') or [])
+        self.unsafe=set();self.mode=reference.get('oe_mode','auto')
+        for p in rows:
+            if self.mismatch(p): self.unsafe.add(pair(p))
+        by_art=dict(reference.get('byArt') or [])
+        self.unsafe_oes={key(oe) for k in self.unsafe for oe in by_art.get(k,[])}
+
+    def mismatch(self,p):
+        part=self.parts.get(pair(p)) or {}
+        return bool((part.get('artikul') and key(part['artikul'])!=key(p.get('article'))) or
+                    (part.get('brand') and key(part['brand'])!=key(p.get('brand'))))
+
+    def unsafe_for(self,p):
+        return pair(p) in self.unsafe or self.mismatch(p) or any(
+            oe in self.unsafe_oes for field in ('oe_numbers','oe_list','oe_norm') for oe in codes(p.get(field),self.mode))
+""",
+    # ===== ozon_name =====
+    'ozon_name': """\"\"\"Independent OzonAuto lexical name classifier over canonical type entries.\"\"\"
+import json
+import pathlib
+import re
+from csv_kind_matcher import rewrite, name_lead, UNSAFE
+from ozon_reference import strict_key
+
+STOP=set('для или под над без при как the and на по of из в с a авто'.split())
+ALIASES=dict(zip('filter oil air cabin fuel water brake pads pad disc pump headlight'.split(),
+                 'фильтр масляный воздушный салонный топливный водяной тормозной колодки колодки диск насос фара'.split()))
+EXPANSIONS=json.loads(pathlib.Path(__file__).with_name('ozon_name_expansions.json').read_text(encoding='utf8'))
+MOTO=r'(?:мотоцикл|скутер|мопед|снегоход|квадроцикл|(?:^|\\s)мото(?=\\s|$))'
+ADJ=r'(?:ый|ий|ой|ая|яя|ое|ее|ые|ие|ых|их|ого|его|ому|ему|ыми|ими|ую|юю)$'
+BLOCKS={
+ 'ключ автомобильный':r'гаечн|рожков|накидн|торцев|динамометр|фильтр|съ[её]мн|шестигран|свечн|колесн|болт|гайк|трещотк',
+ 'насос автомобильный':r'омывател|топлив|масл|охлаж|водян|гидро|тормоз|откач|перекач|ручн|abs|абс|гур',
+ 'держатель автомобильный':r'тормоз|шланг|труб|выхлоп|глушител|топлив|амортизатор|двигател|подвеск|насос|радиатор|трансмисс|стартер|суппорт|шрус',
+ 'подушка автомобильная':r'амортизатор|радиатор|двигател|мотора|двс|подвеск|подрамник|рессор|редуктор|кпп|коробк[аиуы]?\\s+передач|глушител|рулев|руля|безопасност|airbag|эйрб[еэ]г|аэрб[еэ]г'}
+
+
+def expand(value):
+    text=str(value or '')
+    if re.search('водян[а-я]*',text,re.I):
+        text=re.sub(r'(^|[^a-zа-я0-9])помп[а-я]*(?=$|[^a-zа-я0-9])',r'\\1насос',text,flags=re.I)
+    if re.search(r'сальник[а-я]*\\s+(?:коленвал|распредвал)',text,re.I): text+=' двигателя'
+    if re.search(MOTO,text,re.I): text+=' мототехника'
+    for pattern,target in EXPANSIONS:
+        text=re.sub(pattern,target.replace('$1',r'\\g<1>'),text,flags=re.I)
+    return text
+
+
+def tokens(value,product=False,literal=False):
+    text=str(value or '') if literal else expand(rewrite(value) if product else value)
+    text=text.lower().replace('ё','е')
+    text=re.sub(r'ремонтн[а-я]*\\s+комплект[а-я]*','ремкомплект',text)
+    ws=re.sub('[^a-zа-я0-9]+',' ',text).split()
+    if not literal: ws=[ALIASES.get(w,w) for w in ws]
+    return [w for w in ws if len(w)>=2 and w not in STOP and not re.match('^(автомобил|легков|машин)',w)]
+
+
+def stem(w):
+    x=w
+    if re.fullmatch('[а-я]+',x):
+        x=re.sub(r'(?:иями|ями|ами|ого|его|ому|ему|ыми|ими|иях|иях|ий|ый|ой|ая|яя|ое|ее|ые|ие|ых|их|ую|юю|ов|ев|ей|ам|ям|ах|ях)$','',x)
+        if len(x)>=4: x=re.sub('[аеёиоуыэюяь]$','',x)
+    if x=='колодок': x='колодк'
+    return x[:8]
+
+
+def head(words):
+    for w in words:
+        if (not re.search('(?:ение|ание|тие|ствие)$',w) and re.search(ADJ,w)) or re.match('^(комплект|набор|оригинал)',w): continue
+        return stem(w)
+    return ''
+
+
+def needs(words): return list(dict.fromkeys(stem(w) for w in words if len(stem(w))>=2))
+
+
+class OzonNameClassifier:
+    def __init__(self,types):
+        self.entries=[]
+        self.by_word={}
+        self.heads=set()
+        for t in types:
+            typ=str(t.get('name') or t.get('type') or ''); cat=str(t.get('cat') or t.get('category') or '')
+            ws=tokens(typ); ns=needs(ws)
+            if not cat or not typ or not ns: continue
+            literal=tokens(typ,literal=True); ln=needs(literal)
+            e=dict(cat=cat,type=typ,head=head(ws) or ns[0],needs=ns,literalHead=head(literal) or (ln[0] if ln else ''),
+                   literalNeeds=ln,path=t.get('path') or [],catId=t.get('catId') or '',typeId=t.get('typeId') or '',
+                   score=len(ns)*1000+sum(min(len(x),8) for x in ns),typeKey=strict_key(typ))
+            idx=len(self.entries);self.entries.append(e);self.heads.add(e['head'])
+            for n in ns: self.by_word.setdefault(n,[]).append(idx)
+
+    def detail(self,p):
+        name=str(p.get('name') or '');brand=str(p.get('brand') or '').strip()
+        raw=set(needs(tokens(name)));keys=set(needs(tokens(name,True)));literal=set(needs(tokens(name,literal=True)))
+        if not keys and not raw: return dict(status='empty',choices=[])
+        lead=name_lead(name,brand)
+        if re.search(UNSAFE,lead,re.I|re.ASCII): return dict(status='none',choices=[])
+        h=head(tokens(lead,True));rh=head(tokens(lead));lh=head(tokens(lead,literal=True))
+        if h not in self.heads and rh not in self.heads: return dict(status='none',choices=[])
+        candidates=list(dict.fromkeys(i for k in dict.fromkeys(needs(tokens(name,True))+needs(tokens(name))) for i in self.by_word.get(k,[])))
+        matches=[];raw_matches=set();alias_matches=set()
+        for i in candidates:
+            t=self.entries[i]
+            if t['typeKey'] in BLOCKS and re.search(BLOCKS[t['typeKey']],name,re.I): continue
+            if re.search(MOTO,name,re.I) and not re.search('мото|снегоход|квадроцикл',' '.join([t['cat'],t['type']]+t['path']),re.I): continue
+            r=all(n in raw for n in t['needs']);a=all(n in keys for n in t['needs'])
+            if r or a:
+                matches.append(i)
+                if r: raw_matches.add(i)
+                if a: alias_matches.add(i)
+        multiple=re.search(r'\\sи\\s|\\sand\\s|\\s\\+\\s|\\s&\\s|[а-яё]\\s*[,;/+&]\\s*(?=[а-яё])|\\s+[–—]\\s+',name,re.I) or re.search(r'^\\s*(?:комплект|набор)(?=\\s|$)',name.replace('ё','е'),re.I)
+        if multiple:
+            joined=re.search(r'^\\s*(?:комплект|набор)(?=\\s|$)',name,re.I) and re.search(r'\\sи\\s|\\s\\+\\s|\\s&\\s',name,re.I)
+            if len({self.entries[i]['head'] for i in matches})>1 or len({self.entries[i]['typeKey'] for i in matches})>1 or joined:
+                return dict(status='ambiguous',choices=list(dict.fromkeys(self.entries[i]['type'] for i in matches))[:6])
+        matches=[self.entries[i] for i in matches if (self.entries[i]['head']==rh and i in raw_matches) or (self.entries[i]['head']==h and i in alias_matches)]
+        if not matches: return dict(status='none',choices=[])
+        specificity=max(len(t['needs']) for t in matches)
+        finalists=[t for t in matches if len(t['needs'])==specificity]
+        surface=[t for t in finalists if t['literalHead']==lh and t['literalNeeds'] and all(n in literal for n in t['literalNeeds'])]
+        raw_final=[t for t in finalists if t['head']==rh and all(n in raw for n in t['needs'])]
+        finalists=surface or raw_final or finalists
+        score=max(t['score'] for t in finalists);top=[t for t in finalists if t['score']==score]
+        types=list(dict.fromkeys(t['type'] for t in top))
+        if len(types)>1: return dict(status='ambiguous',choices=types[:6])
+        first=top[0]
+        pairs={(str(t['catId'] or t['cat']),str(t['typeId'] or t['type'])) for t in top}
+        if len(pairs)>1: return dict(status='category_ambiguous',choices=list(dict.fromkeys(t['cat'] for t in top))[:6],suggestedType=first['type'])
+        return dict(status='auto',choices=[],match={**{k:first[k] for k in ('cat','type','catId','typeId','score')},'hit':len(first['needs']),'need':len(first['needs'])})
+""",
+    # ===== ozon_preferred =====
+    'ozon_preferred': """\"\"\"Compose independent Ozon strict, lexical, category and lifecycle ports.\"\"\"
+import json
+from category_tnved import norm
+from category_kind import shape
+from ozon_classifier import OzonClassifier
+from ozon_category import OzonCategoryClassifier
+from ozon_auto import apply_preferred
+
+
+def compact(value):
+    return json.dumps(value,ensure_ascii=False,separators=(',',':'))
+
+
+class OzonPreferred:
+    def __init__(self,reference):
+        self.reference=reference
+        self.strict=OzonClassifier(reference['pairs'],reference.get('tree'),reference.get('scope','auto'))
+        tree=self.strict.reference
+        types=tree.entries if tree.has_data else [dict(cat=c,name=t) for c,t in reference['pairs']]
+        self.strict.historical_version='historical:'+str(len(types))
+        self.names=OzonCategoryClassifier(types,reference['category_rows'],reference['category_revision'])
+        self.version='keyword-v6-csv-name|'+('tree:'+str(tree.snapshot.get('revision','undefined'))+':'+tree.scope if tree.has_data else 'historical:'+str(len(types)))
+
+    def category_signature(self,p):
+        tn=self.names.category
+        info=tn.type_info(p);m=p.get('_categoryKindAuto');current=tn.kind_current(p)
+        draft=shape(m) and str(p.get('category_type') or '')==m['type'] and not m['confirmed']
+        flag=''
+        if p.get('_categoryKindStatus')=='category_conflict': flag='category_conflict'
+        elif p.get('_categoryKindStatus')=='ambiguous' and p.get('_categoryKindDiscriminators'):
+            flag='|'.join(p['_categoryKindDiscriminators'])
+        kind=compact([flag,m['referenceCategory'] if current else '', 'stale' if draft and not current else ''])
+        return compact([tn.revision,norm(p.get('category')),norm(info['value']),bool(info['conflict']),bool(p.get('_categoryTypeCleared')),kind])
+
+    def apply(self,p,*,force=False,force_name=False,enabled=True,identity_unsafe=False):
+        return apply_preferred(self.strict,p,detail=self.names.detail_with_category,
+            version=self.version,category_signature=self.category_signature(p),
+            registry=self.reference.get('registry'),applicability=self.reference.get('applicability'),
+            force=force,enabled=enabled,force_name=force_name,identity_unsafe=identity_unsafe,
+            reference_version=self.reference.get('reference_version',0))
+""",
+    # ===== ozon_reference =====
+    'ozon_reference': """\"\"\"OzonReference lookup over an already parsed raw tree snapshot.\"\"\"
+import re
+import unicodedata
+from category_tnved import text
+
+
+def strict_key(v): return re.sub(r'\\s+',' ',unicodedata.normalize('NFC',text(v)).lower()).strip()
+def loose_key(v):
+    s=unicodedata.normalize('NFKC',strict_key(v)).replace('ё','е')
+    return re.sub(r'\\s+',' ',''.join(c if unicodedata.category(c)[0] in ('L','N') else ' ' for c in s)).strip()
+def valid_id(v):
+    if isinstance(v,bool): return ''
+    if isinstance(v,(int,float)): return str(int(v)) if v>0 and v<=9007199254740991 and int(v)==v else ''
+    return v if isinstance(v,str) and re.fullmatch('[1-9][0-9]*',v) else ''
+
+class OzonReference:
+    def __init__(self,snapshot=None,scope='auto'):
+        self.snapshot=snapshot or {};self.scope='all' if scope=='all' else 'auto'
+        self.has_data=bool(self.snapshot.get('items') or self.snapshot.get('allItems'))
+        self.entries=[];self.by_id={};self.exact={};self.strict={};self.loose={};self.by_type={}
+        all_items=self.snapshot.get('allItems')
+        if not isinstance(all_items,list): all_items=[{**r,'status':'active','vehicle':True} for r in self.snapshot.get('items',[])]
+        for r in all_items:
+            if isinstance(r,dict) and valid_id(r.get('catId')) and valid_id(r.get('typeId')):
+                self.by_id.setdefault((text(r['catId']),text(r['typeId'])),[]).append(r)
+        selected=[r for r in all_items if r.get('status')=='active' and (self.scope=='all' or r.get('vehicle'))] if isinstance(self.snapshot.get('allItems'),list) else self.snapshot.get('items',[])
+        for r in selected:
+            if not isinstance(r,dict) or not isinstance(r.get('cat'),str) or not isinstance(r.get('type'),str) or not valid_id(r.get('catId')) or not valid_id(r.get('typeId')): continue
+            item={k:r[k] for k in ('cat','type','catId','typeId')};item.update(name=r['type'],path=r.get('path') or [])
+            self.entries.append(item)
+            for idx,key in ((self.exact,(r['cat'],r['type'])),(self.strict,(strict_key(r['cat']),strict_key(r['type']))),(self.loose,(loose_key(r['cat']),loose_key(r['type']))),(self.by_type,strict_key(r['type']))): idx.setdefault(key,[]).append(item)
+    def unique_type(self,typ):
+        matches=self.by_type.get(strict_key(typ),[])
+        return matches[0] if len(matches)==1 else None
+    def find_pair(self,category,typ,ids=None):
+        if not self.has_data: return {'status':'no_reference'}
+        c,t=text(category),text(typ)
+        if not c.strip() or not t.strip(): return {'status':'missing'}
+        with_ids=isinstance(ids,dict) and ids.get('catId') and ids.get('typeId')
+        if with_ids:
+            known=self.by_id.get((text(ids['catId']),text(ids['typeId'])),[])
+            if any(x.get('status')=='conflict' for x in known): return {'status':'conflict'}
+            if len(known)==1:
+                x=known[0]
+                if loose_key(x.get('cat'))!=loose_key(c) or loose_key(x.get('type'))!=loose_key(t): return {'status':'id_conflict'}
+                if x.get('status') in ('disabled','unknown'): return {'status':x['status']}
+                if self.scope=='auto' and not x.get('vehicle'): return {'status':'out_of_scope'}
+        matches=self.exact.get((c,t))
+        if matches is None: matches=self.strict.get((strict_key(c),strict_key(t)))
+        if matches is None: matches=self.loose.get((loose_key(c),loose_key(t)))
+        if not matches: return {'status':'not_found'}
+        if with_ids:
+            matches=[x for x in matches if x['catId']==text(ids['catId']) and x['typeId']==text(ids['typeId'])]
+            if not matches: return {'status':'id_conflict'}
+        if len(matches)!=1: return {'status':'ambiguous','choices':matches[:8]}
+        return {'status':'valid','item':matches[0]}
+""",
+    # ===== price_solver =====
+    'price_solver': """\"\"\"Port of index.html solveEcoInteger; keep behavior aligned, including scans.\"\"\"
+import math
+
+CAP = 10_000_000
+
+def js_round(x):
+    return math.floor(x + 0.5)
+
+
+def solve_integer(initial, metric):
+    cache = {}
+    def evaluate(price):
+        key = max(0, js_round(price))
+        if key not in cache:
+            value = metric(key)
+            cache[key] = value if math.isfinite(value) else -math.inf
+        return cache[key]
+    start = max(0, min(CAP, js_round(initial)))
+    def local_root(x):
+        fx = evaluate(x)
+        if fx >= 0 and (x == 0 or evaluate(x - 1) < 0): return x
+        if fx < 0 and x < CAP and evaluate(x + 1) >= 0: return x + 1
+        return None
+    def first_crossing(lo, hi):
+        if evaluate(lo) >= 0: return lo
+        if evaluate(hi) < 0: return None
+        width = hi - lo
+        step = 25000 if width > 1000000 else 2500 if width > 100000 else 250 if width > 10000 else 25 if width > 1000 else 1
+        prev = lo
+        p = lo + step
+        while True:
+            pp = min(p, hi)
+            if evaluate(pp) >= 0:
+                return pp if pp - prev <= 1 else first_crossing(prev, pp)
+            prev = pp
+            if pp >= hi: return None
+            p += step
+    def scan_band(lo, hi):
+        if evaluate(lo) >= 0: return lo
+        width = hi - lo
+        if width <= 0: return None
+        step = 25000 if width > 1000000 else 2500 if width > 100000 else 250 if width > 10000 else 25 if width > 1000 else 4 if width > 256 else 1
+        prev = lo
+        p = lo + step
+        while True:
+            pp = min(p, hi)
+            if evaluate(pp) >= 0: return first_crossing(prev, pp)
+            prev = pp
+            if pp >= hi: return None
+            p += step
+    root = local_root(start)
+    if root is not None: return root
+    if evaluate(start) < 0:
+        prev = 0
+        for gp in (0, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, CAP):
+            if gp == start:
+                prev = gp
+                continue
+            root = scan_band(prev, gp)
+            if root is not None: return root
+            prev = gp
+    f_start = evaluate(start)
+    second = min(CAP, max(start + 32, js_round(start * 1.2 + 1))) if f_start < 0 else max(0, js_round(start * 0.8))
+    if second != start:
+        slope = (evaluate(second) - f_start) / (second - start)
+        if slope > 0 and math.isfinite(slope):
+            candidate = max(0, min(CAP, js_round(start - f_start / slope)))
+            if candidate != start and candidate != second:
+                root = local_root(candidate)
+                if root is not None: return root
+    step = max(16, js_round(abs(start) * 0.25))
+    if evaluate(start) >= 0:
+        if start == 0 or evaluate(start - 1) < 0: return start
+        hi, lo = start, max(0, start - step)
+        while evaluate(lo) >= 0:
+            hi = lo
+            if lo == 0: return 0
+            step *= 2
+            lo = max(0, lo - step)
+    else:
+        lo, hi = start, min(CAP, start + step)
+        guard = 0
+        while evaluate(hi) < 0 and hi < CAP and guard < 40:
+            guard += 1
+            lo = hi
+            step *= 2
+            hi = min(CAP, lo + step)
+        if evaluate(hi) < 0:
+            for lo, hi in ((0, 10000), (10000, 100000), (100000, 1000000), (1000000, CAP)):
+                root = scan_band(lo, hi)
+                if root is not None: return root
+            return CAP
+    root = first_crossing(lo, hi)
+    return hi if root is None else root
+
+
+def stable_floor(guess, metric, discontinuity=0):
+    edge = math.floor(discontinuity)
+    if edge <= 0: return solve_integer(guess, metric)
+    if metric(edge + 1) < 0: return solve_integer(edge + 1, metric)
+    if metric(edge) < 0: return edge + 1
+    if metric(0) >= 0: return 0
+    lo, hi = 0, edge
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if metric(mid) >= 0: hi = mid
+        else: lo = mid
+    return hi
+""",
+    # ===== product_policies =====
+    'product_policies': """\"\"\"Ordered product-policy actions, matching the browser pipeline.\"\"\"
+import copy
+from enrichment_formula import string as text
+
+RULE_FIELDS = {'category': 'Категория', 'brand': 'Бренд', 'name': 'Название', 'article': 'Артикул', 'oe_numbers': 'OE-номера', 'price': 'Цена', 'cost': 'Себестоимость', 'weight': 'Вес', 'volume': 'Объём', 'stock': 'Остаток', 'minStock': 'Мин. остаток', 'sales': 'Продажи', 'noBuyPct': 'Прогноз невыкупа, %', 'markRequired': 'Требуется Честный знак', 'markStatus': 'Статус Честного знака', 'markCode': 'Код маркировки', 'visible': 'Видимость', 'src': 'Общий текст', 'category_src': 'Исходная категория'}
+RULE_OPS = {'contains': 'содержит', '!contains': 'не содержит', 'eq': 'равно', 'ne': 'не равно', 'gt': 'больше', 'lt': 'меньше', 'startsWith': 'начинается с', 'regex': 'регулярное выражение', 'empty': 'пусто'}
+POLICY_ACTIONS = {'exclude': 'Исключить из расчётов', 'hide': 'Скрыть с витрины', 'delete_mark': 'Пометить на удаление', 'warn': 'Только предупредить'}
+
+
+def apply_policies(row,rules,match,number):
+    p=copy.deepcopy(row)
+    p.update(excluded=False,deletePending=False,policyAction='',policyReason='')
+    active=sorted((r for r in rules if r.get('enabled')),key=lambda r:number(r.get('order_no')))
+    for r in active:
+        field=r.get('field');op=r.get('op');value=r.get('value')
+        if not match(p,field,op,value): continue
+        action=r.get('action') or 'exclude'
+        p['policyAction']=POLICY_ACTIONS.get(action) or action
+        p['policyReason']=f"{RULE_FIELDS.get(field) or field} {RULE_OPS.get(op) or op} {text(value) if 'value' in r else 'undefined'}"
+        if action=='exclude': p['excluded']=True
+        if action=='hide': p.update(visible=False,visibleReason='товарная_политика')
+        if action=='delete_mark': p.update(deletePending=True,visible=False,visibleReason='ожидает_удаления')
+    return p
+""",
+}
+
+class _BundledModules(_bundle_abc.MetaPathFinder, _bundle_abc.Loader):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in _BUNDLED_SOURCES:
+            return _bundle_util.spec_from_loader(fullname, self, origin=__file__)
+        return None
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        # Reference JSON files remain beside uc_engine.py, also in frozen builds.
+        module.__file__ = __file__
+        exec(compile(self.get_source(module.__name__),
+                     str(__file__) + ':' + module.__name__, 'exec'), module.__dict__)
+
+    def get_source(self, fullname):
+        return _BUNDLED_SOURCES[fullname]
+
+_bundle_sys.meta_path.insert(0, _BundledModules())
+# ===== Main engine =====
+
 import argparse, csv, email, imaplib, io, json, math, os, re, shutil, sqlite3, sys, time, zipfile
 from decimal import Decimal, ROUND_HALF_UP
 from functools import wraps
@@ -3234,10 +6046,146 @@ def watch_loop():
             print('watch error:', e)
         time.sleep(300)
 
+
+def run_sqlite_poc():
+    """Run the historical standalone SQLite experiment explicitly, never on import."""
+    # -*- coding: utf-8 -*-
+    """PoC: юнит-экономика на Python + SQLite. Сверка с золотыми CSV приложения."""
+    import csv, sqlite3, math, os
+    from decimal import Decimal, ROUND_HALF_UP
+
+    import pathlib
+    DB = str(pathlib.Path(__file__).with_name('poc_catalog.db'))
+    if os.path.exists(DB): os.remove(DB)
+    db = sqlite3.connect(DB)
+    db.executescript('''
+    CREATE TABLE products(
+      article TEXT PRIMARY KEY, price REAL, cost REAL,
+      weight REAL, length REAL, width REAL, height REAL, sales REAL DEFAULT 0);
+    CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE eco_results(
+      article TEXT PRIMARY KEY, total_cost REAL, profit REAL,
+      margin REAL, roi REAL, break_even REAL, target_price REAL);
+    ''')
+    # настройки из золотого файла (Ozon FBS): комиссия 14%, перевод 1.5%, налог УСН 6%
+    for k, v in {'commission_pct':'14','transfer_pct':'1.5','last_mile':'25','handover':'10',
+                 'pack':'18','transit':'30','returns_per_unit':'2.17','tax_regime':'usn_income_6',
+                 'tax_pct':'6','target_margin':'20'}.items():
+        db.execute('INSERT INTO settings VALUES(?,?)', (k, v))
+    db.commit()
+    cfg = {k: v for k, v in db.execute('SELECT key,value FROM settings')}
+
+    def rnd(x, d=2):
+        # Excel-стиль: половина от нуля, как round() в приложении
+        q = Decimal(1).scaleb(-d)
+        return float(Decimal(repr(float(x))).quantize(q, rounding=ROUND_HALF_UP))
+
+    def vat_from_gross(amount, rate):
+        return amount * rate / (100 + rate) if rate > 0 else 0.0
+
+    def calc_tax(price, costs, regime, pct=6.0, osno_share=0.0):
+        p, c = max(0.0, price), max(0.0, costs)
+        if regime == 'usn_income_6': return rnd(p * 0.06)
+        if regime in ('usn_income_vat_5', 'usn_income_7', 'usn_income_vat_7'):
+            rate = 5 if regime.endswith('_5') else 7
+            vat = vat_from_gross(p, rate)
+            return rnd(vat + (p - vat) * 0.06)
+        if regime == 'usn_income_expense_15': return rnd(max(0.0, p - c) * 0.15)
+        if regime in ('usn_income_expense_vat_5', 'usn_income_expense_vat_7'):
+            rate = 5 if regime.endswith('_5') else 7
+            vat = vat_from_gross(p, rate)
+            return rnd(vat + max(0.0, p - vat - c) * 0.15)
+        if regime in ('osno_20', 'osno_22'):
+            vat_out = vat_from_gross(p, 22)
+            vat_in = vat_from_gross(c, 22) * min(100.0, max(0.0, osno_share)) / 100
+            return rnd(max(0.0, vat_out - vat_in) + max(0.0, (p - vat_out) - (c - vat_in)) * 0.25)
+        if regime == 'custom_profit': return rnd(max(0.0, p - c) * pct / 100)
+        return rnd(p * pct / 100)
+
+    def wb_base_logistics(v):
+        if v <= 0: return 0.0
+        if v <= 0.2: return 23.0
+        if v <= 0.4: return 26.0
+        if v <= 0.6: return 29.0
+        if v <= 0.8: return 30.0
+        if v <= 1: return 32.0
+        return rnd(46 + (v - 1) * 14)
+
+    def ozon_unit(price, cost):
+        comm = rnd(price * float(cfg['commission_pct']) / 100)
+        transfer = rnd(price * float(cfg['transfer_pct']) / 100)
+        fixed = (cost + float(cfg['last_mile']) + float(cfg['handover']) + float(cfg['pack'])
+                 + float(cfg['transit']) + float(cfg['returns_per_unit']))
+        tax = calc_tax(price, fixed + comm + transfer, cfg['tax_regime'], float(cfg['tax_pct']))
+        total = rnd(fixed + comm + transfer + tax)
+        return total, comm, transfer, tax
+
+    def solve(price0, cost, target_margin_pct):
+        # первое целое p с прибылью >= 0 (и >= целевой маржи), как решатель приложения
+        def profit(p):
+            total, *_ = ozon_unit(p, cost)
+            return rnd(p - total)
+        def margin_ok(p):
+            return profit(p) - p * target_margin_pct / 100
+        be = next((p for p in range(0, 2_000_000) if profit(p) >= 0), None)
+        tgt = next((p for p in range(be or 0, 2_000_000) if margin_ok(p) >= 0), None)
+        return be, tgt
+
+    # --- загрузка золотого файла в SQLite ---
+    def num(v):
+        v = str(v or '').replace(' ', '').replace(',', '.')
+        return float(v) if v else 0.0
+
+    rows = list(csv.reader(open(str(pathlib.Path(__file__).resolve().parent.parent / 'UC_unit_economics_OZON_2026-11-06_filtered.csv'),
+                                encoding='utf-8-sig'), delimiter=';'))
+    hdr = rows[0]; ix = {h: i for i, h in enumerate(hdr)}
+    for r in rows[1:]:
+        db.execute('INSERT INTO products VALUES(?,?,?,?,?,?,?,?)',
+                   (r[ix['Артикул']], num(r[ix['Цена, ₽/ед.']]), num(r[ix['Себестоимость, ₽']]),
+                    num(r[ix['Вес, кг']]), num(r[ix['Длина, см']]), num(r[ix['Ширина, см']]),
+                    num(r[ix['Высота, см']]), 10))
+    db.commit()
+
+    # --- расчёт из SQLite и сверка ---
+    rec = list(csv.reader(open(str(pathlib.Path(__file__).resolve().parent.parent / 'UC_unit_economics_OZON_2026-11-06_recalculated.csv'),
+                               encoding='utf-8-sig'), delimiter=';'))
+    rix = {h: i for i, h in enumerate(rec[0])}
+    manual_be = {r[0]: num(r[rix['Цена безубыточности (ручной пересчёт), руб']]) for r in rec[1:]}
+
+    bad = 0
+    for art, price, cost, w, L, W, H, sales in db.execute('SELECT * FROM products'):
+        total, comm, transfer, tax = ozon_unit(price, cost)
+        profit = rnd(price - total)
+        margin = rnd(profit / price * 100, 1) if price else 0
+        roi = rnd(profit / cost * 100, 1) if cost else 0
+        be, tgt = solve(price, cost, float(cfg['target_margin']))
+        db.execute('INSERT INTO eco_results VALUES(?,?,?,?,?,?,?)', (art, total, profit, margin, roi, be, tgt))
+        # сверка с золотым файлом
+        grow = next(r for r in rows[1:] if r[0] == art)
+        checks = [(total, num(grow[ix['Все затраты на 1 ед., ₽']]), 'итого'),
+                  (profit, num(grow[ix['ЧП на 1 ед., ₽']]), 'прибыль'),
+                  (margin, num(grow[ix['Маржа, %']]), 'маржа'),
+                  (roi, num(grow[ix['ROI, %']]), 'ROI'),
+                  (be, manual_be[art], 'безубыток')]
+        for got, want, name in checks:
+            tol = 1.0 if name == 'безубыток' else 0.011  # решатель приложения целочисленный, ручная колонка — дробная
+            if abs(got - want) > tol:
+                bad += 1; print(f'РАСХОЖДЕНИЕ {art} {name}: python={got} эталон={want}')
+    db.commit()
+    n = db.execute('SELECT COUNT(*) FROM eco_results').fetchone()[0]
+    print(f'PoC OK: {n} SKU посчитано в Python+SQLite, расхождений с эталоном: {bad}')
+    print('пример:', db.execute("SELECT * FROM eco_results WHERE article='DEMO-CLT-001'").fetchone())
+    print('налоги: УСН6 100000 ->', calc_tax(100000, 40000, 'usn_income_6'),
+          '| УСН+НДС5 ->', calc_tax(100000, 40000, 'usn_income_vat_5'),
+          '| ОСНО 1220/610 доля100 ->', calc_tax(1220, 610, 'osno_20', 6, 100))
+    print('WB логистика 0.5л/2л:', wb_base_logistics(0.5), wb_base_logistics(2))
+    print('размер БД:', os.path.getsize(DB), 'байт')
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     if FROZEN and len(sys.argv) == 1: sys.argv.append('serve')  # двойной клик по exe
-    ap.add_argument('cmd', choices=['serve', 'watch', 'mail', 'folder', 'outbox', 'backup', 'calc'])
+    ap.add_argument('cmd', choices=['serve', 'watch', 'mail', 'folder', 'outbox', 'backup', 'calc', 'poc'])
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--once', action='store_true')
     args = ap.parse_args()
@@ -3245,7 +6193,8 @@ if __name__ == '__main__':
         import multiprocessing as _mp
         _mp.freeze_support()  # Windows spawn / PyInstaller: дочерние процессы не должны стартовать сервер
     except Exception: pass
-    if args.cmd == 'serve': serve(args.port)
+    if args.cmd == 'poc': run_sqlite_poc()
+    elif args.cmd == 'serve': serve(args.port)
     elif args.cmd == 'watch': watch_loop()
     elif args.cmd == 'mail': print(mail_check_once(get_settings(db())))
     elif args.cmd == 'folder': print(watch_folder_once())
