@@ -10,6 +10,6 @@ ctx.S={settings:{}};const P=ctx.P;P.processingAvailable=async()=>{};P.ozonProces
  P._fetch=async()=>{throw new Error('offline')};await assert.rejects(()=>P.enrichOzonPreferred(rows));assert.equal(JSON.stringify(rows),before);
  P._fetch=async()=>({rows:rows.map(p=>({article:p.article,brand:p.brand,fields:{ozon_type:'NEW'},removed:['_ozonNameStatus']}))});
  await P.enrichOzonPreferred(rows);assert.equal(rows[0].ozon_type,'NEW');assert(!('_ozonNameStatus' in rows[0]));
- assert(h.includes('await PyEngine.enrichOzonPreferred(batch,{reference:ozonSqlReference});')); 
+ assert(h.includes('await PyEngine.enrichOzonPreferred(sqlBatch,{reference:ozonSqlReference});'));
  console.log('OK: SQL Ozon client validation and removals');
 })().catch(e=>{console.error(e);process.exitCode=1});

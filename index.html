@@ -21458,8 +21458,6 @@ function runPipeline(full, options) {
     const nameAutoEnabled = S.settings.autoCategoryByName !== false;
     const nameCategoryContext = full && nameAutoEnabled ? NameCategory.prepare() : null;
     const sqlEnrichment = typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql';
-    if (full && sqlEnrichment) await PyEngine.enrichNameCategories(nameCategoryContext, nameAutoEnabled, changedRows ? S.rows.filter(p => changedRows.has(p)) : S.rows);
-    if (full && sqlEnrichment) await PyEngine.enrichCategoryKinds(nameCategoryContext, nameAutoEnabled, changedRows ? S.rows.filter(p => changedRows.has(p)) : S.rows);
 
     const ozonSqlReference=full && sqlEnrichment ? PyEngine.ozonProcessingReference() : null;
     const tnvedServerRows = [];
@@ -21529,12 +21527,22 @@ function runPipeline(full, options) {
           S.rows[i] = compact;
         }
       }
-      if(full && sqlEnrichment) {
-        const batch=S.rows.slice(start,end).filter(p=>!changedRows || isChangedRow(p));
-        for(const p of batch) { p.article_norm=normArticle(p.article); HVC.ensureNorm(p); }
-        await PyEngine.enrichOzonPreferred(batch,{reference:ozonSqlReference});
+      const sqlBatch=sqlEnrichment ? S.rows.slice(start,end).filter(p=>!changedRows || isChangedRow(p)) : [];
+      if(sqlEnrichment) {
+        // Match the browser row prelude BEFORE any classifier or policy sees
+        // the row. In particular Excel Date values must not become ISO prices.
+        for(const p of sqlBatch) {
+          p.article_norm=normArticle(p.article);
+          for (const nk of NUMERIC_DATE_GUARD) { if (p[nk] instanceof Date) p[nk] = 0; }
+          if(typeof HVC!=='undefined')HVC.ensureNorm(p);
+        }
+        if(full) {
+          await PyEngine.enrichNameCategories(nameCategoryContext,nameAutoEnabled,sqlBatch);
+          await PyEngine.enrichCategoryKinds(nameCategoryContext,nameAutoEnabled,sqlBatch);
+          await PyEngine.enrichOzonPreferred(sqlBatch,{reference:ozonSqlReference});
+        }
+        await PyEngine.applyProductPolicies(sqlBatch,ex);
       }
-      if(sqlEnrichment) await PyEngine.applyProductPolicies(S.rows.slice(start,end).filter(p=>!changedRows || isChangedRow(p)),ex);
       for (let idx = start; idx < end; idx++) {
         const p = S.rows[idx];
         if (deltaFast && !isChangedRow(p)) continue;
