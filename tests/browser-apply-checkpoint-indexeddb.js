@@ -16,6 +16,19 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  await db.hvcCross.add({id:9,key:'A|OE1'});await db.hvcPrices.add({id:12,key:'A|B',cost:123});
  await db.products_stage.add({id:3,article:'prior-draft'});await db.imports.add({id:10,name:'old'});await db.cats.add({id:5,name:'category'});
  const before=await readAll();
+ // A stale baseline must fail BEFORE persist or backup writes and retain the
+ // typed conflict (no generic "could not save original state" dead end).
+ const freshGuard=c.StorageCtl.assertCatalogFresh,persist=c.persistNow;let saves=0;
+ c.persistNow=async()=>{saves++;return true};
+ c.StorageCtl.assertCatalogFresh=async()=>{const e=Error('stale revision');e.name='CatalogConflictError';throw e};
+ await assert.rejects(()=>C.begin(),e=>e.name==='CatalogConflictError');
+ assert.equal(saves,0);assert.equal(C.owner,null);assert(!await db.meta.get(C.KEY));assert.equal(await db.applyUndo.count(),0);assert.deepEqual(await readAll(),before);
+ c.StorageCtl.assertCatalogFresh=freshGuard;
+ // Another writer may win between preflight and queued save as well.
+ c.persistNow=async()=>{c.S._catalogConflict=true;return false};
+ await assert.rejects(()=>C.begin(),e=>e.name==='CatalogConflictError');
+ assert.equal(C.owner,null);assert.deepEqual(await readAll(),before);c.S._catalogConflict=false;c.persistNow=persist;
+
  let peak=0;const bulk=db.applyUndo.bulkAdd.bind(db.applyUndo);db.applyUndo.bulkAdd=async rows=>{peak=Math.max(peak,rows.length);return bulk(rows)};
  let owner=await C.begin();assert(peak<=1000);assert(await db.meta.get(C.KEY));assert.equal(C.owner,owner);
  const marker=(await db.meta.get(C.KEY)).value;assert.equal(marker.storage,'pages-v1');assert.equal(marker.pageSize,1000);
