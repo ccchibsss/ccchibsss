@@ -13856,7 +13856,7 @@ async function withProgress(op, msg, fn) {
   catch (e) {
     if (e && e._ucCancelled) {
       try { e._ucShown = true; } catch (e2) { }
-      Toast.warn('Отменено пользователем', op + ': операция остановлена. Уже обработанные данные сохранены как есть; незавершённую загрузку можно повторить.');
+      Toast.warn('Отменено пользователем', op + (e._ucRolledBack ? ': каталог и реестры восстановлены до импорта.' : ': операция остановлена. Уже обработанные данные сохранены как есть; незавершённую загрузку можно повторить.'));
       throw e;
     }
     console.error('[UC]', op, e);
@@ -14129,6 +14129,9 @@ db.version(6).stores({
   hvcPrices: '++id, &key'
 });
 db.version(6).upgrade(() => {});
+// Apply undo lives in the same DB so restore is a single atomic transaction.
+db.version(7).stores({applyUndo:'++id,table,[table+pos]'});
+db.version(7).upgrade(() => {});
 
 /* ------------------------------- 2. КОНСТАНТЫ --------------------------- */
 const STD = [
@@ -18146,6 +18149,7 @@ const StorageCtl = {
   catalogValue(count, fp) { return { custom:S.custom, saved:nowISO(), count, fp:fp || '', revision:this.newRevision() }; },
   acceptCatalog(value) { S._catalogToken = this.catalogToken({value}); S._catalogConflict = false; },
   async assertCatalogFresh() {
+    if(typeof BrowserApplyCheckpoint!=='undefined')await BrowserApplyCheckpoint.assertWriter();
     const current = await db.meta.get('catalog');
     if (typeof S._catalogToken !== 'string' || this.catalogToken(current) !== S._catalogToken) {
       S._catalogConflict = true;
@@ -23350,6 +23354,7 @@ const DbRecovery = {
 };
 async function loadAll(legacySqlMigration=false) {
   if(!legacySqlMigration&&PyEngine.processingMode()==='sql')return PyEngine.loadSqlCatalog();
+  if(typeof BrowserApplyCheckpoint!=='undefined'&&!S._volatileStorage)await BrowserApplyCheckpoint.recover();
   /* Маркер незавершённой записи — только диагностика. Каталог и сохранённый
      черновик не подменяются автоматически данными из резервной копии. */
   /* v10.8.7 (миноp #5): чанковая запись теперь атомарна (черновик products_stage
@@ -24946,7 +24951,7 @@ const HVC = {
       });
       S._hvcPersistError = '';
       /* Дублируем реестры в Google Sheets через GAS-прокси (ограниченные порции, fire-and-forget) */
-      if (S.settings && S.settings.gasUrl && HVC.parts.size && !pendingDimensionChecks().length) {
+      if ((typeof BrowserApplyCheckpoint==='undefined'||!BrowserApplyCheckpoint.owner) && S.settings && S.settings.gasUrl && HVC.parts.size && !pendingDimensionChecks().length) {
         try {
           gas('saveHVC', {
             oe: [...HVC.oe.entries()].slice(0, 5000).map(([oeNorm, v]) => ({ oeNorm, ...v })),
@@ -28668,6 +28673,85 @@ const DiskImport = {
 };
 
 /* Browser-only immutable input tables. Never used by SQL processing. */
+/* A dedicated undo checkpoint for browser Apply, not historical catalog recovery.
+   Backup and publication markers share the main database transaction domain. */
+const BrowserApplyCheckpoint = {
+  KEY:'browserApplyCheckpoint', owner:null, BATCH:1000,
+  TABLES:['products','products_stage','meta','cats','rules','excs','imports','hvcOe','hvcParts','hvcCross','hvcPrices'],
+  async assertWriter() {
+    const marker=await db.meta.get(this.KEY);
+    if(marker&&marker.value.owner!==this.owner)throw new Error('Незавершённый импорт в другой вкладке: запись заблокирована до завершения или восстановления.');
+  },
+  async begin() {
+    if(S._volatileStorage)throw new Error('Без IndexedDB безопасное применение недоступно');
+    if(this.owner)throw new Error('Контрольная точка уже используется');
+    // Flush legitimate pre-existing edits before taking an undo checkpoint.
+    if(!await persistNow()||S._cacheAuxError||S._hvcPersistError)throw new Error('Не удалось сохранить исходное состояние перед импортом');
+    const owner=uid('apply');this.owner=owner;
+    try{
+      await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
+        if(await db.meta.get(this.KEY))throw new Error('Сначала восстановите незавершённый импорт');
+        await StorageCtl.assertCatalogFresh();await db.applyUndo.clear();
+        const counts={};
+        for(const name of this.TABLES){
+          const table=db.table(name),key=table.schema.primKey.keyPath;let last,total=0;
+          for(;;){
+            if(typeof UCCancel!=='undefined')UCCancel.check();
+            const rows=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(this.BATCH).toArray();
+            if(!rows.length)break;
+            await db.applyUndo.bulkAdd(rows.map((value,i)=>({table:name,pos:total+i,value})));
+            total+=rows.length;last=rows[rows.length-1][key];
+          }
+          counts[name]=total;
+        }
+        await db.meta.put({key:this.KEY,value:{owner,created:Date.now(),counts}});
+      });
+      return owner;
+    }catch(e){this.owner=null;throw e;}
+  },
+  async commit(owner) {
+    await db.transaction('rw',db.meta,db.applyUndo,async()=>{
+      const m=await db.meta.get(this.KEY);if(!m||m.value.owner!==owner)throw new Error('Контрольная точка импорта изменилась');
+      await db.meta.delete(this.KEY);await db.applyUndo.clear();
+    });
+    this.owner=null;
+  },
+  async restore(owner) {
+    // Clearing the target and replaying the backup are ONE transaction. A
+    // failed restore leaves both the pre-restore DB and the undo checkpoint.
+    await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
+      const m=await db.meta.get(this.KEY);if(!m||m.value.owner!==owner)throw new Error('Нет соответствующей контрольной точки');
+      for(const name of this.TABLES){
+        const count=m.value.counts[name];
+        if(!Number.isSafeInteger(count)||count<0||await db.applyUndo.where('table').equals(name).count()!==count)throw new Error('Неполная контрольная точка: '+name);
+      }
+      for(const name of this.TABLES){
+        const table=db.table(name),count=m.value.counts[name];await table.clear();
+        for(let pos=0;pos<count;pos+=this.BATCH){
+          const rows=await db.applyUndo.where('[table+pos]').between([name,pos],[name,Math.min(pos+this.BATCH,count)],true,false).toArray();
+          if(rows.length!==Math.min(this.BATCH,count-pos)||rows.some((r,i)=>r.pos!==pos+i))throw new Error('Повреждена контрольная точка: '+name);
+          await table.bulkAdd(rows.map(r=>r.value));
+        }
+      }
+      await db.meta.delete(this.KEY);await db.applyUndo.clear();
+    });
+    this.owner=null;
+  },
+  async recover() {
+    const marker=await db.meta.get(this.KEY);if(!marker)return;
+    const recover=async()=>{
+      const current=await db.meta.get(this.KEY);if(!current)return;
+      if(!await askConfirm('Прерванный импорт','Восстановить каталог и реестры до незавершённого Apply? Закройте другие вкладки приложения. Исходные таблицы сохранятся.','Восстановить'))throw new Error('Запуск остановлен: требуется восстановление незавершённого импорта');
+      await this.restore(current.value.owner);
+    };
+    const locks=typeof navigator!=='undefined'&&navigator.locks;
+    if(locks&&typeof locks.request==='function')return locks.request('UC-import-mode-operation',{mode:'exclusive',ifAvailable:true},lock=>{
+      if(!lock)throw new Error('Импорт ещё выполняется в другой вкладке');return recover();
+    });
+    return recover();
+  }
+};
+
 const BrowserImportSources = {
   BATCH:1000, active:new Set(), busy:false,
   async exclusive(task) {
@@ -29043,13 +29127,14 @@ const Import = {
     /* v11-аудит: artCol мог устареть после ручных правок маппинга — пересчитываем. */
     Import.normalize();
     if (S.pending.artCol === -1) { Toast.err('Не выбран артикул', 'В окне маппинга назначьте одну колонку как «Артикул» в списке «Стандартное поле»'); return; }
-    const sourceId=S.pending.sourceId;let collisionRun=sourceId?uid('lookup'):null;
+    const sourceId=S.pending.sourceId;let collisionRun=sourceId?uid('lookup'):null,checkpoint=null;
     if(sourceId&&PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
     return BrowserImportSources.exclusive(()=>withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
       if(sourceId&&PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
       if(sourceId)BrowserImportSources.active.add(sourceId);
       // Do not mutate the catalog when boot has already made persistence impossible.
       if(S._bootReady!==true||S._bootError)throw new Error('Импорт не начат: '+storageErrorText(S._bootError||'Хранилище ещё не готово. Дождитесь завершения запуска.'));
+      if(PyEngine.processingMode()==='browser')checkpoint=await BrowserApplyCheckpoint.begin();
       const movedToCost = this.applyPriceIsCost();
       if (movedToCost) Prog.msg('«Цена» из файла записана в себестоимость (закупка поставщика): ' + movedToCost);
       const { map, headers, body } = S.pending;
@@ -29735,12 +29820,6 @@ const Import = {
         });
       }
       catch (ePipe) { console.error('[UC] pipeline после импорта:', ePipe); throw ePipe; }
-      // Release parsed input only after persistence succeeds, so a failed
-      // save does not destroy the user's import preview and retry source.
-      try { body.length = 0; } catch (e) { }
-      if (S.pending) { S.pending.body = []; S.pending.rows = []; }
-      if(sourceId)try{await BrowserImportSources.database().sources.update(sourceId,{status:'applied'});}catch(e){console.warn('[UC] статус применённого источника:',e);}
-      Import._priceFileDone = true;
       _mark('пересчёт и запись');
       /* Автоматическая сверка работает независимо от общего режима обогащения.
          Проверяем и ранее загруженные аномальные SKU: донор мог появиться только
@@ -29769,6 +29848,17 @@ const Import = {
       // Do not render calculation views here: import must leave economics pending.
       // Navigation/export can request economics separately after import completes.
       if (!changedTouched) { Table.paint(); }   /* v12.9.7-mem: вид не менялся */
+      if(typeof UCCancel!=='undefined')UCCancel.check();
+      if(checkpoint){
+        if(S._cacheWriteError||S._cacheAuxError||S._hvcPersistError)throw new Error('Сохранение импорта не завершено; выполняется откат');
+        await BrowserApplyCheckpoint.commit(checkpoint);checkpoint=null;
+      }
+      // Release parsed input only after persistence succeeds, so a failed
+      // save does not destroy the user's import preview and retry source.
+      try { body.length = 0; } catch (e) { }
+      if (S.pending) { S.pending.body = []; S.pending.rows = []; }
+      if(sourceId)try{await BrowserImportSources.database().sources.update(sourceId,{status:'applied'});}catch(e){console.warn('[UC] статус применённого источника:',e);}
+      Import._priceFileDone = true;
       $('#mImport').classList.remove('on');
       /* Итог по времени: видно, какой этап «съел» минуты. */
       const _stageTotal = Math.round(Object.values(_stageTimes).reduce((a, b) => a + b, 0));
@@ -29793,6 +29883,21 @@ const Import = {
       if (!S.view.length && S.rows.length) {
         Toast.warn('Строки не видны в таблице', 'Все SKU отсеяны правилами-исключениями или фильтрами. Смотрите жёлтый баннер в разделе 2 и счётчик «исключено».');
       }
+    }).catch(async error=>{
+      if(checkpoint){
+        S._bootReady=false; // also blocks pagehide/autosave of partially mutated RAM
+        try{
+          // Already queued pagehide/autosaves must finish BEFORE restore; new
+          // persistNow calls are blocked by _bootReady=false above.
+          if(typeof _persistQueue!=='undefined')await _persistQueue.catch(()=>{});
+          await BrowserApplyCheckpoint.restore(checkpoint);checkpoint=null;
+          try{error._ucRolledBack=true;}catch(ignore){}
+          Toast.warn('Импорт отменён','Каталог и реестры восстановлены. Страница будет перезагружена; исходник остаётся в таблицах источников.');
+          location.reload();
+        }catch(recoveryError){S._bootError=recoveryError;
+          throw new Error('Импорт прерван. Автооткат не завершён: '+storageErrorText(recoveryError)+'. Не продолжайте работу; перезагрузите страницу для восстановления. Причина: '+storageErrorText(error));}
+      }
+      throw error;
     }).finally(async()=>{if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.releaseRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}}));
   },
   /* v12.9.50 · СВЯЗАННЫЕ СТРОКИ КАТАЛОГА.

@@ -30,3 +30,4 @@ jobs:
         run: |
           npm install --prefix .arena/idb-tests fake-indexeddb@6.2.8 --no-save --no-audit --no-fund
           NODE_PATH=.arena/idb-tests/node_modules node tests/browser-import-sources-indexeddb.js
+          NODE_PATH=.arena/idb-tests/node_modules node tests/browser-apply-checkpoint-indexeddb.js
