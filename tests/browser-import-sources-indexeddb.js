@@ -4,7 +4,8 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert'),fidb=require('f
 const h=fs.readFileSync(__dirname+'/../index.html','utf8'),lib=[...h.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1];
 let seq=0,cancel=false,sql=false;
 const c={...fidb,console,setTimeout,clearTimeout,queueMicrotask,AbortController,structuredClone,TextDecoder,Blob,performance,CustomEvent:class{constructor(t){this.type=t}},location:{protocol:'http:'},navigator:{},uid:p=>p+'-'+(++seq),PyEngine:{processingMode:()=>sql?'sql':'browser'},UCCancel:{check(){if(cancel)throw Error('cancelled')}},Prog:{msg(){},step(){}}};c.window=c;c.self=c;
-vm.createContext(c);vm.runInContext(lib,c);
+vm.createContext(c);vm.runInContext(h.slice(h.indexOf('const BrowserImportIO = {'),h.indexOf('const BrowserApplyCheckpoint = {')),c);
+vm.runInContext(lib,c);
 const ca=h.indexOf('const CsvStream = {'),cb=h.indexOf('\n/* Воркер XLSX',ca);vm.runInContext(h.slice(ca,cb)+';this.Csv=CsvStream;',c);
 const a=h.indexOf('const BrowserImportSources = {'),b=h.indexOf('const Import = {',a);vm.runInContext(h.slice(a,b)+';this.B=BrowserImportSources;',c);
 const B=c.B;

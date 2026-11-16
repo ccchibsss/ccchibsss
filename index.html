@@ -9177,6 +9177,7 @@ try {
     </div>
   </div>
   <div id="impApplyStatus" role="status" aria-live="polite" hidden></div>
+  <div id="impRestoreActions" hidden style="padding:10px 16px"><p class="hint">Восстановление не завершено. Запись каталога заблокирована; контрольная точка и исходная таблица не удаляются. Не запускайте новый импорт и не очищайте данные браузера.</p><button type="button" class="btn pri" id="impRestoreRetry">Повторить восстановление каталога</button></div>
   <div id="impConflictActions" hidden style="padding:10px 16px"><p class="hint">Вкладка устарела. Её данные и исходный файл не удалены. Новая вкладка использует сохранённый каталог, а не несохранённые правки этой вкладки. Закройте остальные активные редакторы каталога.</p><button type="button" class="btn pri" id="impConflictResume">Продолжить импорт в новой вкладке</button> <button type="button" class="btn gh" id="impConflictExport">Экспорт данных этой вкладки</button></div>
   <div class="mfoot"><span class="hint mono" id="impMeta"></span><div class="sp" style="flex:1"></div>
     <button type="button" class="btn gh" data-close>Отмена</button>
@@ -28808,6 +28809,37 @@ const DiskImport = {
 /* Browser-only immutable input tables. Never used by SQL processing. */
 /* A dedicated undo checkpoint for browser Apply, not historical catalog recovery.
    Backup and publication markers share the main database transaction domain. */
+/* Retry only idempotent reads or a WHOLE aborted atomic restore transaction.
+   Never retry Apply or a portion of a write that may already have committed. */
+const BrowserImportIO = {
+  transient(error) {
+    const todo=[error],seen=new Set();let retry=false;
+    while(todo.length){
+      const e=todo.shift();if(!e||seen.has(e))continue;seen.add(e);
+      if(e._ucCancelled||/^(QuotaExceededError|CatalogConflictError|DataError|DataCloneError|ConstraintError|VersionError|SecurityError)$/.test(e.name||''))return false;
+      if(/^(AbortError|DatabaseClosedError|InvalidStateError)$/.test(e.name||''))retry=true;
+      if(e.inner)todo.push(e.inner);if(e.cause)todo.push(e.cause);
+      if(e.failures)todo.push(...Object.values(e.failures));
+    }
+    return retry;
+  },
+  async run(database,task,{label='Чтение импорта',recovery=false}={}) {
+    for(let attempt=0;;attempt++){
+      if(!recovery&&typeof UCCancel!=='undefined')UCCancel.check();
+      try{return await task();}
+      catch(error){
+        if(attempt>=2||!this.transient(error))throw error;
+        console.warn('[UC] '+label+': транзакция прервана, повтор '+(attempt+1)+'/2',error.name);
+        if(typeof Prog!=='undefined'&&Prog.n>0)Prog.msg(label+': восстановление соединения IndexedDB, повтор '+(attempt+1)+'/2');
+        await new Promise(resolve=>setTimeout(resolve,150*(attempt+1)));
+        // Do not close a live connection: that could abort another queued
+        // operation ourselves. Dexie.open reopens an explicitly closed DB too.
+        try{await database.open();}catch(openError){if(!this.transient(openError))throw openError;}
+      }
+    }
+  }
+};
+
 const BrowserApplyCheckpoint = {
   KEY:'browserApplyCheckpoint', owner:null, BATCH:1000,
   TABLES:['products','products_stage','meta','cats','rules','excs','imports','hvcOe','hvcParts','hvcCross','hvcPrices'],
@@ -28855,6 +28887,10 @@ const BrowserApplyCheckpoint = {
     this.owner=null;
   },
   async restore(owner) {
+    await BrowserImportIO.run(db,()=>this.restoreAtomic(owner),{label:'Восстановление контрольной точки',recovery:true});
+    this.owner=null;
+  },
+  async restoreAtomic(owner) {
     // Clearing the target and replaying the backup are ONE transaction. A
     // failed restore leaves both the pre-restore DB and the undo checkpoint.
     await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
@@ -28886,12 +28922,11 @@ const BrowserApplyCheckpoint = {
       }
       await db.meta.delete(this.KEY);await db.applyUndo.clear();
     });
-    this.owner=null;
   },
   async recover() {
-    const marker=await db.meta.get(this.KEY);if(!marker)return;
+    const marker=await BrowserImportIO.run(db,()=>db.meta.get(this.KEY),{label:'Проверка контрольной точки',recovery:true});if(!marker)return;
     const recover=async()=>{
-      const current=await db.meta.get(this.KEY);if(!current)return;
+      const current=await BrowserImportIO.run(db,()=>db.meta.get(this.KEY),{label:'Проверка контрольной точки',recovery:true});if(!current)return;
       if(!await askConfirm('Прерванный импорт','Восстановить каталог и реестры до незавершённого Apply? Закройте другие вкладки приложения. Исходные таблицы сохранятся.','Восстановить'))throw new Error('Запуск остановлен: требуется восстановление незавершённого импорта');
       await this.restore(current.value.owner);
     };
@@ -29075,6 +29110,9 @@ const BrowserImportSources = {
   },
   check() { if(typeof UCCancel!=='undefined')UCCancel.check(); },
   async page(id,start,count=this.BATCH) {
+    return BrowserImportIO.run(this.database(),()=>this.readPage(id,start,count),{label:'Чтение исходной таблицы'});
+  },
+  async readPage(id,start,count=this.BATCH) {
     const d=this.database(),meta=await d.sources.get(id),end=start+count;
     const invalid=()=>new Error('Источник IndexedDB повреждён или удалён; применение остановлено');
     if(!meta||!['ready','applied'].includes(meta.status)||!Number.isSafeInteger(meta.total)||meta.total<0||!Number.isSafeInteger(start)||!Number.isSafeInteger(count)||start<0||count<0||!Number.isSafeInteger(end)||end>meta.total)throw invalid();
@@ -29331,6 +29369,9 @@ const BrowserImportSources = {
     finally{for(const id of temporary)await table.where('run').equals(id).delete();}
   },
   async lookupKeyPages(run,keys) {
+    return BrowserImportIO.run(this.database(),()=>this.readKeyPages(run,keys),{label:'Чтение индекса ключей'});
+  },
+  async readKeyPages(run,keys) {
     const directory=this._keyDirectories?.get(run);
     if(directory)return this.lookupBuiltKeyPages(run,keys,directory);
     const sorted=[...new Set(keys)].sort(),out=new Map();let offset=0;
@@ -29401,11 +29442,14 @@ const BrowserImportSources = {
     return found;
   },
   async conflicts(run,rows,describe) {
+    return BrowserImportIO.run(this.database(),()=>this.readConflicts(run,rows,describe),{label:'Проверка конфликтов источника'});
+  },
+  async readConflicts(run,rows,describe) {
     const keys=[...new Set(rows.map(describe).filter(Boolean).map(x=>x.key))];
     const meta=await this.database().runs.get(run);
     if(!meta?.complete)throw new Error('Индекс ключей не готов');
     if(meta.storage==='key-pages-v1'){
-      const values=await this.lookupKeyPages(run,keys);
+      const values=await this.readKeyPages(run,keys);
       if(values.size!==keys.length)throw new Error('Индекс ключей неполон; применение остановлено');
       return new Set([...values.values()].filter(v=>v.conflict).map(v=>v.key));
     }
@@ -29921,7 +29965,7 @@ const Import = {
         }
         if (vals.length < 20) continue;
         let consec = 0;
-        for (let i = 1; i < vals.length; i++) { const d = vals[i] - vals[i - 1]; if (d >= 0 && d <= 2) consec++; }
+        for (let i = 1; i < vals.length; i++) { const d = vals[i] - vals[i - 1]; if (d > 0 && d <= 2) consec++; }
         if (consec / (vals.length - 1) >= 0.95 && (vals[vals.length - 1] - vals[0]) <= vals.length * 2) seqPriceCols.add(col);
       }
       const datesBefore = HVC.datesFixed;
@@ -30484,7 +30528,8 @@ const Import = {
           Toast.warn('Импорт отменён','Каталог и реестры восстановлены. Страница будет перезагружена; исходник остаётся в таблицах источников.');
           location.reload();
         }catch(recoveryError){S._bootError=recoveryError;
-          throw new Error('Импорт прерван. Автооткат не завершён: '+storageErrorText(recoveryError)+'. Не продолжайте работу; перезагрузите страницу для восстановления. Причина: '+storageErrorText(error));}
+          const failure=new Error('Импорт прерван. Автооткат не завершён: '+storageErrorText(recoveryError)+'. Не запускайте новый импорт. Повторите восстановление кнопкой в окне импорта либо откройте страницу заново для восстановления. Контрольная точка не удалена. Причина: '+storageErrorText(error));
+          failure._ucRollbackFailed=true;throw failure;}
       }
       throw error;
     }).finally(async()=>{if(catalogLookup)try{await catalogLookup.dispose();}catch(e){console.warn('[UC] очистка индекса каталога:',e);}if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.releaseRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}}));
@@ -47878,7 +47923,7 @@ function bindAll() {
     const button = $('#impApply'), status = $('#impApplyStatus');
     if (button.disabled) return;
     button.disabled = true;
-    $('#impConflictActions').hidden=true;
+    $('#impConflictActions').hidden=true;$('#impRestoreActions').hidden=true;
     console.info('[UC] импорт · нажата кнопка применения', {file:S.pending?.file,rows:S.pending?.body?.length});
     if (status) { status.hidden = false; status.textContent = 'Применение импорта… Дождитесь завершения; повторно выбирать файл не нужно.'; }
     try {
@@ -47890,17 +47935,33 @@ function bindAll() {
       console.info('[UC] импорт · результат применения: '+(stillOpen ? 'мастер остался открыт (проверка не пройдена)' : 'мастер закрыт'));
     } catch (err) {
       console.error('[UC] Import.apply error:', err);
+      $('#impRestoreActions').hidden=err?._ucRollbackFailed!==true;
       const conflict=err?.name==='CatalogConflictError';
       $('#impConflictActions').hidden=!conflict;
       const reason = storageErrorText(err);
       if (status) {
         status.hidden = false;
-        status.textContent = conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
+        status.textContent = err?._ucRollbackFailed?reason:conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
       }
       if (!err || !err._ucShown) Toast.err('Ошибка импорта', reason.slice(0, 400));
     } finally {
-      button.disabled = false;
+      button.disabled = S._bootReady!==true||!!S._bootError;
     }
+  });
+  on('#impRestoreRetry','onclick',async()=>{
+    const button=$('#impRestoreRetry');if(button.disabled)return;button.disabled=true;
+    try{
+      await BrowserImportSources.exclusive(()=>withProgress('Восстановление импорта','Возвращаем каталог и реестры до Apply. Не закрывайте вкладку.',async()=>{
+        const cancel=$('#prCancel');if(cancel)cancel.style.display='none';
+        if(!BrowserApplyCheckpoint.owner)throw new Error('Нет контрольной точки этой вкладки. Откройте страницу заново для проверки сохранённой контрольной точки.');
+        S._bootReady=false;
+        if(typeof _persistQueue!=='undefined')await _persistQueue.catch(()=>{});
+        await BrowserApplyCheckpoint.restore(BrowserApplyCheckpoint.owner);
+        Toast.ok('Каталог восстановлен','Исходная таблица сохранена. Страница будет перезагружена.');
+        location.reload();
+      }));
+    }catch(error){S._bootError=error;Toast.err('Восстановление не завершено',storageErrorText(error)+'. Контрольная точка сохранена; не очищайте IndexedDB.');}
+    finally{button.disabled=false;}
   });
   on('#impConflictResume','onclick',()=>{try{ImportConflictRecovery.open();}catch(e){Toast.err('Продолжение импорта',storageErrorText(e));}});
   on('#impConflictExport','onclick',()=>{$('#mImport').classList.remove('on');UI.go('export');});

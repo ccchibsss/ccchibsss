@@ -2,6 +2,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),fidb=require('fake-indexeddb');
 const h=fs.readFileSync(__dirname+'/../index.html','utf8');let seq=0,cancel=false,confirm=true;
 const c={...fidb,console,setTimeout,clearTimeout,queueMicrotask,AbortController,structuredClone,performance,CustomEvent:class{constructor(type){this.type=type}},location:{protocol:'http:'},navigator:{},S:{_volatileStorage:false},uid:()=>String(++seq),persistNow:async()=>true,UCCancel:{check(){if(cancel)throw Error('cancelled')}},askConfirm:async()=>confirm};c.window=c;c.self=c;vm.createContext(c);
+vm.runInContext(h.slice(h.indexOf('const BrowserImportIO = {'),h.indexOf('const BrowserApplyCheckpoint = {')),c);
 vm.runInContext([...h.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1],c);
 const a=h.indexOf('const BrowserApplyCheckpoint = {'),b=h.indexOf('const BrowserImportSources = {',a);vm.runInContext(h.slice(a,b)+';this.C=BrowserApplyCheckpoint;',c);
 vm.runInContext("this.db=new Dexie('checkpoint-test');db.version(6).stores({products:'++id',products_stage:'++id',meta:'key',cats:'++id',rules:'++id',excs:'++id',imports:'++id',hvcOe:'++id,&oeNorm',hvcParts:'++id,&key',hvcCross:'++id,&key',hvcPrices:'++id,&key'});",c);
@@ -41,6 +42,20 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  // A failure during restore aborts the WHOLE restore and preserves checkpoint.
  const damaged=await readAll(),failRestore=()=>{throw Error('restore failure')};db.hvcCross.hook('creating',failRestore);
  await assert.rejects(()=>C.restore(owner),/restore failure/);assert.deepEqual(await readAll(),damaged);assert(await db.meta.get(C.KEY));assert(await db.applyUndo.count());db.hvcCross.hook('creating').unsubscribe(failRestore);
+ // The first atomic restore aborts AFTER clearing/writing starts. It must
+ // roll back in full before the next attempt reads the same checkpoint.
+ let restoreAborts=1,restoreAttempts=0;const atomic=C.restoreAtomic;
+ const abortRestore=(key,obj,tx)=>{if(restoreAborts>0){restoreAborts--;tx.abort()}};db.products.hook('creating',abortRestore);
+ C.restoreAtomic=async function(owner){restoreAttempts++;if(restoreAttempts===2){assert.deepEqual(await readAll(),damaged);assert(await db.meta.get(C.KEY));}return atomic.call(this,owner)};
+ await C.restore(owner);assert.equal(restoreAttempts,2);assert.deepEqual(await readAll(),before);assert.equal(await db.applyUndo.count(),0);assert.equal(C.owner,null);
+ db.products.hook('creating').unsubscribe(abortRestore);C.restoreAtomic=atomic;
+ // Persistent abort exhausts exactly 3 attempts and preserves BOTH the
+ // partial catalog and complete backup. Manual retry can recover later.
+ owner=await C.begin();await db.products.clear();await db.products.add({article:'PERSISTENT-PARTIAL'});const failedRestoreState=await readAll();
+ restoreAttempts=0;const alwaysAbort=(key,obj,tx)=>tx.abort();db.products.hook('creating',alwaysAbort);
+ C.restoreAtomic=async function(owner){restoreAttempts++;return atomic.call(this,owner)};
+ await assert.rejects(()=>C.restore(owner),e=>['AbortError','InvalidStateError'].includes(e.name));assert.equal(restoreAttempts,3);assert.deepEqual(await readAll(),failedRestoreState);assert(await db.meta.get(C.KEY));assert(await db.applyUndo.count());assert.equal(C.owner,owner);
+ db.products.hook('creating').unsubscribe(alwaysAbort);C.restoreAtomic=atomic;
  await C.restore(owner);assert.deepEqual(await readAll(),before);assert.equal(await db.applyUndo.count(),0);assert.equal(C.owner,null);
  // Successful publication retains new rows and removes backup and marker.
  owner=await C.begin();await db.products.add({article:'COMMITTED'});await C.commit(owner);assert.equal(await db.products.count(),2504);assert(!await db.meta.get(C.KEY));assert.equal(await db.applyUndo.count(),0);

@@ -1,6 +1,7 @@
 // Paged source-key index: arbitrary order, splits, cross-batch conflicts, atomicity.
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),fidb=require('fake-indexeddb');
 const h=fs.readFileSync(__dirname+'/../index.html','utf8');const c={...fidb,console,setTimeout,clearTimeout,queueMicrotask,AbortController,structuredClone,performance,CustomEvent:class{},location:{protocol:'http:'},navigator:{}};c.window=c;c.self=c;vm.createContext(c);
+vm.runInContext(h.slice(h.indexOf('const BrowserImportIO = {'),h.indexOf('const BrowserApplyCheckpoint = {')),c);
 vm.runInContext([...h.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1],c);
 const a=h.indexOf('const BrowserImportSources = {'),b=h.indexOf('const Import = {',a);vm.runInContext(h.slice(a,b)+';this.B=BrowserImportSources;',c);
 const B=c.B,plain=v=>JSON.parse(JSON.stringify(v));
@@ -15,6 +16,20 @@ const B=c.B,plain=v=>JSON.parse(JSON.stringify(v));
   high=await B.writeKeyPages('random',batch,high);
   if(off%1897===0){const found=await B.lookupKeyPages('random',[...expected.keys(),'NOT-THERE']);assert.deepEqual(plain([...found].sort()),plain([...expected].sort()));}
  }
+ // Abort a REAL readonly transaction: retry the read, never Apply or writes.
+ const readKeys=B.readKeyPages;let attempts=0;
+ B.readKeyPages=async function(...args){if(++attempts===1)return d.transaction('r',d.keyPages,tx=>d.keyPages.limit(1).toArray().then(()=>{tx.abort();throw Object.assign(Error('injected abort'),{name:'AbortError'})}));return readKeys.apply(this,args)};
+ assert.equal((await B.lookupKeyPages('random',[...expected.keys()])).size,expected.size);assert.equal(attempts,2);
+ // A closed source database is reopened without clearing a single record.
+ attempts=0;B.readKeyPages=async function(...args){if(++attempts===1)d.close();return readKeys.apply(this,args)};
+ assert.equal((await B.lookupKeyPages('random',[...expected.keys()])).size,expected.size);assert.equal(attempts,2);
+ attempts=0;B.readKeyPages=async()=>{attempts++;return d.transaction('r',d.keyPages,tx=>d.keyPages.count().then(()=>{tx.abort();throw Object.assign(Error('injected abort'),{name:'AbortError'})}))};
+ await assert.rejects(()=>B.lookupKeyPages('random',['K000001']),e=>e.name==='AbortError');assert.equal(attempts,3);
+ attempts=0;B.readKeyPages=async()=>{attempts++;const e=Error('quota');e.name='QuotaExceededError';throw e};
+ await assert.rejects(()=>B.lookupKeyPages('random',['K000001']),e=>e.name==='QuotaExceededError');assert.equal(attempts,1);
+ // Cancel wins over retry even if wrapped by an AbortError.
+ const io=vm.runInContext('BrowserImportIO',c);assert(!io.transient({name:'AbortError',inner:{_ucCancelled:true}}));assert(!io.transient({name:'AbortError',inner:{name:'QuotaExceededError'}}));assert(!io.transient({name:'CatalogConflictError'}));
+ B.readKeyPages=readKeys;
  const actual=await B.lookupKeyPages('random',[...expected.keys(),'NONE']);assert.deepEqual(plain([...actual].sort()),plain([...expected].sort()));
  const pages=await d.keyPages.where('run').equals('random').toArray();assert(pages.length<100);assert(pages.every(p=>p.records.length<=1000));
  // A locally conflicting group must remain conflicting when merged into an

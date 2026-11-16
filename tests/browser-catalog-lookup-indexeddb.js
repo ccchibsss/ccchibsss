@@ -2,6 +2,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),fidb=require('fake-indexeddb');
 const h=fs.readFileSync(__dirname+'/../index.html','utf8');let seq=0,cancel=false;
 const c={...fidb,console,setTimeout,clearTimeout,queueMicrotask,AbortController,structuredClone,performance,CustomEvent:class{constructor(type){this.type=type}},location:{protocol:'http:'},navigator:{},S:{rows:[],settings:{}},uid:p=>p+(++seq),UCCancel:{check(){if(cancel)throw Error('cancelled')}},num:x=>Number(x)||0};c.self=c;c.window=c;vm.createContext(c);
+vm.runInContext(h.slice(h.indexOf('const BrowserImportIO = {'),h.indexOf('const BrowserApplyCheckpoint = {')),c);
 vm.runInContext([...h.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1],c);
 vm.runInContext(h.slice(h.indexOf('const _normArticleCache ='),h.indexOf('/* Артикул — всегда текст.'))+';this.norm=normArticle;',c);
 vm.runInContext(h.slice(h.indexOf('const OE_DELIMITERS ='),h.indexOf('function oeDelimiterHint()'))+';this.codes=codeList;this.merge=mergeCodeLists;',c);
