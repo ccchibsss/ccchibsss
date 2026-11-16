@@ -8397,7 +8397,7 @@ html { -webkit-text-size-adjust: 100%; }
       <p class="hint">Весь текущий каталог, включая скрытые строки, все стандартные поля с сохранёнными значениями и пользовательские колонки. Без формул, расчётных показателей, повторного обогащения и подстановки стандартных габаритов. Цена и себестоимость из прайса сохраняются как исходные данные. Размеры выгружаются в см, вес — в кг.</p>
       <label class="f" for="dataExportFormat">Формат</label>
       <select id="dataExportFormat"><option value="xlsx">Excel XLSX — только значения</option><option value="csv">CSV UTF-8 — только значения</option></select>
-      <button type="button" class="btn pri" id="dataExportRun">Скачать все данные без расчётов</button>
+      <button type="button" class="btn pri" id="dataExportRun">Скачать Excel (.xlsx)</button><button type="button" class="btn pri" id="dataExportRunCsv">Скачать CSV (.csv)</button>
     </div></div>
   </div>
 
@@ -9264,7 +9264,7 @@ try {
     <div class="hint" style="margin-top:8px">Нормализованные списки OE и группы артикулов разбираются по настройке «Разделитель OE-номеров и групп» в разделе «Данные»; в файле они всегда объединены через « / ». Одинаковые нормализованные коды выводятся один раз.</div>
     <div id="expColsList" style="max-height:400px;overflow:auto;padding:6px 0 10px"></div>
   </div>
-  <div class="mfoot"><span class="hint" id="expNote"></span><div class="sp" style="flex:1"></div><button type="button" class="btn gh" data-close>Отмена</button><button type="button" class="btn pri" id="expRun"><i class="fa-solid fa-download"></i> Сформировать файл</button></div>
+  <div class="mfoot"><span class="hint" id="expNote"></span><div class="sp" style="flex:1"></div><button type="button" class="btn gh" data-close>Отмена</button><button type="button" class="btn pri" id="expRun"><i class="fa-solid fa-download"></i> Скачать Excel (.xlsx)</button><button type="button" class="btn pri" id="expRunCsv">Скачать CSV (.csv)</button></div>
 </div></div>
 
 <div class="modal" id="mHvc" role="dialog" aria-modal="true" aria-label="Каталог V"><div class="mbox" style="width:880px">
@@ -47691,9 +47691,10 @@ function bindAll() {
       button.disabled = false;
     }
   });
-  on('#expRun', 'onclick', async (e) => {
+  const runExportFormat = async (e, format) => {
     e && e.preventDefault();
-    const button=$('#expRun');if(button.disabled)return;button.disabled=true;
+    const button=$('#expRun'),csvButton=$('#expRunCsv');if(button.disabled)return;button.disabled=true;csvButton.disabled=true;
+    $('#expFmt').value=format;Exp.toggleFmt();
     try {
       if (!Exp.pick) Exp.pick = Object.fromEntries(exportCatalog().map(c => [c.k, true]));
       const completed=await Exp.run();
@@ -47701,8 +47702,10 @@ function bindAll() {
     } catch (err) {
       console.error('[UC] Exp.run error:', err);
       if(!err?._ucShown)Toast.err('Ошибка экспорта', String(err.message || err).slice(0, 180));
-    }finally{button.disabled=false;}
-  });
+    }finally{button.disabled=false;csvButton.disabled=false;}
+  };
+  on('#expRun','onclick',e=>runExportFormat(e,'xlsx'));
+  on('#expRunCsv','onclick',e=>runExportFormat(e,'csv'));
   on('#btnBrowserSources', 'onclick', () => BrowserImportSources.show().catch(e=>Toast.err('Источники',storageErrorText(e))));
   on('#btnImport', 'onclick', () => Import.pick());
   on('#btnPriceListUpsert', 'onclick', () => PriceListManager.pickFile());
@@ -47710,7 +47713,13 @@ function bindAll() {
   on('#btnExportOzonTop', 'onclick', () => OzonExport.open());
   on('#btnTopOzon', 'onclick', () => OzonExport.open());
     on('#btnDemoImport', 'onclick', () => Import.demo());
-  on('#dataExportRun', 'onclick', () => DataOnlyExport.run());
+  const runDataExportFormat=async format=>{
+    if($('#dataExportRun').disabled)return;
+    $('#dataExportFormat').value=format;$('#dataExportRunCsv').disabled=true;
+    try{await DataOnlyExport.run();}finally{$('#dataExportRunCsv').disabled=false;}
+  };
+  on('#dataExportRun', 'onclick', () => runDataExportFormat('xlsx'));
+  on('#dataExportRunCsv', 'onclick', () => runDataExportFormat('csv'));
   on('#btnExportOpen', 'onclick', () => Exp.open());
   // === КОНЕЦ КРИТИЧЕСКОГО БЛОКА ===
 
