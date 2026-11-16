@@ -24,6 +24,12 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSy
  await ctx.Exp._runImpl(rows);assert.equal(zipCalls,0);assert(published[0].name.endsWith('.csv'));assert((await published[0].b.text()).includes(long));
  published=[];accepted=false;await ctx.Exp._runImpl(rows);assert.equal(published.length,0);assert.equal(zipCalls,0);
  accepted=true;await ctx.Exp._runImpl([{oe:'short'}]);assert.equal(zipCalls,1);assert(published[0].name.endsWith('.xlsx'));
+ // Exporting the WHOLE catalogue must not fall back to ensureEconomics(),
+ // whose normal interactive pipeline persists to IndexedDB.
+ const econ=h.indexOf('async function ensureEconomicsFor(rows)'),econEnd=h.indexOf('/* v12.9.87: пайплайн при упаковке',econ);
+ ctx.S.rows=[{id:1},{id:2}];ctx.S._econPending=true;ctx._econEnsureJob=null;let pipelineOptions;
+ ctx.runPipeline=async(full,options)=>{pipelineOptions=options};ctx.ensureEconomics=()=>{throw Error('must not persist whole catalogue')};
+ vm.runInContext(h.slice(econ,econEnd),ctx);await ctx.ensureEconomicsFor(ctx.S.rows);assert.equal(pipelineOptions.persist,false);assert.equal(pipelineOptions.changedRows,null);await ctx.ensureEconomicsFor(ctx.S.rows.slice(0,1));assert.equal(pipelineOptions.persist,false);assert(pipelineOptions.changedRows.has(ctx.S.rows[0]));assert(!pipelineOptions.changedRows.has(ctx.S.rows[1]));
  // No implicit SQL localhost probe in browser mode; explicit SQL still probes.
  const status=h.indexOf('  async refreshStatus() {',h.indexOf('const PyEngine = {')),statusEnd=h.indexOf('  async askToken()',status);
  let requests=0,mode='browser';const el={style:{}};ctx.$=()=>el;

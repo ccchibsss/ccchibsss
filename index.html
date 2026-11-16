@@ -8397,7 +8397,7 @@ html { -webkit-text-size-adjust: 100%; }
       <p class="hint">Весь текущий каталог, включая скрытые строки, все стандартные поля с сохранёнными значениями и пользовательские колонки. Без формул, расчётных показателей, повторного обогащения и подстановки стандартных габаритов. Цена и себестоимость из прайса сохраняются как исходные данные. Размеры выгружаются в см, вес — в кг.</p>
       <label class="f" for="dataExportFormat">Формат</label>
       <select id="dataExportFormat"><option value="xlsx">Excel XLSX — только значения</option><option value="csv">CSV UTF-8 — только значения</option></select>
-      <button type="button" class="btn pri" id="dataExportRun">Скачать все данные без расчётов</button>
+      <button type="button" class="btn pri" id="dataExportRun">Скачать Excel (.xlsx)</button><button type="button" class="btn pri" id="dataExportRunCsv">Скачать CSV (.csv)</button>
     </div></div>
   </div>
 
@@ -9264,7 +9264,7 @@ try {
     <div class="hint" style="margin-top:8px">Нормализованные списки OE и группы артикулов разбираются по настройке «Разделитель OE-номеров и групп» в разделе «Данные»; в файле они всегда объединены через « / ». Одинаковые нормализованные коды выводятся один раз.</div>
     <div id="expColsList" style="max-height:400px;overflow:auto;padding:6px 0 10px"></div>
   </div>
-  <div class="mfoot"><span class="hint" id="expNote"></span><div class="sp" style="flex:1"></div><button type="button" class="btn gh" data-close>Отмена</button><button type="button" class="btn pri" id="expRun"><i class="fa-solid fa-download"></i> Сформировать файл</button></div>
+  <div class="mfoot"><span class="hint" id="expNote"></span><div class="sp" style="flex:1"></div><button type="button" class="btn gh" data-close>Отмена</button><button type="button" class="btn pri" id="expRun"><i class="fa-solid fa-download"></i> Скачать Excel (.xlsx)</button><button type="button" class="btn pri" id="expRunCsv">Скачать CSV (.csv)</button></div>
 </div></div>
 
 <div class="modal" id="mHvc" role="dialog" aria-modal="true" aria-label="Каталог V"><div class="mbox" style="width:880px">
@@ -13631,7 +13631,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.157-client+storage-export-fixes';
+const APP_VERSION = '12.9.158-client+reliable-downloads';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -21892,11 +21892,11 @@ async function ensureEconomicsFor(rows) {
   if (!S._econPending || !S.rows.length) return false;
   if (!Array.isArray(rows) || !rows.length) return false;
   if (typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql') return ensureEconomics();
-  if (rows.length >= S.rows.length) return ensureEconomics();
   if (_econEnsureJob) { await _econEnsureJob; if (!S._econPending) return true; }
+  const allRows=rows.length>=S.rows.length;
   await runPipeline(true, {
-    changedRows: new WeakSet(rows), changedList: rows,
-    smallDelta: true, persist: false, suppressSummaryToast: true, preserveView: true
+    changedRows: allRows?null:new WeakSet(rows), changedList: allRows?undefined:rows,
+    smallDelta: !allRows, persist: false, suppressSummaryToast: true, preserveView: true
   });
   return true;
 }
@@ -23237,21 +23237,12 @@ const persistSoon = debounce(() => {
 }, 900);
 _cancelPersistSoon = persistSoon.cancel;
 const persist = persistSoon;
-/* v12.9.70: страж выгрузки. Перед формированием файла дожидаемся записи
-   каталога на диск (только если есть несохранённые изменения — полной
-   перезаписи на каждый экспорт нет). При любой ошибке выгрузки каталог
-   в памяти не трогаем: восстанавливаем ссылку на строки, перерисовываем
-   таблицу и прямо говорим пользователю, что данные не потеряны. */
+/* Export must remain a rescue path when IndexedDB is full/conflicted or a
+   pending writer cannot finish. Inspect status, never start/wait for a save. */
 async function ensureCatalogSafeBeforeExport() {
-  try {
-    if (typeof S === 'undefined' || !S.rows || !S.rows.length) return true;
-    if (S._bootReady !== true || S._bootError || S._volatileStorage) return false;
-    if (_persistDirty || _persistPending > 0) {
-      const ok = await persistNow();
-      if (ok === false) return false;
-    }
-    return !S.settings.lastPersistError;
-  } catch (e) { console.warn('[UC] export pre-persist:', e); return false; }
+  return S._bootReady===true&&!S._bootError&&!S._volatileStorage&&
+    !_persistDirty&&!_persistPending&&!S._catalogConflict&&!S._cacheWriteError&&
+    !S._cacheAuxError&&!S._hvcPersistError&&!S.settings.lastPersistError;
 }
 let _exportUnsafeWarned = false;
 /* v12.9.95: заблокированные по аномалиям SKU молча отсекаются Exp.rows() и
@@ -23274,7 +23265,7 @@ async function exportGuard(name, fn) {
   const saved = await ensureCatalogSafeBeforeExport();
   try {
     const r = await fn();
-    if (!saved && !_exportUnsafeWarned && S.rows && S.rows.length) {
+    if (r===true && !saved && !_exportUnsafeWarned && S.rows && S.rows.length) {
       _exportUnsafeWarned = true;
       Toast.warn('Каталог не записан на диск', 'Файл выгрузки сформирован, но каталог сейчас только в памяти вкладки. Не закрывайте её: проверьте хранилище (место/доступ IndexedDB) на дашборде или сделайте снапшот.');
     }
@@ -26400,7 +26391,7 @@ const UI = {
     /* v12.9.86: после лёгкого импорта расчётные разделы сначала досчитывают
        экономику, иначе таблица/дашборд показали бы пустые прибыли. */
     if (fn) {
-      if (S._econPending && ['data','dashboard','unit','export','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(v)) {
+      if (S._econPending && ['data','dashboard','unit','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(v)) {
         Toast.info('Считаю юнит-экономику', 'Каталог был загружен в лёгком режиме — выполняю отложенный расчёт…');
         ensureEconomics().then(() => setTimeout(fn, 30)).catch(() => setTimeout(fn, 30));
       } else setTimeout(fn, 30);
@@ -26486,7 +26477,7 @@ const UI = {
       await runPipeline(true, { persist: false, skipEconomics: S._econPending === true, suppressSummaryToast: S._econPending === true, onProgress: bootProgress, persistMessage: 'пересчёт завершён — кэш при старте не переписываем' });
       if (S._econPending) {
         const startView = (typeof UI !== 'undefined' && UI.current) ? UI.current() : 'dashboard';
-        if (['data','dashboard','unit','export','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(startView)) {
+        if (['data','dashboard','unit','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(startView)) {
           await ensureEconomics();
           Dash.render();
         }
@@ -41617,10 +41608,10 @@ const DataOnlyExport = {
     const button=$('#dataExportRun');if(button.disabled)return;button.disabled=true;
     let handle=null,sink=null;
     try{
-      const format=$('#dataExportFormat').value==='csv'?'csv':'xlsx';
+      let format=$('#dataExportFormat').value==='csv'?'csv':'xlsx';
       // Request the destination while the click still has user activation.
       // Compatible browsers stream to disk; others retain the Blob download.
-      if(typeof window!=='undefined'&&typeof window.showSaveFilePicker==='function')handle=await window.showSaveFilePicker({suggestedName:'UC_данные_без_расчётов.'+format});
+      if((format==='csv'||PyEngine.processingMode()==='sql')&&typeof window!=='undefined'&&typeof window.showSaveFilePicker==='function')handle=await window.showSaveFilePicker({suggestedName:'UC_data_without_calculations.'+format});
       await withProgress('Экспорт данных без расчётов','все строки и сохранённые значения',async()=>{
       const specs=this.specs();let blob;
       if(PyEngine.processingMode()==='sql'){
@@ -41645,6 +41636,17 @@ const DataOnlyExport = {
         const present=new Set();for(const p of rows)for(const c of specs)if((c.custom?(p.custom||{})[c.key]:p[c.key])!==undefined)present.add(c);
         const cols=specs.filter(c=>c.custom||present.has(c));
         const headers=cols.map(c=>c.name+(c.custom?' [пользовательская: '+c.key+']':''));
+        if(format==='xlsx'){
+          let overflow='';
+          for(let i=0;i<rows.length&&!overflow;i++){
+            for(const c of cols){const value=this.value(rows[i],c);if(typeof value==='string'&&value.length>32767){overflow='Колонка «'+c.name+'», строка '+(i+2)+': '+value.length+' символов.';break;}}
+            if(i%1000===999){if(typeof UCCancel!=='undefined')UCCancel.check();await new Promise(resolve=>setTimeout(resolve,0));validate();}
+          }
+          if(overflow){
+            if(!await askConfirm('Лимит ячейки Excel',overflow+' Сохранить все данные в CSV UTF-8 без обрезки?','Сохранить CSV'))return;
+            format='csv';
+          }
+        }
         if(format==='csv'){
           const quote=v=>'"'+safeCsvText(v).replace(/"/g,'""')+'"';
           const chunks=[];
@@ -41673,8 +41675,7 @@ const DataOnlyExport = {
         }
       }
       if(handle){sink=await handle.createWritable();await sink.write(blob);await sink.close();sink=null;return;}
-      const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='UC_данные_без_расчётов.'+format;
-      document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);
+      Exp.download(blob,'UC_data_without_calculations.'+format);
     });}catch(e){if(sink)try{await sink.abort();}catch(cleanup){}if(e?.name!=='AbortError'&&!e?._ucShown)Toast.err('Экспорт данных',storageErrorText(e));}finally{button.disabled=false;}
   }
 };
@@ -42099,7 +42100,7 @@ const Exp = {
           await PyEngine.exportCatalogFormat(fmtChoice === 'csv' ? 'csv' : 'xlsx', arts);
         }
         try { modal('#mExport', false); } catch (e) { }
-        return;
+        return true;
       }
     } catch (e) { if (PyEngine.processingMode() === 'sql') throw e; console.warn('[UC] Exp via engine:', e); }
     return exportGuard('Экспорт', () => this._runImpl(forceRows));
@@ -42145,7 +42146,8 @@ const Exp = {
     if (!rows.length) return Toast.warn('Нет данных', OzonExport.emptyReason(catalogSelectionStats('all')));
     /* v12.9.87: лёгкий режим — экономика считается только для строк этой
        выгрузки, а не для всего каталога; ссылки обновляем после упаковки. */
-    if (S._econPending) { await ensureEconomicsFor(rows); rows = refreshRowRefs(rows); }
+    const needsEconomics=cat.some(c=>c.g==='calc'||c.g==='ana'||c.xl);
+    if (S._econPending&&needsEconomics) { await ensureEconomicsFor(rows); rows = refreshRowRefs(rows); }
         const fmtChoice = $('#expFmt').value;
     if (fmtChoice === 'ozon_csv' || fmtChoice === 'ozon_xlsx') {
       if (!activeMps.has('OZON')) return Toast.warn('Ozon исключён из выгрузки', 'Включите галочку «Ozon» в блоке «Маркетплейсы в выгрузке» или выберите общий формат XLSX/CSV.');
@@ -42175,13 +42177,13 @@ const Exp = {
         if (sourceNote) Toast.warn('Экспорт OZON готов — есть пустые атрибуты', `Файл «${fileName}» · ${fmt(ozRows.length)} SKU. ${sourceNote}`);
         else Toast.ok('Экспорт OZON готов', `Файл «${fileName}» сформирован (${fmt(ozRows.length)} SKU)`);
       });
-      return;
+      return true;
     }
     let isCsv = fmtChoice === 'csv',overflowCsv=false;
     if(!isCsv){
       const overflow=await Exp.xlsxTextOverflow(cat,rows);
       if(overflow){
-        if(!await askConfirm('Лимит ячейки Excel',overflow+' CSV сохранит список целиком, без обрезки. Сформировать CSV вместо XLSX?','Сохранить CSV'))return;
+        if(!await askConfirm('Лимит ячейки Excel',overflow+' CSV сохранит список целиком, без обрезки. Сформировать CSV вместо XLSX?','Сохранить CSV'))return false;
         isCsv=true;overflowCsv=true;
       }
     }
@@ -42219,6 +42221,7 @@ const Exp = {
         }
       } catch (e) { }
     });
+    return true;
   },
 
   /* Потоковая сборка ОДНОЙ книги XLSX: лист «Юнит-экономика» + сводные листы. */
@@ -42989,11 +42992,27 @@ const Exp = {
     Exp.download(new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), fileName);
   },
   download(blob, name) {
-    const u = URL.createObjectURL(blob instanceof Blob ? blob : new Blob([blob]));
-    const a = document.createElement('a'); a.href = u; a.download = name; document.body.appendChild(a); a.click();
-    setTimeout(() => { URL.revokeObjectURL(u); a.remove(); }, 800);
+    const url=URL.createObjectURL(blob instanceof Blob?blob:new Blob([blob]));
+    if(!this._downloads)this._downloads=[];
+    // Keep a real user-clickable retry link: automatic downloads can be
+    // blocked after a long asynchronous export. 800ms was too short a URL TTL.
+    const banner=document.createElement('div');banner.className='card';
+    banner.style.cssText='position:fixed;bottom:16px;left:16px;z-index:250;padding:12px;max-width:80vw;overflow-wrap:anywhere';
+    banner.setAttribute('role','status');
+    const label=document.createElement('div');label.textContent='Файл подготовлен. Если скачивание не началось, нажмите ссылку:';
+    const link=document.createElement('a');link.href=url;link.download=name;link.textContent=name;link.style.color='var(--blue)';
+    const close=document.createElement('button');close.type='button';close.className='btn gh';close.textContent='Закрыть';
+    banner.append(label,link,close);document.body.appendChild(banner);
+    const entry={url,banner,timer:null};
+    const release=()=>{URL.revokeObjectURL(url);banner.remove();this._downloads=this._downloads.filter(item=>item!==entry);};
+    close.onclick=()=>{clearTimeout(entry.timer);release();};
+    entry.timer=setTimeout(release,600000);this._downloads.push(entry);
+    while(this._downloads.length>2){const old=this._downloads.shift();clearTimeout(old.timer);URL.revokeObjectURL(old.url);old.banner.remove();}
+    link.click();
+    return true;
   },
   async snap(name, rows, cols) {
+    if(String(name).startsWith('Экспорт ')&&(_persistDirty||_persistPending||S._catalogConflict||S._cacheWriteError||S._cacheAuxError||S._hvcPersistError))return false;
     if (S._bootReady !== true || S._bootError) { Toast.warn('Снапшот не создан', 'Запуск не завершён; неполный каталог нельзя считать резервной копией.'); return false; }
     if (S._volatileStorage) { Toast.warn('Снапшот не сохранён на диск', 'IndexedDB недоступен: выгрузите каталог отдельным файлом.'); return false; }
     /* Старые резервные копии не удаляем. Чтобы автоснапшоты не исчерпали квоту,
@@ -47672,17 +47691,21 @@ function bindAll() {
       button.disabled = false;
     }
   });
-  on('#expRun', 'onclick', async (e) => {
+  const runExportFormat = async (e, format) => {
     e && e.preventDefault();
+    const button=$('#expRun'),csvButton=$('#expRunCsv');if(button.disabled)return;button.disabled=true;csvButton.disabled=true;
+    $('#expFmt').value=format;Exp.toggleFmt();
     try {
       if (!Exp.pick) Exp.pick = Object.fromEntries(exportCatalog().map(c => [c.k, true]));
-      await Exp.run();
-      const m = $('#mExport'); if (m) m.classList.remove('on');
+      const completed=await Exp.run();
+      if(completed===true){const m = $('#mExport'); if (m) m.classList.remove('on');}
     } catch (err) {
       console.error('[UC] Exp.run error:', err);
-      Toast.err('Ошибка экспорта', String(err.message || err).slice(0, 180));
-    }
-  });
+      if(!err?._ucShown)Toast.err('Ошибка экспорта', String(err.message || err).slice(0, 180));
+    }finally{button.disabled=false;csvButton.disabled=false;}
+  };
+  on('#expRun','onclick',e=>runExportFormat(e,'xlsx'));
+  on('#expRunCsv','onclick',e=>runExportFormat(e,'csv'));
   on('#btnBrowserSources', 'onclick', () => BrowserImportSources.show().catch(e=>Toast.err('Источники',storageErrorText(e))));
   on('#btnImport', 'onclick', () => Import.pick());
   on('#btnPriceListUpsert', 'onclick', () => PriceListManager.pickFile());
@@ -47690,7 +47713,13 @@ function bindAll() {
   on('#btnExportOzonTop', 'onclick', () => OzonExport.open());
   on('#btnTopOzon', 'onclick', () => OzonExport.open());
     on('#btnDemoImport', 'onclick', () => Import.demo());
-  on('#dataExportRun', 'onclick', () => DataOnlyExport.run());
+  const runDataExportFormat=async format=>{
+    if($('#dataExportRun').disabled)return;
+    $('#dataExportFormat').value=format;$('#dataExportRunCsv').disabled=true;
+    try{await DataOnlyExport.run();}finally{$('#dataExportRunCsv').disabled=false;}
+  };
+  on('#dataExportRun', 'onclick', () => runDataExportFormat('xlsx'));
+  on('#dataExportRunCsv', 'onclick', () => runDataExportFormat('csv'));
   on('#btnExportOpen', 'onclick', () => Exp.open());
   // === КОНЕЦ КРИТИЧЕСКОГО БЛОКА ===
 
