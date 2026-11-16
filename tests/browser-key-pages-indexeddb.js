@@ -35,5 +35,24 @@ const B=c.B,plain=v=>JSON.parse(JSON.stringify(v));
  await B.clearRun('random');await B.clearRun('other');assert.equal(await d.keyPages.count(),0);
  // Old complete row-key indexes remain readable while new ones use pages.
  await d.runs.add({id:'old',source:'legacy',complete:true});await d.keys.add({run:'old',key:'A',conflict:true});assert((await B.conflicts('old',[{key:'A'}],r=>r)).has('A'));await B.clearRun('old');
+ // Bulk external merge: >256 leaves forces three stable merge passes.
+ B.BATCH=37;
+ async function* chunks(){for(let off=0;off<input.length;off+=271)yield input.slice(off,off+271);}
+ await B.buildKeyPages('bulk',chunks());
+ const built=await B.lookupKeyPages('bulk',[...expected.keys(),'NONE']);assert.deepEqual(plain([...built].sort()),plain([...expected].sort()));
+ const dense=await d.keyPages.where('run').equals('bulk').toArray();assert.equal(dense.length,Math.ceil(expected.size/B.BATCH));
+ assert(dense.every(p=>p.records.length<=B.BATCH));assert.equal(await d.keyPages.where('run').startsWith('bulk:sort:').count(),0);
+ assert(B._keyPageCache.size<=256);assert(B._keyCacheBytes<=32*1048576);
+ B.invalidateKeyIndex('bulk'); // Simulate restart: on-disk format still readable.
+ assert.deepEqual(plain([...(await B.lookupKeyPages('bulk',[...expected.keys()]))].sort()),plain([...expected].sort()));
+ // Failure during the output pass must remove partial output and temp runs.
+ const failBulk=(key,obj)=>{if(obj.run==='bulk-fail')throw Error('merge failure')};d.keyPages.hook('creating',failBulk);
+ await assert.rejects(()=>B.buildKeyPages('bulk-fail',chunks()),/merge failure/);d.keyPages.hook('creating').unsubscribe(failBulk);
+ assert.equal(await d.keyPages.where('run').startsWith('bulk-fail').count(),0);
+ await assert.rejects(()=>B.buildKeyPages('bulk-cancel',chunks(),undefined,()=>{throw Error('cancel merge')}),/cancel merge/);
+ assert.equal(await d.keyPages.where('run').startsWith('bulk-cancel').count(),0);
+ // Mutable-page writer invalidates immutable-build directory/cache.
+ await B.writeKeyPages('bulk',[{key:'LOCAL',brand:'B',signature:'NEW'}],'ЯLAST');assert(!B._keyDirectories.has('bulk'));
+ await B.clearRun('bulk');assert.equal(await d.keyPages.count(),0);assert.equal(B._keyPageCache.size,0);
  await d.delete();console.log('OK: paged key index arbitrary order, page splits, conflict propagation, namespace isolation, atomic failure, missing-key fail-closed and legacy compatibility');
 })().catch(e=>{console.error(e);process.exitCode=1});

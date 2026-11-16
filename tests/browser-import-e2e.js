@@ -11,7 +11,7 @@ const html=fs.readFileSync(__dirname+'/../index.html');
   const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')console.error('browser:',m.text());else if(process.env.E2E_PROGRESS&&m.type()==='info')console.log('browser:',m.text())});
   await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
   await page.goto('http://127.0.0.1:'+server.address().port);await page.waitForFunction(()=>S._bootReady||S._bootError,{},{timeout:60000});
-  const evaluation=page.evaluate(async ({n,stageOnly,preflight,targetIndex,partialWrite})=>{
+  const evaluation=page.evaluate(async ({n,oeRows,stageOnly,preflight,targetIndex,partialWrite})=>{
    if(S._bootError)throw Error(String(S._bootError));
    S.rows=[];S.view=[];S.settings.autoStdDims=false;S.settings.autoOeAnomalyOnImport=false;S.settings.enrichRelatedOnImport=false;
    const related=document.querySelector('#impEnrichRelated');if(related)related.checked=false;
@@ -70,7 +70,7 @@ const html=fs.readFileSync(__dirname+'/../index.html');
    mapping(['article','brand','cost']);await Import.apply();stamps.priceMs=Math.round(performance.now()-t);
    if(S.rows.length!==n)throw Error('price size '+S.rows.length);
    if(HVC.parts.size)throw Error('first price unexpectedly enriched HVC');
-   const t2=performance.now();parts=['Артикул;Бренд;OE-номера\n'];for(let i=0;i<n;i++)parts.push('A'+String(i).padStart(8,'0')+';Brand;OE'+i+'\n');
+   const t2=performance.now();parts=['Артикул;Бренд;OE-номера\n'];for(let i=0;i<oeRows;i++){const j=oeRows===n?i:(i*7919)%n;parts.push('A'+String(j).padStart(8,'0')+';Brand;OE'+j+'\n');}
    await Import.read(new File(parts,'oe.csv',{type:'text/csv'}));parts=null;const oeSource=S.pending.sourceId;mapping(['article','brand','oe_numbers']);await Import.apply();stamps.oeMs=Math.round(performance.now()-t2);
    if(S.rows.length!==n||!S.rows[n-1].oe_numbers.includes('OE'+(n-1)))throw Error('tail lost');
    if(diskBuilds!==1)throw Error('expected exactly one disk target index build, got '+diskBuilds);
@@ -92,7 +92,7 @@ const html=fs.readFileSync(__dirname+'/../index.html');
     if(hvcStorage[table]?.format!=='pages-v1'||hvcStorage[table]?.count!==HVC[key].size)throw Error('large HVC registry not packed');
     hvcPageCounts[table]=await db[table].count();if(hvcPageCounts[table]!==Math.ceil(HVC[key].size/1000))throw Error('HVC page count mismatch');
    }
-   await Import.read({name:'oe.csv'},oeSource);if(S.pending.body.length!==n||Object.keys(S.pending.body).length>202)throw Error('saved mapping preview lost bounds');
+   await Import.read({name:'oe.csv'},oeSource);if(S.pending.body.length!==oeRows||Object.keys(S.pending.body).length>202)throw Error('saved mapping preview lost bounds');
    let verifiedPartialRows=0;
    if(partialWrite){
     const count=Math.floor(n*0.8);if(count<=20000)throw Error('partial-write probe needs >25000 rows');
@@ -107,7 +107,7 @@ const html=fs.readFileSync(__dirname+'/../index.html');
     if(await db.meta.get('incomplete'))throw Error('partial write incomplete marker leaked');
    }
    return {verifiedPartialRows,hvcReloaded:true,verifiedCatalogRows:n,hvcPageCounts,phases,verifiedBaselines,rows:S.rows.length,sources:[(await BrowserImportSources.source(priceSource)).total,(await BrowserImportSources.source(oeSource)).total],last:S.rows[n-1].article,oe:S.rows[n-1].oe_numbers,economicsPending:S._econPending,stamps,heap:performance.memory&&performance.memory.usedJSHeapSize};
-  },{n:Number(process.env.E2E_ROWS||1000),stageOnly:process.env.E2E_STAGE_ONLY==='1',preflight:process.env.E2E_PREFLIGHT==='1',targetIndex:process.env.E2E_TARGET_INDEX==='1',partialWrite:process.env.E2E_PARTIAL_WRITE==='1'});
+  },{n:Number(process.env.E2E_ROWS||1000),oeRows:Number(process.env.E2E_OE_ROWS||process.env.E2E_ROWS||1000),stageOnly:process.env.E2E_STAGE_ONLY==='1',preflight:process.env.E2E_PREFLIGHT==='1',targetIndex:process.env.E2E_TARGET_INDEX==='1',partialWrite:process.env.E2E_PARTIAL_WRITE==='1'});
   const result=await Promise.race([evaluation,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('E2E deadline exceeded; run is incomplete')),Number(process.env.E2E_TIMEOUT_MS||180000))})]);
   if(!result.stageOnly){assert(result.economicsPending);assert(result.verifiedBaselines.some(x=>x.rows===Number(process.env.E2E_ROWS||1000)&&x.equal),'second Apply must verify the unchanged baseline');}assert.equal(errors.length,0,errors.join('\n'));console.log(JSON.stringify(result,null,2));
  }finally{clearTimeout(deadline);if(browser)await browser.close();await new Promise(r=>server.close(r));}

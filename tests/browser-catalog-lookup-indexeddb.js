@@ -28,6 +28,11 @@ function legacy(rows){const idx=new Map(),idxArt=new Map(),duplicateArt=new Set(
   }
   assert(actual.idx.size<=input.length);assert(actual.idxArt.size<=input.length);
  }
+ // Strict pair matching does not fetch the article index for branded rows,
+ // but brandless rows retain the legacy article fallback and ambiguities.
+ const strict=await lookup.batch([[rows[10].article,rows[10].brand],[rows[11].article,'']],r=>norm(r[0]),r=>norm(r[1]),false);
+ assert.strictEqual(strict.idx.get(norm(rows[10].article)+'|'+norm(rows[10].brand)),expected.idx.get(norm(rows[10].article)+'|'+norm(rows[10].brand)));
+ assert(!strict.idxArt.has(norm(rows[10].article)));assert.strictEqual(strict.idxArt.get(norm(rows[11].article)),expected.idxArt.get(norm(rows[11].article)));
  const protectedRows=[];await lookup.protectDuplicates(protectedRows);
  const uniqueProtected=[...new Set(rows.filter(p=>expected.duplicatePair.has(norm(p.article)+'|'+norm(p.brand))))];assert.deepEqual(protectedRows,uniqueProtected);
  const maps=[{target:'oe_numbers',col:0},{target:'oe_list',col:1}],ramOe=c.makeOe(null,maps),diskOe=c.makeOe(lookup,maps);

@@ -10,7 +10,7 @@ const a=h.indexOf('const BrowserImportSources = {'),b=h.indexOf('const Import = 
 const B=c.B;
 const preStart=h.indexOf('      const sourceVariants=',h.indexOf('const Import = {')),preEnd=h.indexOf('      let sourceCollision=',preStart);
 c.normArticle=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-vm.runInContext('this.conflictParity=async(body,sourceId,collisionRun,keyMode,mapped,STD)=>{const headers=[];const artMap=mapped.find(x=>x.target==="article"),brandMap=mapped.find(x=>x.target==="brand");'+h.slice(preStart,preEnd)+';if(!sourceId)return [...sourceConflicts];const s=await BrowserImportSources.source(sourceId);const found=new Set();for(let off=0;off<s.total;off+=1000)for(const k of await BrowserImportSources.conflicts(collisionRun,await BrowserImportSources.page(sourceId,off,Math.min(1000,s.total-off)),describeSource))found.add(k);return [...found];};',c);
+vm.runInContext('this.conflictParity=async(body,sourceId,collisionRun,keyMode,mapped,STD)=>{const _mark=()=>{};const headers=[];const artMap=mapped.find(x=>x.target==="article"),brandMap=mapped.find(x=>x.target==="brand");'+h.slice(preStart,preEnd)+';if(!sourceId||!needsSourceIndex)return [...sourceConflicts];const s=await BrowserImportSources.source(sourceId);const found=new Set();for(let off=0;off<s.total;off+=1000)for(const k of await BrowserImportSources.conflicts(collisionRun,await BrowserImportSources.page(sourceId,off,Math.min(1000,s.total-off)),describeSource))found.add(k);return [...found];};',c);
 
 function file(name,text){const f=new Blob([text]);f.name=name;return f}
 const plain=v=>JSON.parse(JSON.stringify(v));
