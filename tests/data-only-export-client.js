@@ -8,6 +8,7 @@ const c={STD:[{k:'article',n:'Артикул'},{k:'name',n:'Название'},{
  $:id=>id==='#dataExportRun'?button:{value:format},withProgress:async(a,b,f)=>f(),safeCsvText:v=>String(v??'').replace(/^=/,"'="),storageErrorText:String,Toast:{err:m=>{throw Error(m)}},
  PyEngine:{processingMode:()=>mode,processingAvailable:async()=>{},base:()=>'',token:()=> 'token'},persistNow:async()=>{saves++;return true},
  fetch:async(path,opts)=>{request={path,body:JSON.parse(opts.body)};return {ok:true,blob:async()=>new Blob(['SQL'])}},
+ Exp:{download:b=>{blob=b}},
  URL:{createObjectURL:b=>{blob=b;return 'blob:test'},revokeObjectURL(){}},document:{createElement:()=>({click(){},remove(){}}),body:{appendChild(){}}},
  XLSX:{utils:{aoa_to_sheet:table=>{assert(!table[0].includes('netProfit'));return {}},sheet_add_aoa:(ws,table)=>{assert.equal(table[0][0],'00123')},book_new:()=>({}),book_append_sheet(){}},write:()=>new Uint8Array([1])}};
 vm.createContext(c);vm.runInContext(source+';this.E=DataOnlyExport;',c);
