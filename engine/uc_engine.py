@@ -1563,14 +1563,17 @@ def enrich_rows(rows, reference, mode='auto', cat_mode='artbrand', columns=None,
     def aggregate(key):
         oes = by_art.get(key, [])
         cache_key = tuple(oes)
-        if cache_key in cache: return cache[cache_key]
+        def for_sku(shared):
+            # The OE aggregate is shared, but the final list excludes THIS SKU.
+            own = key.split('|')[0]
+            return {**shared, 'analogs': ', '.join([art for an, art in shared['analogCandidates'] if an != own][:40])}
+        if cache_key in cache: return for_sku(cache[cache_key])
         rep = None
         agg = {}
         categories = set()
         smallest = None
         smallest_oe = ''
         analogs, seen = [], set()
-        self_art = key.split('|')[0]
         for oe in oes:
             record = registry.get(oe) if oe not in unsafe_oe else None
             # Same guard as _oeAggOf; tnved alone does not make a representative.
@@ -1599,13 +1602,17 @@ def enrich_rows(rows, reference, mode='auto', cat_mode='artbrand', columns=None,
                     per_seen.add(an)
                     if len(per_oe) < 40: per_oe.append((an, art))
             for an, art in per_oe:
-                if an != self_art and an not in seen:
+                if an not in seen:
                     seen.add(an)
-                    if len(analogs) < 40: analogs.append(art)
+                    # At most one own article will be removed: 41 candidates
+                    # suffice for the exact first 40 self-excluding analogs.
+                    if len(analogs) < 41: analogs.append((an, art))
         result = {'rep': rep or {}, 'agg': agg, 'conflict': len(categories) > 1,
-                  'smallest': smallest, 'smallestOe': smallest_oe, 'analogs': ', '.join(analogs)}
+                  'smallest': smallest, 'smallestOe': smallest_oe, 'analogCandidates': analogs}
         cache[cache_key] = result
-        return result
+        # Keep the shared OE-set cache bounded, like browser HVC.
+        if len(cache) > 4000: del cache[next(iter(cache))]
+        return for_sku(result)
     result = []
     for source in rows:
         p = copy.deepcopy(source)

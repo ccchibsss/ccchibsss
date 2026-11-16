@@ -9177,6 +9177,7 @@ try {
     </div>
   </div>
   <div id="impApplyStatus" role="status" aria-live="polite" hidden></div>
+  <div id="impRestoreActions" hidden style="padding:10px 16px"><p class="hint">Восстановление не завершено. Запись каталога заблокирована; контрольная точка и исходная таблица не удаляются. Не запускайте новый импорт и не очищайте данные браузера.</p><button type="button" class="btn pri" id="impRestoreRetry">Повторить восстановление каталога</button></div>
   <div id="impConflictActions" hidden style="padding:10px 16px"><p class="hint">Вкладка устарела. Её данные и исходный файл не удалены. Новая вкладка использует сохранённый каталог, а не несохранённые правки этой вкладки. Закройте остальные активные редакторы каталога.</p><button type="button" class="btn pri" id="impConflictResume">Продолжить импорт в новой вкладке</button> <button type="button" class="btn gh" id="impConflictExport">Экспорт данных этой вкладки</button></div>
   <div class="mfoot"><span class="hint mono" id="impMeta"></span><div class="sp" style="flex:1"></div>
     <button type="button" class="btn gh" data-close>Отмена</button>
@@ -13632,7 +13633,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.159-client+import-conflict-recovery';
+const APP_VERSION = '12.9.160-client+bulk-key-indexes';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -24477,7 +24478,8 @@ const HVC = {
   _oeSetOf(p) {
     const key = HVC.keyOf(p);
     const myOes = HVC.byArt.get(key);
-    const oeKey = myOes && myOes.size ? [...myOes].sort().join('\u0001') : '';
+    // Group order and self-excluding analogs depend on SKU, not only OE set.
+    const oeKey = myOes && myOes.size ? key+'\u0000'+[...myOes].sort().join('\u0001') : '';
     if (oeKey) {
       if (!HVC._oeSetCache) HVC._oeSetCache = new Map();
       const hit = HVC._oeSetCache.get(oeKey);
@@ -28808,6 +28810,37 @@ const DiskImport = {
 /* Browser-only immutable input tables. Never used by SQL processing. */
 /* A dedicated undo checkpoint for browser Apply, not historical catalog recovery.
    Backup and publication markers share the main database transaction domain. */
+/* Retry only idempotent reads or a WHOLE aborted atomic restore transaction.
+   Never retry Apply or a portion of a write that may already have committed. */
+const BrowserImportIO = {
+  transient(error) {
+    const todo=[error],seen=new Set();let retry=false;
+    while(todo.length){
+      const e=todo.shift();if(!e||seen.has(e))continue;seen.add(e);
+      if(e._ucCancelled||/^(QuotaExceededError|CatalogConflictError|DataError|DataCloneError|ConstraintError|VersionError|SecurityError)$/.test(e.name||''))return false;
+      if(/^(AbortError|DatabaseClosedError|InvalidStateError)$/.test(e.name||''))retry=true;
+      if(e.inner)todo.push(e.inner);if(e.cause)todo.push(e.cause);
+      if(e.failures)todo.push(...Object.values(e.failures));
+    }
+    return retry;
+  },
+  async run(database,task,{label='Чтение импорта',recovery=false}={}) {
+    for(let attempt=0;;attempt++){
+      if(!recovery&&typeof UCCancel!=='undefined')UCCancel.check();
+      try{return await task();}
+      catch(error){
+        if(attempt>=2||!this.transient(error))throw error;
+        console.warn('[UC] '+label+': транзакция прервана, повтор '+(attempt+1)+'/2',error.name);
+        if(typeof Prog!=='undefined'&&Prog.n>0)Prog.msg(label+': восстановление соединения IndexedDB, повтор '+(attempt+1)+'/2');
+        await new Promise(resolve=>setTimeout(resolve,150*(attempt+1)));
+        // Do not close a live connection: that could abort another queued
+        // operation ourselves. Dexie.open reopens an explicitly closed DB too.
+        try{await database.open();}catch(openError){if(!this.transient(openError))throw openError;}
+      }
+    }
+  }
+};
+
 const BrowserApplyCheckpoint = {
   KEY:'browserApplyCheckpoint', owner:null, BATCH:1000,
   TABLES:['products','products_stage','meta','cats','rules','excs','imports','hvcOe','hvcParts','hvcCross','hvcPrices'],
@@ -28855,6 +28888,10 @@ const BrowserApplyCheckpoint = {
     this.owner=null;
   },
   async restore(owner) {
+    await BrowserImportIO.run(db,()=>this.restoreAtomic(owner),{label:'Восстановление контрольной точки',recovery:true});
+    this.owner=null;
+  },
+  async restoreAtomic(owner) {
     // Clearing the target and replaying the backup are ONE transaction. A
     // failed restore leaves both the pre-restore DB and the undo checkpoint.
     await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
@@ -28886,12 +28923,11 @@ const BrowserApplyCheckpoint = {
       }
       await db.meta.delete(this.KEY);await db.applyUndo.clear();
     });
-    this.owner=null;
   },
   async recover() {
-    const marker=await db.meta.get(this.KEY);if(!marker)return;
+    const marker=await BrowserImportIO.run(db,()=>db.meta.get(this.KEY),{label:'Проверка контрольной точки',recovery:true});if(!marker)return;
     const recover=async()=>{
-      const current=await db.meta.get(this.KEY);if(!current)return;
+      const current=await BrowserImportIO.run(db,()=>db.meta.get(this.KEY),{label:'Проверка контрольной точки',recovery:true});if(!current)return;
       if(!await askConfirm('Прерванный импорт','Восстановить каталог и реестры до незавершённого Apply? Закройте другие вкладки приложения. Исходные таблицы сохранятся.','Восстановить'))throw new Error('Запуск остановлен: требуется восстановление незавершённого импорта');
       await this.restore(current.value.owner);
     };
@@ -28915,14 +28951,20 @@ const BrowserCatalogLookup = {
       // can only be leftovers of a closed/crashed application.
       if(source)for(const old of await d.catalogRuns.where('source').equals(source).toArray())await this.clear(old.id);
       await d.catalogRuns.add({id:lookup.run,source,created:Date.now()});
-      for(let start=0;start<rows.length;start+=this.BATCH){
-        BrowserImportSources.check();const records=[];
-        for(let pos=start;pos<Math.min(start+this.BATCH,rows.length);pos++){
-          const row=rows[pos],a=normArticle(row.article);if(!a)continue;
-          records.push({kind:'pair',key:a+'|'+normArticle(row.brand),pos},{kind:'article',key:a,pos});
+      for(const kind of ['pair','article']){
+        async function* batches(){
+          for(let start=0;start<rows.length;start+=lookup.BATCH){
+            BrowserImportSources.check();const records=[];
+            for(let pos=start;pos<Math.min(start+lookup.BATCH,rows.length);pos++){
+              const row=rows[pos],a=normArticle(row.article);if(a)records.push({key:kind==='pair'?a+'|'+normArticle(row.brand):a,pos});
+            }
+            yield records;
+            if(typeof Prog!=='undefined')Prog.msg('Индекс каталога '+kind+': '+Math.min(start+lookup.BATCH,rows.length)+' из '+rows.length);
+          }
         }
-        await lookup.write(records,false);
-        if(typeof Prog!=='undefined')Prog.msg('Индекс каталога IndexedDB: '+Math.min(start+this.BATCH,rows.length)+' из '+rows.length);
+        await BrowserImportSources.buildKeyPages(lookup.run+':'+kind,batches(),(prior,item)=>{
+          if(!prior)return {...item,conflict:!!item.conflict};prior.conflict=true;return prior;
+        },text=>{if(typeof Prog!=='undefined')Prog.msg('Индекс каталога '+kind+': '+text);});
       }
       return lookup;
     }catch(e){try{await lookup.dispose();}catch(ignore){}throw e;}
@@ -28953,9 +28995,9 @@ const BrowserCatalogLookup = {
     }
     return out;
   },
-  async batch(input,article,brand) {
+  async batch(input,article,brand,articleFallback=true) {
     const pairs=[],articles=[];
-    for(const row of input){const a=article(row);if(a){articles.push(a);pairs.push(a+'|'+brand(row));}}
+    for(const row of input){const a=article(row);if(a){const b=brand(row);if(articleFallback||!b)articles.push(a);pairs.push(a+'|'+b);}}
     const pair=await this.query('pair',pairs),art=await this.query('article',articles);
     const idx=new Map(),idxArt=new Map(),duplicatePair=new Set(),duplicateArt=new Set();
     for(const [key,record] of pair){idx.set(key,this.rows[record.pos]);if(record.duplicate)duplicatePair.add(key);}
@@ -28971,16 +29013,23 @@ const BrowserCatalogLookup = {
   },
   async ensureOe() {
     if(this.oeReady)return;
-    let records=[];
-    for(let pos=0;pos<this.rows.length;pos++){
-      BrowserImportSources.check();const row=this.rows[pos];
-      for(const oe of codeList(mergeCodeLists(row.oe_numbers,row.oe_list))){
-        const key=HVC.normalizeKey(oe);if(!key)continue;
-        records.push({kind:'oe',key,pos});
-        if(records.length>=this.BATCH){await this.write(records,true);records=[];}
+    const lookup=this;
+    async function* batches(){
+      let records=[];
+      for(let pos=0;pos<lookup.rows.length;pos++){
+        BrowserImportSources.check();const row=lookup.rows[pos];
+        for(const oe of codeList(mergeCodeLists(row.oe_numbers,row.oe_list))){
+          const key=HVC.normalizeKey(oe);if(!key)continue;records.push({key,pos});
+          if(records.length>=lookup.BATCH){yield records;records=[];}
+        }
       }
+      if(records.length)yield records;
     }
-    if(records.length)await this.write(records,true);this.oeReady=true;
+    await BrowserImportSources.buildKeyPages(this.run+':oe',batches(),(prior,item)=>{
+      if(!prior)return {...item,conflict:!!item.conflict};
+      if(item.conflict||lookup.rows[prior.pos]!==lookup.rows[item.pos])prior.conflict=true;return prior;
+    },text=>{if(typeof Prog!=='undefined')Prog.msg('Индекс OE каталога: '+text);});
+    this.oeReady=true;
     if(typeof Prog!=='undefined')Prog.msg('Индекс OE каталога IndexedDB готов');
   },
   async oeBatch(input,maps) {
@@ -29021,9 +29070,10 @@ const BrowserCatalogLookup = {
     if(requests.length)await flush();return out;
   },
   async clear(run) {
+    for(const kind of ['pair','article','oe'])BrowserImportSources.invalidateKeyIndex(run+':'+kind);
     const d=BrowserImportSources.database();
     await d.transaction('rw',d.catalogKeys,d.keyPages,d.catalogRuns,async()=>{
-      for(const kind of ['pair','article','oe'])await d.keyPages.where('run').equals(run+':'+kind).delete();
+      for(const kind of ['pair','article','oe']){await d.keyPages.where('run').equals(run+':'+kind).delete();await d.keyPages.where('run').startsWith(run+':'+kind+':sort:').delete();}
       await d.catalogKeys.where('run').equals(run).delete();await d.catalogRuns.delete(run);
     });
   },
@@ -29061,6 +29111,9 @@ const BrowserImportSources = {
   },
   check() { if(typeof UCCancel!=='undefined')UCCancel.check(); },
   async page(id,start,count=this.BATCH) {
+    return BrowserImportIO.run(this.database(),()=>this.readPage(id,start,count),{label:'Чтение исходной таблицы'});
+  },
+  async readPage(id,start,count=this.BATCH) {
     const d=this.database(),meta=await d.sources.get(id),end=start+count;
     const invalid=()=>new Error('Источник IndexedDB повреждён или удалён; применение остановлено');
     if(!meta||!['ready','applied'].includes(meta.status)||!Number.isSafeInteger(meta.total)||meta.total<0||!Number.isSafeInteger(start)||!Number.isSafeInteger(count)||start<0||count<0||!Number.isSafeInteger(end)||end>meta.total)throw invalid();
@@ -29189,6 +29242,7 @@ const BrowserImportSources = {
     return {before,after};
   },
   async writeKeyPages(run,descriptions,highKey,merge=(prior,item)=>this.mergeKey(prior,item)) {
+    this.invalidateKeyIndex(run);
     const local=new Map();
     for(const item of descriptions)local.set(item.key,merge(local.get(item.key),item));
     const incoming=[...local.values()].sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
@@ -29214,13 +29268,131 @@ const BrowserImportSources = {
     });
     const maximum=incoming[incoming.length-1].key;return highKey===undefined||maximum>highKey?maximum:highKey;
   },
+  invalidateKeyIndex(run) {
+    this._keyDirectories?.delete(run);
+    if(this._keyPageCache)for(const [key,entry] of this._keyPageCache)if(entry.run===run){this._keyCacheBytes-=entry.bytes;this._keyPageCache.delete(key);}
+  },
+  async lookupBuiltKeyPages(run,keys,directory) {
+    const table=this.database().keyPages,groups=new Map(),out=new Map();
+    for(const key of new Set(keys)){
+      let lo=0,hi=directory.length;
+      while(lo<hi){const mid=(lo+hi)>>>1;if(directory[mid]<=key)lo=mid+1;else hi=mid;}
+      if(!lo)continue;const first=directory[lo-1];if(!groups.has(first))groups.set(first,[]);groups.get(first).push(key);
+    }
+    if(!this._keyPageCache){this._keyPageCache=new Map();this._keyCacheBytes=0;}
+    const entries=[...groups];
+    for(let off=0;off<entries.length;off+=32){
+      this.check();const batch=entries.slice(off,off+32),missing=[],pages=new Map();
+      for(const [first] of batch){
+        const id=JSON.stringify([run,first]),cached=this._keyPageCache.get(id);
+        if(cached){this._keyPageCache.delete(id);this._keyPageCache.set(id,cached);pages.set(first,cached.page);}else missing.push(first);
+      }
+      const loaded=await table.bulkGet(missing.map(first=>[run,first]));
+      loaded.forEach((page,i)=>{
+        this.validateKeyPage(page);if(page.first!==missing[i])throw new Error('Индекс ключей повреждён');
+        pages.set(page.first,page);
+        const bytes=page.records.reduce((n,r)=>n+96+2*(r.key.length+(r.brand?.length||0)+(r.signature?.length||0)),0);
+        if(bytes<=32*1048576){this._keyPageCache.set(JSON.stringify([run,page.first]),{run,page,bytes});this._keyCacheBytes+=bytes;}
+      });
+      while(this._keyPageCache.size>256||this._keyCacheBytes>32*1048576){const [id,entry]=this._keyPageCache.entries().next().value;this._keyPageCache.delete(id);this._keyCacheBytes-=entry.bytes;}
+      for(const [first,wanted] of batch){
+        const records=pages.get(first).records;
+        for(const key of wanted){let lo=0,hi=records.length;while(lo<hi){const mid=(lo+hi)>>>1;if(records[mid].key<key)lo=mid+1;else hi=mid;}if(records[lo]?.key===key)out.set(key,records[lo]);}
+      }
+    }
+    return out;
+  },
+  async buildKeyPages(run,batches,merge=(prior,item)=>this.mergeKey(prior,item),progress=()=>{}) {
+    // External merge sort: bounded 16-way page buffers, never random insertion
+    // per input key and never a million-entry Map. Existing page format stays.
+    this.invalidateKeyIndex(run);
+    const table=this.database().keyPages,temporary=new Set();let sequence=0;
+    const nextRun=()=>{const id=run+':sort:'+(sequence++);temporary.add(id);return id;};
+    const compact=items=>{
+      const local=new Map();for(const item of items)local.set(item.key,merge(local.get(item.key),item));
+      return [...local.values()].sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
+    };
+    const stream=id=>({id,last:undefined,records:[],pos:0,done:false});
+    const advance=async state=>{
+      if(state.pos<state.records.length||state.done)return;
+      this.check();
+      const page=await table.where('[run+first]').between(state.last===undefined?[state.id]:[state.id,state.last],[state.id,Dexie.maxKey],state.last===undefined,true).first();
+      if(!page){state.done=true;state.records=[];return;}
+      this.validateKeyPage(page);
+      if(state.lastKey!==undefined&&state.lastKey>=page.first)throw new Error('Страницы индекса перекрываются');
+      state.last=page.first;state.lastKey=page.records[page.records.length-1].key;state.records=page.records;state.pos=0;
+    };
+    const combine=async(ids,destination)=>{
+      const states=ids.map(stream);await Promise.all(states.map(advance));
+      let records=[],pages=[],pending=null,emitted=0;
+      const flush=async()=>{if(pages.length){this.check();await table.bulkAdd(pages);pages=[];}};
+      const emit=async item=>{
+        records.push(item);if(records.length===this.BATCH){pages.push({run:destination,first:records[0].key,records});records=[];}
+        if(pages.length>=8)await flush();
+      };
+      for(;;){
+        this.check();let selected=null;
+        // Stable tie order retains the first source/catalog representative.
+        for(const state of states)if(!state.done&&(!selected||state.records[state.pos].key<selected.records[selected.pos].key))selected=state;
+        if(!selected)break;
+        const item=selected.records[selected.pos++];
+        if(pending&&pending.key!==item.key){await emit(pending);pending=null;}
+        pending=merge(pending,item);await advance(selected);
+        if(++emitted%16000===0)progress('слияние индекса: '+emitted+' ключей текущей группы');
+      }
+      if(pending)await emit(pending);
+      if(records.length)pages.push({run:destination,first:records[0].key,records});
+      await flush();
+    };
+    try{
+      let runs=[];
+      for await(const batch of batches){
+        this.check();
+        for(let off=0;off<batch.length;off+=this.BATCH){
+          const records=compact(batch.slice(off,off+this.BATCH));if(!records.length)continue;
+          const id=nextRun();runs.push(id);await table.add({run:id,first:records[0].key,records});
+        }
+      }
+      let pass=0;
+      while(runs.length){
+        const next=[];progress('слияние индекса: проход '+(++pass)+', серий '+runs.length);
+        for(let off=0;off<runs.length;off+=16){
+          const group=runs.slice(off,off+16),destination=runs.length<=16?run:nextRun();
+          await combine(group,destination);next.push(destination);
+          for(const id of group){await table.where('run').equals(id).delete();temporary.delete(id);}
+        }
+        if(runs.length<=16)break;runs=next;
+      }
+      const directory=(await table.where('run').equals(run).primaryKeys()).map(key=>key[1]);
+      if(!this._keyDirectories)this._keyDirectories=new Map();this._keyDirectories.set(run,directory);
+      while(this._keyDirectories.size>8){const oldest=this._keyDirectories.keys().next().value;this.invalidateKeyIndex(oldest);}
+    }catch(error){this.invalidateKeyIndex(run);await table.where('run').equals(run).delete();throw error;}
+    finally{for(const id of temporary)await table.where('run').equals(id).delete();}
+  },
   async lookupKeyPages(run,keys) {
+    return BrowserImportIO.run(this.database(),()=>this.readKeyPages(run,keys),{label:'Чтение индекса ключей'});
+  },
+  async readKeyPages(run,keys) {
+    const directory=this._keyDirectories?.get(run);
+    if(directory)return this.lookupBuiltKeyPages(run,keys,directory);
     const sorted=[...new Set(keys)].sort(),out=new Map();let offset=0;
+    const table=this.database().keyPages;
+    // Read up to 32 adjacent leaves at a time instead of two transactions
+    // for every scattered key. Payload memory is bounded independently of N.
     while(offset<sorted.length){
-      this.check();const {before,after}=await this.keyNeighbors(run,sorted[offset]);
-      const records=new Map(before?before.records.map(row=>[row.key,row]):[]);
-      do{const key=sorted[offset++],record=records.get(key);if(record)out.set(key,record);}
-      while(offset<sorted.length&&(!after||sorted[offset]<after.first));
+      this.check();const key=sorted[offset];
+      const before=await table.where('[run+first]').between([run],[run,key],true,true).last();
+      const pages=await table.where('[run+first]').between(before?[run,before.first]:[run],[run,Dexie.maxKey],true,true).limit(33).toArray();
+      const boundary=pages.length===33?pages[32].first:null;
+      let previous;
+      for(const page of pages){
+        this.validateKeyPage(page);
+        if(previous!==undefined&&previous>=page.first)throw new Error('Страницы индекса перекрываются');
+        previous=page.records[page.records.length-1].key;
+      }
+      const records=new Map(pages.slice(0,32).flatMap(p=>p.records.map(r=>[r.key,r])));
+      do{const k=sorted[offset++],record=records.get(k);if(record)out.set(k,record);}
+      while(offset<sorted.length&&(boundary===null||sorted[offset]<boundary));
     }
     return out;
   },
@@ -29229,17 +29401,29 @@ const BrowserImportSources = {
     if(fingerprint){
       await this.source(id);
       const cached=(await d.runs.where('source').equals(id).toArray()).find(r=>r.complete&&r.fingerprint===fingerprint);
-      if(cached){this.check();return cached.id;}
+      if(cached){
+        this.check();
+        if(cached.storage==='key-pages-v1'&&!this._keyDirectories?.has(cached.id)){
+          const directory=(await d.keyPages.where('run').equals(cached.id).primaryKeys()).map(key=>key[1]);
+          if(!this._keyDirectories)this._keyDirectories=new Map();this._keyDirectories.set(cached.id,directory);
+          while(this._keyDirectories.size>8)this.invalidateKeyIndex(this._keyDirectories.keys().next().value);
+        }
+        return cached.id;
+      }
     }
     await d.runs.add({id:run,source:id,created:Date.now(),fingerprint:fingerprint||null,storage:'key-pages-v1'});
-    const s=await this.source(id);let highKey;
-    for(let off=0;off<s.total;off+=this.BATCH){
-      this.check();const rows=await this.page(id,off,Math.min(this.BATCH,s.total-off));
-      const descriptions=rows.map(describe).filter(Boolean);
-      highKey=await this.writeKeyPages(run,descriptions,highKey);
-      if(typeof Prog!=='undefined')Prog.msg('Проверка ключей всего источника: '+Math.min(off+this.BATCH,s.total)+' из '+s.total);
+    const s=await this.source(id),self=this;
+    async function* batches(){
+      for(let off=0;off<s.total;off+=self.BATCH){
+        self.check();const rows=await self.page(id,off,Math.min(self.BATCH,s.total-off));
+        yield rows.map(describe).filter(Boolean);
+        if(typeof Prog!=='undefined'){Prog.msg('Проверка ключей всего источника: '+Math.min(off+self.BATCH,s.total)+' из '+s.total);Prog.step(5+5*Math.min(off+self.BATCH,s.total)/Math.max(1,s.total));}
+      }
     }
-    await d.runs.update(run,{complete:true});
+    const started=performance.now();
+    await this.buildKeyPages(run,batches(),undefined,text=>{if(typeof Prog!=='undefined')Prog.msg('Проверка ключей: '+text);});
+    console.info('[UC] индекс ключей источника: '+s.total+' строк за '+Math.round(performance.now()-started)+' мс');
+    this.check();await d.runs.update(run,{complete:true});
     // Retain at most one reusable mapping index per source. Interrupted
     // indexes are never published as reusable.
     if(fingerprint)for(const old of await d.runs.where('source').equals(id).toArray())if(old.id!==run)await this.clearRun(old.id);
@@ -29259,11 +29443,14 @@ const BrowserImportSources = {
     return found;
   },
   async conflicts(run,rows,describe) {
+    return BrowserImportIO.run(this.database(),()=>this.readConflicts(run,rows,describe),{label:'Проверка конфликтов источника'});
+  },
+  async readConflicts(run,rows,describe) {
     const keys=[...new Set(rows.map(describe).filter(Boolean).map(x=>x.key))];
     const meta=await this.database().runs.get(run);
     if(!meta?.complete)throw new Error('Индекс ключей не готов');
     if(meta.storage==='key-pages-v1'){
-      const values=await this.lookupKeyPages(run,keys);
+      const values=await this.readKeyPages(run,keys);
       if(values.size!==keys.length)throw new Error('Индекс ключей неполон; применение остановлено');
       return new Set([...values.values()].filter(v=>v.conflict).map(v=>v.key));
     }
@@ -29272,8 +29459,8 @@ const BrowserImportSources = {
     return new Set(values.filter(v=>v?.conflict).map(v=>v.key));
   },
   async clearRun(run) {
-    if(!run)return;const d=this.database();
-    await d.transaction('rw',d.keys,d.keyPages,d.runs,async()=>{await d.keys.where('run').equals(run).delete();await d.keyPages.where('run').equals(run).delete();await d.runs.delete(run);});
+    if(!run)return;this.invalidateKeyIndex(run);const d=this.database();
+    await d.transaction('rw',d.keys,d.keyPages,d.runs,async()=>{await d.keys.where('run').equals(run).delete();await d.keyPages.where('run').equals(run).delete();await d.keyPages.where('run').startsWith(run+':sort:').delete();await d.runs.delete(run);});
   },
   async releaseRun(run) {
     const meta=await this.database().runs.get(run);
@@ -29285,11 +29472,11 @@ const BrowserImportSources = {
     const d=this.database();
     await d.transaction('rw',d.sources,d.rows,d.rowPages,d.keys,d.keyPages,d.runs,d.catalogKeys,d.catalogRuns,async()=>{
       for(const run of await d.catalogRuns.where('source').equals(id).toArray()){
-        for(const kind of ['pair','article','oe'])await d.keyPages.where('run').equals(run.id+':'+kind).delete();
+        for(const kind of ['pair','article','oe']){this.invalidateKeyIndex(run.id+':'+kind);await d.keyPages.where('run').equals(run.id+':'+kind).delete();await d.keyPages.where('run').startsWith(run.id+':'+kind+':sort:').delete();}
         await d.catalogKeys.where('run').equals(run.id).delete();await d.catalogRuns.delete(run.id);
       }
       for(const run of await d.runs.where('source').equals(id).toArray()){
-        await d.keys.where('run').equals(run.id).delete();await d.keyPages.where('run').equals(run.id).delete();await d.runs.delete(run.id);
+        this.invalidateKeyIndex(run.id);await d.keys.where('run').equals(run.id).delete();await d.keyPages.where('run').equals(run.id).delete();await d.keyPages.where('run').startsWith(run.id+':sort:').delete();await d.runs.delete(run.id);
       }
       await d.rows.where('source').equals(id).delete();await d.rowPages.where('source').equals(id).delete();await d.sources.delete(id);
     });
@@ -29559,9 +29746,22 @@ const Import = {
     return BrowserImportSources.exclusive(()=>withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
       if(sourceId&&PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
       if(sourceId)BrowserImportSources.active.add(sourceId);
+      /* v12.9.46: тайминги этапов импорта. «Долго грузит» больше не загадка:
+         итог печатается в консоль и коротко в финальном тосте. */
+      const _tMark = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      const _tImportStart=_tMark();
+      let _tStage = _tImportStart;
+      const _stageTimes = {};
+      const _mark = name => {
+        const t = _tMark(), ms = Math.round(t - _tStage); _tStage = t;
+        if (ms < 0) return;
+        _stageTimes[name] = (_stageTimes[name] || 0) + ms;
+        if (ms >= 700) console.info('[UC] импорт · ' + name + ': ' + fmt(ms) + ' мс');
+      };
       // Do not mutate the catalog when boot has already made persistence impossible.
       if(S._bootReady!==true||S._bootError)throw new Error('Импорт не начат: '+storageErrorText(S._bootError||'Хранилище ещё не готово. Дождитесь завершения запуска.'));
       if(PyEngine.processingMode()==='browser')checkpoint=await BrowserApplyCheckpoint.begin();
+      _mark('контрольная точка');
       const movedToCost = this.applyPriceIsCost();
       if (movedToCost) Prog.msg('«Цена» из файла записана в себестоимость (закупка поставщика): ' + movedToCost);
       const { map, headers, body } = S.pending;
@@ -29682,7 +29882,9 @@ const Import = {
       // Detect collisions in the whole file first: do not import the first variant
       // before discovering another literal with the same normalized key.
       const sourceVariants=new Map();let sourceConflicts=new Set();
-      const importDataSignature=r=>JSON.stringify(mapped.map(cm=>{
+      const signatureFields=mapped.filter(cm=>cm.target&&!['article','brand','oe_numbers','oe_list','oe','applicability'].includes(cm.target)&&STD.some(s=>s.k===cm.target));
+      const needsSourceIndex=signatureFields.length>0||(keyMode!=='article+brand'&&!!brandMap);
+      const importDataSignature=r=>JSON.stringify(signatureFields.map(cm=>{
         if(cm.target==='article'||cm.target==='brand')return '';
         /* v12.9.61: OE-номера и применимость — поля-накопители. В файле кроссов
            одна связка Артикул+Бренд повторяется на каждый OE (в среднем 5 раз,
@@ -29700,9 +29902,10 @@ const Import = {
         const brand=normArticle(brandMap?r[brandMap.col]:'');
         return {key:keyMode==='article+brand'?a+'|'+brand:a,brand,signature:importDataSignature(r)};
       };
-      if(sourceId)collisionRun=await BrowserImportSources.prepareKeys(sourceId,collisionRun,describeSource,
-        JSON.stringify({version:1,keyMode,headers,mapped:mapped.map(cm=>({col:cm.col,target:cm.target,virtual:cm.m.virtual,def:cm.m.def})),standard:STD.map(x=>x.k)}));
-      else       for(const r of body) {
+      _mark('индекс каталога');
+      if(sourceId&&needsSourceIndex)collisionRun=await BrowserImportSources.prepareKeys(sourceId,collisionRun,describeSource,
+        JSON.stringify({version:2,keyMode,headers,mapped:mapped.map(cm=>({col:cm.col,target:cm.target,virtual:cm.m.virtual,def:cm.m.def})),standard:STD.map(x=>x.k)}));
+      else if(!sourceId)for(const r of body) {
         const raw=artMap && r[artMap.col], a=normArticle(raw);if(!a)continue;
         const rawBrand=brandMap ? r[brandMap.col] : '', b=normArticle(rawBrand);
         const k=keyMode==='article+brand' ? a+'|'+b : a;
@@ -29719,6 +29922,8 @@ const Import = {
         }
       }
       let sourceCollision=0; const sourceCollisionExamples=[];
+      if(sourceId&&!needsSourceIndex){collisionRun=null;console.info('[UC] индекс конфликтов не нужен: только накопительные/пользовательские поля, бренд включён в ключ или отсутствует');}
+      _mark('проверка ключей источника');
       const CHUNK = 4000; // чанк построчной обработки — не блокирует вкладку на больших файлах
       const changedRows = new WeakSet();   /* membership for the partial pipeline */
       S._relatedEnriched = 0;
@@ -29761,22 +29966,12 @@ const Import = {
         }
         if (vals.length < 20) continue;
         let consec = 0;
-        for (let i = 1; i < vals.length; i++) { const d = vals[i] - vals[i - 1]; if (d >= 0 && d <= 2) consec++; }
+        for (let i = 1; i < vals.length; i++) { const d = vals[i] - vals[i - 1]; if (d > 0 && d <= 2) consec++; }
         if (consec / (vals.length - 1) >= 0.95 && (vals[vals.length - 1] - vals[0]) <= vals.length * 2) seqPriceCols.add(col);
       }
       const datesBefore = HVC.datesFixed;
       const importSource = { file: S.pending.file, date: nowISO() };
-      /* v12.9.46: тайминги этапов импорта. «Долго грузит» больше не загадка:
-         итог печатается в консоль и коротко в финальном тосте. */
-      const _tMark = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
-      let _tStage = _tMark();
-      const _stageTimes = {};
-      const _mark = name => {
-        const t = _tMark(), ms = Math.round(t - _tStage); _tStage = t;
-        if (ms < 0) return;
-        _stageTimes[name] = (_stageTimes[name] || 0) + ms;
-        if (ms >= 700) console.info('[UC] импорт · ' + name + ': ' + fmt(ms) + ' мс');
-      };
+      _mark('подготовка обработки строк');
       for (let start = 0; start < body.length; start += CHUNK) {
         const end = Math.min(start + CHUNK, body.length);
         if (prog) prog(`импорт строк ${fmt(start + 1)}–${fmt(end)} из ${fmt(body.length)}`);
@@ -29785,9 +29980,9 @@ const Import = {
         inputBatch=sourceId?await BrowserImportSources.page(sourceId,start,end-start):body.slice(start,end);
         if(catalogLookup){
           ({idx,idxArt,duplicatePair,duplicateArt}=await catalogLookup.batch(inputBatch,
-            r=>normArticle(articleText(artMap&&r[artMap.col])),r=>normArticle(brandMap?r[brandMap.col]:'')));
+            r=>normArticle(articleText(artMap&&r[artMap.col])),r=>normArticle(brandMap?r[brandMap.col]:''),keyMode!=='article+brand'));
         }
-        if(sourceId)sourceConflicts=await BrowserImportSources.conflicts(collisionRun,inputBatch,describeSource);
+        if(sourceId&&needsSourceIndex)sourceConflicts=await BrowserImportSources.conflicts(collisionRun,inputBatch,describeSource);
         for (let ri = start; ri < end; ri++) {
           const r = inputBatch[ri-start];
           const rawArtCell = artMap && r[artMap.col] != null ? r[artMap.col] : '';
@@ -30300,7 +30495,7 @@ const Import = {
       Import._priceFileDone = true;
       $('#mImport').classList.remove('on');
       /* Итог по времени: видно, какой этап «съел» минуты. */
-      const _stageTotal = Math.round(Object.values(_stageTimes).reduce((a, b) => a + b, 0));
+      const _stageTotal = Math.round(_tMark()-_tImportStart);
       const _stageText = Object.entries(_stageTimes).filter(([, ms]) => ms >= 500)
         .sort((a, b) => b[1] - a[1])
         .map(([k, ms]) => k + ' ' + (ms >= 1000 ? (ms / 1000).toFixed(1).replace('.', ',') + ' с' : Math.round(ms) + ' мс'))
@@ -30308,9 +30503,9 @@ const Import = {
       console.info('[UC] импорт · профиль дельты: изменено строк ' + fmt(changedTouched) + ' из каталога ' + fmt(S.rows.length) +
         ' (' + (S.rows.length ? Math.round(1000 * changedTouched / S.rows.length) / 10 : 0) + '%)' + (dedup ? ' · объединено дублей ' + fmt(dedup) : '') + ' · новых SKU ' + fmt(added));
       console.info('[UC] импорт: ' + fmt(_stageTotal) + ' мс всего' + (_stageText ? ' · ' + _stageText : '') +
-        ' · кэш ' + Math.round(performance.memory ? performance.memory.usedJSHeapSize / 1048576 : 0) + ' МБ' +
+        ' · JS heap≈ ' + (performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576)+' МБ (оценка браузера, не память процесса)' : 'недоступен') +
         (performance.memory && performance.memory.jsHeapSizeLimit ? ' (' + Math.round(100 * performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit) + '%)' : '') +
-        ' · на SKU ' + Math.round((performance.memory ? performance.memory.usedJSHeapSize : 0) / Math.max(1, S.rows.length) / 1024) + ' КБ');
+        (performance.memory ? ' · JS на SKU≈ ' + Math.round(performance.memory.usedJSHeapSize / Math.max(1, S.rows.length) / 1024) + ' КБ' : ''));
       Toast[S._cacheWriteError || S._volatileStorage ? 'warn' : 'ok'](S._cacheWriteError || S._volatileStorage ? 'Импорт в памяти — сохранение не завершено' : 'Импорт завершён', `новых ${fmt(added)} · обновлено ${fmt(updated)} · пропущено ${fmt(skipped)} · колонок ${enabled.length}` +
         (mergedByArticle ? ` · сопоставлено по артикулу (без бренда в файле): ${fmt(mergedByArticle)}` : '') +
         (matchedByOeAnalog ? ` · сопоставлено по OE прайса: ${fmt(matchedByOeAnalog)}` : '') +
@@ -30334,7 +30529,8 @@ const Import = {
           Toast.warn('Импорт отменён','Каталог и реестры восстановлены. Страница будет перезагружена; исходник остаётся в таблицах источников.');
           location.reload();
         }catch(recoveryError){S._bootError=recoveryError;
-          throw new Error('Импорт прерван. Автооткат не завершён: '+storageErrorText(recoveryError)+'. Не продолжайте работу; перезагрузите страницу для восстановления. Причина: '+storageErrorText(error));}
+          const failure=new Error('Импорт прерван. Автооткат не завершён: '+storageErrorText(recoveryError)+'. Не запускайте новый импорт. Повторите восстановление кнопкой в окне импорта либо откройте страницу заново для восстановления. Контрольная точка не удалена. Причина: '+storageErrorText(error));
+          failure._ucRollbackFailed=true;throw failure;}
       }
       throw error;
     }).finally(async()=>{if(catalogLookup)try{await catalogLookup.dispose();}catch(e){console.warn('[UC] очистка индекса каталога:',e);}if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.releaseRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}}));
@@ -47728,7 +47924,7 @@ function bindAll() {
     const button = $('#impApply'), status = $('#impApplyStatus');
     if (button.disabled) return;
     button.disabled = true;
-    $('#impConflictActions').hidden=true;
+    $('#impConflictActions').hidden=true;$('#impRestoreActions').hidden=true;
     console.info('[UC] импорт · нажата кнопка применения', {file:S.pending?.file,rows:S.pending?.body?.length});
     if (status) { status.hidden = false; status.textContent = 'Применение импорта… Дождитесь завершения; повторно выбирать файл не нужно.'; }
     try {
@@ -47740,17 +47936,33 @@ function bindAll() {
       console.info('[UC] импорт · результат применения: '+(stillOpen ? 'мастер остался открыт (проверка не пройдена)' : 'мастер закрыт'));
     } catch (err) {
       console.error('[UC] Import.apply error:', err);
+      $('#impRestoreActions').hidden=err?._ucRollbackFailed!==true;
       const conflict=err?.name==='CatalogConflictError';
       $('#impConflictActions').hidden=!conflict;
       const reason = storageErrorText(err);
       if (status) {
         status.hidden = false;
-        status.textContent = conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
+        status.textContent = err?._ucRollbackFailed?reason:conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
       }
       if (!err || !err._ucShown) Toast.err('Ошибка импорта', reason.slice(0, 400));
     } finally {
-      button.disabled = false;
+      button.disabled = S._bootReady!==true||!!S._bootError;
     }
+  });
+  on('#impRestoreRetry','onclick',async()=>{
+    const button=$('#impRestoreRetry');if(button.disabled)return;button.disabled=true;
+    try{
+      await BrowserImportSources.exclusive(()=>withProgress('Восстановление импорта','Возвращаем каталог и реестры до Apply. Не закрывайте вкладку.',async()=>{
+        const cancel=$('#prCancel');if(cancel)cancel.style.display='none';
+        if(!BrowserApplyCheckpoint.owner)throw new Error('Нет контрольной точки этой вкладки. Откройте страницу заново для проверки сохранённой контрольной точки.');
+        S._bootReady=false;
+        if(typeof _persistQueue!=='undefined')await _persistQueue.catch(()=>{});
+        await BrowserApplyCheckpoint.restore(BrowserApplyCheckpoint.owner);
+        Toast.ok('Каталог восстановлен','Исходная таблица сохранена. Страница будет перезагружена.');
+        location.reload();
+      }));
+    }catch(error){S._bootError=error;Toast.err('Восстановление не завершено',storageErrorText(error)+'. Контрольная точка сохранена; не очищайте IndexedDB.');}
+    finally{button.disabled=false;}
   });
   on('#impConflictResume','onclick',()=>{try{ImportConflictRecovery.open();}catch(e){Toast.err('Продолжение импорта',storageErrorText(e));}});
   on('#impConflictExport','onclick',()=>{$('#mImport').classList.remove('on');UI.go('export');});

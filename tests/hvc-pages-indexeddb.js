@@ -37,6 +37,7 @@ const state=()=>JSON.stringify(names.map(name=>[name,[...H[name]].map(([k,v])=>[
  // Actual Apply undo also restores packed registries AND their format marker.
  const checkpointStart=h.indexOf('const BrowserApplyCheckpoint = {'),checkpointEnd=h.indexOf('/* Temporary target identity indexes:',checkpointStart);
  c.uid=()=> 'packed-undo';c.persistNow=()=>H.save();
+ vm.runInContext(h.slice(h.indexOf('const BrowserImportIO = {'),checkpointStart),c);
  vm.runInContext(h.slice(checkpointStart,checkpointEnd)+';this.C=BrowserApplyCheckpoint;',c);
  const owner=await c.C.begin();H.parts.get('A1234|BRAND').name='rollback this';assert(await H.save());
  await c.C.restore(owner);assert.equal(await H.load(),N);assert.equal(state(),loaded);assert.equal(await db.applyUndo.count(),0);
