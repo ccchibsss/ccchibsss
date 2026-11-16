@@ -24998,63 +24998,81 @@ const HVC = {
   },
   async load() {
     try {
-      const oe = await db.hvcOe.toArray(), pts = await db.hvcParts.toArray(), cr = await db.hvcCross.toArray(), pr = await db.hvcPrices.toArray();
-      HVC.oe.clear(); HVC.parts.clear(); HVC.cross.clear(); HVC.prices.clear(); HVC.ozonApplicability.clear();
-      HVC._identityCache=null;
-      HVC.byArt.clear(); HVC.byOe.clear(); HVC.bySku.clear(); HVC._agg.clear(); HVC._graph.clear();
-      const mergeRecord = (old, v) => {
-        const out = { ...(old || {}) };
-        for (const [k, val] of Object.entries(v || {})) {
-          if (k === 'ozon_conflict') { out[k] = !!out[k] || !!val; continue; }
-          const empty = val === '' || val === null || val === undefined || (typeof val === 'number' && val === 0);
-          if (!empty || !Object.prototype.hasOwnProperty.call(out, k)) out[k] = val;
+      // Build privately: a late read/normalization failure must not publish
+      // half a graph or erase a previously loaded registry.
+      const names=['oe','parts','cross','prices','byArt','byOe','bySku','ozonApplicability'];
+      const staged=Object.fromEntries(names.map(name=>[name,new Map()]));
+      let rules=HVC.rules,exclusions=HVC.exclusions,descTemplate=HVC.descTemplate;
+      const read=async(table,accept)=>{
+        let last;
+        for(;;){
+          const batch=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(1000).toArray();
+          if(!batch.length)break;last=batch[batch.length-1].id;
+          for(const row of batch)accept(row);
         }
-        return out;
       };
-      const canonicalArtKey = (raw, v) => {
-        const seg = String(raw || '').split('|');
-        const hasArt = v && (Object.prototype.hasOwnProperty.call(v, 'artikul') || Object.prototype.hasOwnProperty.call(v, 'article'));
-        const hasBrand = v && Object.prototype.hasOwnProperty.call(v, 'brand');
-        return HVC.keyOf({ article: hasArt ? (v.artikul || v.article || '') : (seg[0] || ''), brand: hasBrand ? v.brand : seg.slice(1).join('|') });
-      };
-      oe.forEach(r => {
-        const { oeNorm, ...v } = r, on = normArticle(oeNorm || v.oe); if (!on) return;
-        HVC.oe.set(on, mergeRecord(HVC.oe.get(on), v));
+      await db.transaction('r',db.hvcOe,db.hvcParts,db.hvcCross,db.hvcPrices,db.meta,async()=>{
+        if(typeof BrowserApplyCheckpoint!=='undefined')await BrowserApplyCheckpoint.assertWriter();
+        const mergeRecord = (old, v) => {
+          const out = { ...(old || {}) };
+          for (const [k, val] of Object.entries(v || {})) {
+            if (k === 'ozon_conflict') { out[k] = !!out[k] || !!val; continue; }
+            const empty = val === '' || val === null || val === undefined || (typeof val === 'number' && val === 0);
+            if (!empty || !Object.prototype.hasOwnProperty.call(out, k)) out[k] = val;
+          }
+          return out;
+        };
+        const canonicalArtKey = (raw, v) => {
+          const seg = String(raw || '').split('|');
+          const hasArt = v && (Object.prototype.hasOwnProperty.call(v, 'artikul') || Object.prototype.hasOwnProperty.call(v, 'article'));
+          const hasBrand = v && Object.prototype.hasOwnProperty.call(v, 'brand');
+          return HVC.keyOf({ article: hasArt ? (v.artikul || v.article || '') : (seg[0] || ''), brand: hasBrand ? v.brand : seg.slice(1).join('|') });
+        };
+        await read(db.hvcOe,r => {
+          const { oeNorm, ...v } = r, on = normArticle(oeNorm || v.oe); if (!on) return;
+          staged.oe.set(on, mergeRecord(staged.oe.get(on), v));
+        });
+        await read(db.hvcParts,r => {
+          const { key:rawKey, ...v } = r, key = canonicalArtKey(rawKey, v); if (!key || key === '|') return;
+          staged.parts.set(key, mergeRecord(staged.parts.get(key), v));
+          const sku = key.split('|')[0];
+          if (sku) { if (!staged.bySku.has(sku)) staged.bySku.set(sku, new Set()); staged.bySku.get(sku).add(key); }
+        });
+        await read(db.hvcPrices,r => {
+          const { key:rawKey, ...v } = r, key = canonicalArtKey(rawKey); if (!key || key === '|') return;
+          staged.prices.set(key, mergeRecord(staged.prices.get(key), v));
+        });
+        await read(db.hvcCross,r => {
+          /* Новая схема хранит oeNorm/artKey отдельно. Для старого кэша восстанавливаем:
+             первый сегмент — OE, остаток — artKey (артикул|бренд). */
+          const rawKey = String(r.key||''), legacy = rawKey.split('|'), hasSep = rawKey.includes('\u001F');
+          const on = normArticle(r.oeNorm || (hasSep ? rawKey.split('\u001F')[0] : legacy[0]));
+          const rawArt = r.artKey || (hasSep ? rawKey.split('\u001F').slice(1).join('\u001F') : legacy.slice(1).join('|'));
+          const artKey = canonicalArtKey(rawArt);
+          if (!on || !artKey || artKey === '|') return;
+          const ck = on + '\u001F' + artKey;
+          staged.cross.set(ck, { oeNorm:on, artKey });
+          if (!staged.byArt.has(artKey)) staged.byArt.set(artKey, new Set()); staged.byArt.get(artKey).add(on);
+          if (!staged.byOe.has(on)) staged.byOe.set(on, new Set()); staged.byOe.get(on).add(artKey);
+        });
+        const meta = await db.meta.get('hvcRules');
+        if (meta && meta.value) {
+          rules = meta.value.rules || rules;
+          if (Array.isArray(meta.value.exclusions)) exclusions = meta.value.exclusions;
+          if (typeof meta.value.descTemplate === 'string') descTemplate = meta.value.descTemplate;
+        }
+        const ozRef = await db.meta.get('ozonApplicability');
+        if (ozRef && Array.isArray(ozRef.value)) ozRef.value.forEach(pair => {
+          if (Array.isArray(pair) && pair.length >= 2) staged.ozonApplicability.set(pair[0], pair[1]);
+        });
       });
-      pts.forEach(r => {
-        const { key:rawKey, ...v } = r, key = canonicalArtKey(rawKey, v); if (!key || key === '|') return;
-        HVC.parts.set(key, mergeRecord(HVC.parts.get(key), v));
-        const sku = key.split('|')[0];
-        if (sku) { if (!HVC.bySku.has(sku)) HVC.bySku.set(sku, new Set()); HVC.bySku.get(sku).add(key); }
-      });
-      pr.forEach(r => {
-        const { key:rawKey, ...v } = r, key = canonicalArtKey(rawKey); if (!key || key === '|') return;
-        HVC.prices.set(key, mergeRecord(HVC.prices.get(key), v));
-      });
-      cr.forEach(r => {
-        /* Новая схема хранит oeNorm/artKey отдельно. Для старого кэша восстанавливаем:
-           первый сегмент — OE, остаток — artKey (артикул|бренд). */
-        const rawKey = String(r.key||''), legacy = rawKey.split('|'), hasSep = rawKey.includes('\u001F');
-        const on = normArticle(r.oeNorm || (hasSep ? rawKey.split('\u001F')[0] : legacy[0]));
-        const rawArt = r.artKey || (hasSep ? rawKey.split('\u001F').slice(1).join('\u001F') : legacy.slice(1).join('|'));
-        const artKey = canonicalArtKey(rawArt);
-        if (!on || !artKey || artKey === '|') return;
-        const ck = on + '\u001F' + artKey;
-        HVC.cross.set(ck, { oeNorm:on, artKey });
-        if (!HVC.byArt.has(artKey)) HVC.byArt.set(artKey, new Set()); HVC.byArt.get(artKey).add(on);
-        if (!HVC.byOe.has(on)) HVC.byOe.set(on, new Set()); HVC.byOe.get(on).add(artKey);
-      });
-      HVC._clearEnrichCaches();
-      const meta = await db.meta.get('hvcRules');
-      if (meta && meta.value) {
-        HVC.rules = meta.value.rules || HVC.rules;
-        if (Array.isArray(meta.value.exclusions)) HVC.exclusions = meta.value.exclusions;
-        if (typeof meta.value.descTemplate === 'string') HVC.descTemplate = meta.value.descTemplate;
+      // Synchronous publication preserves Map identities held by callers.
+      for(const name of names){
+        const destination=HVC[name];destination.clear();
+        for(const [key,value] of staged[name]){destination.set(key,value);staged[name].delete(key);}
       }
-      const ozRef = await db.meta.get('ozonApplicability');
-      if (ozRef && Array.isArray(ozRef.value)) ozRef.value.forEach(pair => {
-        if (Array.isArray(pair) && pair.length >= 2) HVC.ozonApplicability.set(pair[0], pair[1]);
-      });
+      HVC.rules=rules;HVC.exclusions=exclusions;HVC.descTemplate=descTemplate;
+      HVC._identityCache=null;HVC._agg.clear();HVC._graph.clear();HVC._clearEnrichCaches();
       HVC.ozonRevision++;
       if (typeof OzonCat !== 'undefined' && OzonCat.clearCache) OzonCat.clearCache();
       /* Не ingest'им весь S.rows при старте: это лишний полный проход по 200K+ строк.
