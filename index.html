@@ -24941,7 +24941,33 @@ const HVC = {
     try {
       await db.transaction('rw', db.hvcOe, db.hvcParts, db.hvcCross, db.hvcPrices, db.meta, async () => {
         await StorageCtl.assertCatalogFresh();
+        const storageRecord=await db.meta.get('hvcStorage');
+        const storage=HVC.storageFormats(storageRecord);
         const sync = async (table, source, make, pk) => {
+          if(storage[table.name]||source.size>=20000){
+            // Large registries use packed pages in the same atomic domain.
+            // Missing secondary keys on page wrappers are intentional: only
+            // the primary page ID is indexed; logical keys live in values.
+            const packed=!!storage[table.name];
+            if(!packed)await table.clear();
+            let page=0,values=[];
+            const flush=async()=>{
+              const row={id:++page,__ucHvcPage:'v1',values},old=packed?await table.get(page):null;
+              if(!old||!StorageCtl.same(row,old))await table.put(row);
+              values=[];
+            };
+            for(const [key,val] of source){
+              if(key===undefined||key===null||key==='')throw new Error('Пустой ключ в реестре Каталога V: запись остановлена.');
+              const row=make(key,val);
+              if(row[pk]!==key)throw new Error('Ключ записи реестра Каталога V не совпадает с индексом.');
+              values.push(row);if(values.length>=1000)await flush();
+            }
+            if(values.length)await flush();
+            await table.where(':id').above(page).delete();
+            storage[table.name]={format:'pages-v1',count:source.size,pageSize:1000};
+            return;
+          }
+
           /* oeNorm/key — уникальный ВТОРИЧНЫЙ индекс, а первичный ключ — ++id.
              Сопоставляем оба индекса, иначе bulkGet/Put создаст дубликаты или
              будет каждый раз переписывать весь реестр. */
@@ -24974,6 +25000,7 @@ const HVC = {
         await sync(db.hvcParts, HVC.parts, (key, v) => ({ key, ...v }), 'key');
         await sync(db.hvcCross, HVC.cross, (key, v) => ({ key, oeNorm:v.oeNorm, artKey:v.artKey }), 'key');
         await sync(db.hvcPrices, HVC.prices, (key, v) => ({ key, ...v }), 'key');
+        if(Object.keys(storage).length)await db.meta.put({key:'hvcStorage',value:storage});
         await db.meta.put({ key: 'hvcRules', value: { rules: HVC.rules, exclusions: HVC.exclusions, descTemplate: HVC.descTemplate } });
         await db.meta.put({ key: 'ozonApplicability', value: [...HVC.ozonApplicability.entries()] });
       });
@@ -24996,6 +25023,15 @@ const HVC = {
       StorageCtl.refresh(); return false;
     }
   },
+  storageFormats(record) {
+    const storage=record?record.value:{};
+    if(!storage||typeof storage!=='object'||Array.isArray(storage))throw new Error('Повреждён формат хранения реестров Каталога V');
+    const names=['hvcOe','hvcParts','hvcCross','hvcPrices'];
+    for(const [name,value] of Object.entries(storage)){
+      if(!names.includes(name)||!value||value.format!=='pages-v1'||value.pageSize!==1000||!Number.isSafeInteger(value.count)||value.count<0)throw new Error('Неизвестный или повреждённый формат реестра Каталога V');
+    }
+    return {...storage};
+  },
   async load() {
     try {
       // Build privately: a late read/normalization failure must not publish
@@ -25003,16 +25039,34 @@ const HVC = {
       const names=['oe','parts','cross','prices','byArt','byOe','bySku','ozonApplicability'];
       const staged=Object.fromEntries(names.map(name=>[name,new Map()]));
       let rules=HVC.rules,exclusions=HVC.exclusions,descTemplate=HVC.descTemplate;
+      let storage={};
       const read=async(table,accept)=>{
+        const format=storage[table.name];
+        if(format){
+          const count=format.count,pages=Math.ceil(count/1000);
+          if(await table.count()!==pages)throw new Error('Неполный реестр Каталога V: '+table.name);
+          const pk=table.name==='hvcOe'?'oeNorm':'key',seen=new Set();
+          for(let page=1;page<=pages;page++){
+            const row=await table.get(page),length=Math.min(1000,count-(page-1)*1000);
+            if(!row||row.__ucHvcPage!=='v1'||!Array.isArray(row.values)||row.values.length!==length)throw new Error('Повреждена страница реестра Каталога V: '+table.name);
+            for(const value of row.values){
+              const key=value&&value[pk];
+              if(typeof key!=='string'||!key||seen.has(key))throw new Error('Повреждён ключ страницы реестра Каталога V: '+table.name);
+              seen.add(key);accept(value);
+            }
+          }
+          return;
+        }
         let last;
         for(;;){
           const batch=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(1000).toArray();
           if(!batch.length)break;last=batch[batch.length-1].id;
-          for(const row of batch)accept(row);
+          for(const row of batch){if(row.__ucHvcPage==='v1')throw new Error('Отсутствует формат страниц реестра Каталога V: '+table.name);accept(row);}
         }
       };
       await db.transaction('r',db.hvcOe,db.hvcParts,db.hvcCross,db.hvcPrices,db.meta,async()=>{
         if(typeof BrowserApplyCheckpoint!=='undefined')await BrowserApplyCheckpoint.assertWriter();
+        storage=HVC.storageFormats(await db.meta.get('hvcStorage'));
         const mergeRecord = (old, v) => {
           const out = { ...(old || {}) };
           for (const [k, val] of Object.entries(v || {})) {

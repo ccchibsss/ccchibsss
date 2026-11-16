@@ -78,11 +78,21 @@ const html=fs.readFileSync(__dirname+'/../index.html');
    for(const run of targetRuns)for(const kind of ['pair','article','oe'])if(await BrowserImportSources.database().keyPages.where('run').equals(run+':'+kind).count())throw Error('paged target index leaked');
    if(await db.applyUndo.count())throw Error('undo backup leaked');
    const registrySizes=['oe','parts','cross','prices'].map(key=>HVC[key].size),registryRefs=['oe','parts','cross','prices'].map(key=>HVC[key]);
+   db.close();await db.open();
    const reloaded=await HVC.load();
    if(S._hvcLoadError||reloaded!==registrySizes[1]||['oe','parts','cross','prices'].some((key,i)=>HVC[key].size!==registrySizes[i]||HVC[key]!==registryRefs[i]))throw Error('HVC reload changed registry contents/identity');
    if(!HVC.byArt.get(HVC.keyOf(S.rows[n-1]))?.has('OE'+(n-1)))throw Error('HVC reload lost last OE link');
+   for(let i=0;i<n;i++){
+    const row=S.rows[i],article='A'+String(i).padStart(8,'0'),oe='OE'+i;
+    if(row.article!==article||row.brand!=='Brand'||row.cost!==12.5||row.oe_numbers!==oe||!HVC.byArt.get(HVC.keyOf(row))?.has(oe)||!HVC.oe.has(oe))throw Error('catalog/HVC mismatch at '+i);
+   }
+   const hvcPageCounts={},hvcStorage=(await db.meta.get('hvcStorage'))?.value||{};
+   for(const [key,table] of [['oe','hvcOe'],['parts','hvcParts'],['cross','hvcCross'],['prices','hvcPrices']])if(HVC[key].size>=20000){
+    if(hvcStorage[table]?.format!=='pages-v1'||hvcStorage[table]?.count!==HVC[key].size)throw Error('large HVC registry not packed');
+    hvcPageCounts[table]=await db[table].count();if(hvcPageCounts[table]!==Math.ceil(HVC[key].size/1000))throw Error('HVC page count mismatch');
+   }
    await Import.read({name:'oe.csv'},oeSource);if(S.pending.body.length!==n||Object.keys(S.pending.body).length>202)throw Error('saved mapping preview lost bounds');
-   return {hvcReloaded:true,phases,verifiedBaselines,rows:S.rows.length,sources:[(await BrowserImportSources.source(priceSource)).total,(await BrowserImportSources.source(oeSource)).total],last:S.rows[n-1].article,oe:S.rows[n-1].oe_numbers,economicsPending:S._econPending,stamps,heap:performance.memory&&performance.memory.usedJSHeapSize};
+   return {hvcReloaded:true,verifiedCatalogRows:n,hvcPageCounts,phases,verifiedBaselines,rows:S.rows.length,sources:[(await BrowserImportSources.source(priceSource)).total,(await BrowserImportSources.source(oeSource)).total],last:S.rows[n-1].article,oe:S.rows[n-1].oe_numbers,economicsPending:S._econPending,stamps,heap:performance.memory&&performance.memory.usedJSHeapSize};
   },{n:Number(process.env.E2E_ROWS||1000),stageOnly:process.env.E2E_STAGE_ONLY==='1',preflight:process.env.E2E_PREFLIGHT==='1',targetIndex:process.env.E2E_TARGET_INDEX==='1'});
   const result=await Promise.race([evaluation,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('E2E deadline exceeded; run is incomplete')),Number(process.env.E2E_TIMEOUT_MS||180000))})]);
   if(!result.stageOnly){assert(result.economicsPending);assert(result.verifiedBaselines.some(x=>x.rows===Number(process.env.E2E_ROWS||1000)&&x.equal),'second Apply must verify the unchanged baseline');}assert.equal(errors.length,0,errors.join('\n'));console.log(JSON.stringify(result,null,2));

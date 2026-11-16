@@ -44,7 +44,7 @@ const x=h.indexOf('async function _persistNowImpl('),y=h.indexOf('\n}\n',x)+2;vm
  console.log('PASS verified baseline fails closed for duplicate/missing IDs, count changes, draft and stale revision');
  // Execute actual HVC.save against real transactional stores.
  const hs=h.indexOf('  async save() {',h.indexOf('const HVC = {')),he=h.indexOf('  async load() {',hs);
- vm.runInContext('this.realHVC={'+h.slice(hs,he)+'};Object.assign(HVC,{save:realHVC.save,oe:new Map(),parts:new Map(),cross:new Map(),prices:new Map(),ozonApplicability:new Map(),rules:[],exclusions:[],descTemplate:""});S._bootReady=true;for(let i=0;i<4003;i++){HVC.oe.set("OE"+i,{name:"N"+i});HVC.parts.set("A"+i+"|B",{name:"P"+i});}',c);
+ vm.runInContext('this.realHVC={'+h.slice(hs,he)+'};Object.assign(HVC,{save:realHVC.save,storageFormats:realHVC.storageFormats,oe:new Map(),parts:new Map(),cross:new Map(),prices:new Map(),ozonApplicability:new Map(),rules:[],exclusions:[],descTemplate:""});S._bootReady=true;for(let i=0;i<4003;i++){HVC.oe.set("OE"+i,{name:"N"+i});HVC.parts.set("A"+i+"|B",{name:"P"+i});}',c);
  for(const name of ['hvcOe','hvcParts','hvcCross','hvcPrices'])c.db[name].hook('reading',c.rehome);
  assert(await c.HVC.save());const stable=(await c.db.hvcOe.where('oeNorm').equals('OE1').first()).id;
  let writes=0;const count=()=>{writes++};for(const name of ['hvcOe','hvcParts','hvcCross','hvcPrices'])for(const event of ['creating','updating','deleting'])c.db[name].hook(event,count);
