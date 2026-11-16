@@ -19,7 +19,7 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  vm.runInContext("this.oldSourceDb=new Dexie('UC_BrowserImportSources');oldSourceDb.version(1).stores({sources:'id,status,created',rows:'[source+pos],source',keys:'[run+key],run',runs:'id,source,created'});",c);
  await c.oldSourceDb.open();await c.oldSourceDb.sources.add({id:'v1-source',status:'ready',created:0,total:2,headers:['a']});
  await c.oldSourceDb.rows.bulkAdd([{source:'v1-source',pos:0,cells:['00001']},{source:'v1-source',pos:1,cells:['00002']}]);c.oldSourceDb.close();
- assert.deepEqual(plain(await B.page('v1-source',0,2)),[['00001'],['00002']]);assert.equal(B.database().verno,3);await B.remove('v1-source');
+ assert.deepEqual(plain(await B.page('v1-source',0,2)),[['00001'],['00002']]);assert.equal(B.database().verno,4);await B.remove('v1-source');
 
  // Local guard, cross-tab Web Lock refusal, exception cleanup; never replay
  // the callback outside the lock after an operation failure.
@@ -53,7 +53,7 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  // Changing mapping/key mode builds a new index and does not reuse stale conflicts.
  const byPair=row=>({key:row[0]+'|'+row[1],brand:row[1],signature:''});
  await B.prepareKeys(first.id,'run2',byPair);assert.equal((await B.conflicts('run2',await B.page(first.id,0,1000),byPair)).size,0);
- await B.clearRun('run1');await B.clearRun('run2');assert.equal(await B.database().keys.count(),0);
+ await B.clearRun('run1');await B.clearRun('run2');assert.equal(await B.database().keys.count(),0);assert.equal(await B.database().keyPages.count(),0);
  // Standard-value conflicts across batches remain blocked, but OE/custom
  // columns accumulate and must not create the same conflict.
  let evidence='article;brand;value\n';for(let i=0;i<2001;i++)evidence+='X'+i+';B;first\n';evidence+='X0;B;second\n';

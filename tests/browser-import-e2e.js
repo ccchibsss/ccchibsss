@@ -11,11 +11,11 @@ const html=fs.readFileSync(__dirname+'/../index.html');
   const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')console.error('browser:',m.text());else if(process.env.E2E_PROGRESS&&m.type()==='info')console.log('browser:',m.text())});
   await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
   await page.goto('http://127.0.0.1:'+server.address().port);await page.waitForFunction(()=>S._bootReady||S._bootError,{},{timeout:60000});
-  const evaluation=page.evaluate(async ({n,stageOnly})=>{
+  const evaluation=page.evaluate(async ({n,stageOnly,preflight,targetIndex})=>{
    if(S._bootError)throw Error(String(S._bootError));
    S.rows=[];S.view=[];S.settings.autoStdDims=false;S.settings.autoOeAnomalyOnImport=false;S.settings.enrichRelatedOnImport=false;
    const related=document.querySelector('#impEnrichRelated');if(related)related.checked=false;
-   const stamps={},t=performance.now(),verifiedBaselines=[];const verify=StorageCtl.saveVerifiedMetadata;StorageCtl.saveVerifiedMetadata=async function(rows,...args){const equal=await verify.call(this,rows,...args);verifiedBaselines.push({rows:rows.length,equal});return equal};let diskBuilds=0;const create=BrowserCatalogLookup.create;BrowserCatalogLookup.create=async function(...args){diskBuilds++;return create.apply(this,args)};
+   const stamps={},t=performance.now(),verifiedBaselines=[];const verify=StorageCtl.saveVerifiedMetadata;StorageCtl.saveVerifiedMetadata=async function(rows,...args){const equal=await verify.call(this,rows,...args);verifiedBaselines.push({rows:rows.length,equal});return equal};let diskBuilds=0;const targetRuns=[];const create=BrowserCatalogLookup.create;BrowserCatalogLookup.create=async function(...args){diskBuilds++;const result=await create.apply(this,args);targetRuns.push(result.run);return result};
    const phases=[];
    const instrument=(object,key,label)=>{const original=object[key];object[key]=async function(...args){const t=performance.now();try{return await original.apply(this,args)}finally{phases.push({phase:label,ms:Math.round(performance.now()-t)});}};};
    instrument(BrowserApplyCheckpoint,'begin','checkpoint');instrument(BrowserApplyCheckpoint,'commit','checkpoint-commit');
@@ -40,7 +40,29 @@ const html=fs.readFileSync(__dirname+'/../index.html');
     }
     await Import.read({name:'price.csv'},priceSource);if(S.pending.sourceId!==priceSource||S.pending.body.length!==n||Object.keys(S.pending.body).length>202)throw Error('staged source reopen failed');
 
-    return {stageOnly:true,verifiedRows:n*2,reopened:true,sources:[(await BrowserImportSources.source(priceSource)).total,(await BrowserImportSources.source(oeSource)).total],pageCounts,phases,last:p[0][0],oe:o[0][2],catalogRows:S.rows.length,elapsedMs:Math.round(performance.now()-t)};
+    const keyPageCounts=[];let verifiedKeys=0;
+    if(preflight){
+     for(const [id,price] of [[priceSource,true],[oeSource,false]]){
+      const describe=row=>({key:normArticle(row[0])+'|'+normArticle(row[1]),brand:normArticle(row[1]),signature:JSON.stringify(['','',price?String(row[2]).trim():''])});
+      const run=await BrowserImportSources.prepareKeys(id,uid('preflight'),describe,'browser-million-key-pages');
+      keyPageCounts.push(await d.keyPages.where('run').equals(run).count());d.close();await d.open();
+      for(let off=0;off<n;off+=4000){const rows=await BrowserImportSources.page(id,off,Math.min(4000,n-off));if((await BrowserImportSources.conflicts(run,rows,describe)).size)throw Error('unexpected preflight conflict');verifiedKeys+=rows.length;}
+      await BrowserImportSources.clearRun(run);
+     }
+    }
+    let targetVerified=0,targetKeyPages=0;
+    if(targetIndex){
+     let targetRows=[];
+     for(let off=0;off<n;off+=4000)for(const row of await BrowserImportSources.page(priceSource,off,Math.min(4000,n-off)))targetRows.push({article:row[0],brand:row[1]});
+     const lookup=await BrowserCatalogLookup.create(targetRows,priceSource);
+     targetKeyPages=await d.keyPages.where('run').equals(lookup.run+':pair').count()+await d.keyPages.where('run').equals(lookup.run+':article').count();
+     for(let off=0;off<n;off+=4000){
+      const input=await BrowserImportSources.page(priceSource,off,Math.min(4000,n-off)),found=await lookup.batch(input,r=>normArticle(r[0]),r=>normArticle(r[1]));
+      for(let i=0;i<input.length;i++){const a=normArticle(input[i][0]),k=a+'|'+normArticle(input[i][1]);if(found.idx.get(k)!==targetRows[off+i]||found.idxArt.get(a)!==targetRows[off+i]||found.duplicatePair.has(k)||found.duplicateArt.has(a))throw Error('target index mismatch at '+(off+i));targetVerified++;}
+     }
+     await lookup.dispose();targetRows=[];if(await d.keyPages.count())throw Error('temporary paged index leaked');
+    }
+    return {stageOnly:true,targetVerified,targetKeyPages,preflight,verifiedKeys,keyPageCounts,verifiedRows:n*2,reopened:true,sources:[(await BrowserImportSources.source(priceSource)).total,(await BrowserImportSources.source(oeSource)).total],pageCounts,phases,last:p[0][0],oe:o[0][2],catalogRows:S.rows.length,elapsedMs:Math.round(performance.now()-t)};
    }
 
    const mapping=fields=>{S.pending.map=S.pending.headers.map((src,i)=>({src,field:fields[i],target:STD.find(x=>x.k===fields[i]).n,enabled:true,type:fields[i]==='cost'?'num':'text'}));Import.normalize();document.querySelector('#impMode').value='upsert';document.querySelector('#impKey').value='article+brand';};
@@ -53,10 +75,11 @@ const html=fs.readFileSync(__dirname+'/../index.html');
    if(diskBuilds!==1)throw Error('expected exactly one disk target index build, got '+diskBuilds);
    if(await db.meta.get(BrowserApplyCheckpoint.KEY))throw Error('undo marker remains');
    if(await BrowserImportSources.database().catalogKeys.count())throw Error('target index leaked');
+   for(const run of targetRuns)for(const kind of ['pair','article','oe'])if(await BrowserImportSources.database().keyPages.where('run').equals(run+':'+kind).count())throw Error('paged target index leaked');
    if(await db.applyUndo.count())throw Error('undo backup leaked');
    await Import.read({name:'oe.csv'},oeSource);if(S.pending.body.length!==n||Object.keys(S.pending.body).length>202)throw Error('saved mapping preview lost bounds');
    return {phases,verifiedBaselines,rows:S.rows.length,sources:[(await BrowserImportSources.source(priceSource)).total,(await BrowserImportSources.source(oeSource)).total],last:S.rows[n-1].article,oe:S.rows[n-1].oe_numbers,economicsPending:S._econPending,stamps,heap:performance.memory&&performance.memory.usedJSHeapSize};
-  },{n:Number(process.env.E2E_ROWS||1000),stageOnly:process.env.E2E_STAGE_ONLY==='1'});
+  },{n:Number(process.env.E2E_ROWS||1000),stageOnly:process.env.E2E_STAGE_ONLY==='1',preflight:process.env.E2E_PREFLIGHT==='1',targetIndex:process.env.E2E_TARGET_INDEX==='1'});
   const result=await Promise.race([evaluation,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('E2E deadline exceeded; run is incomplete')),Number(process.env.E2E_TIMEOUT_MS||180000))})]);
   if(!result.stageOnly){assert(result.economicsPending);assert(result.verifiedBaselines.some(x=>x.rows===Number(process.env.E2E_ROWS||1000)&&x.equal),'second Apply must verify the unchanged baseline');}assert.equal(errors.length,0,errors.join('\n'));console.log(JSON.stringify(result,null,2));
  }finally{clearTimeout(deadline);if(browser)await browser.close();await new Promise(r=>server.close(r));}

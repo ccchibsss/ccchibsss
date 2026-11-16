@@ -18,6 +18,7 @@ function legacy(rows){const idx=new Map(),idxArt=new Map(),duplicateArt=new Set(
  // Same reference twice is an identity duplicate but NOT an OE ambiguity.
  rows.push(rows[2]);c.S.rows=rows;
  const L=c.L,B=c.B,expected=legacy(rows),lookup=await L.create(rows,'source-A');
+ assert(await B.database().keyPages.count()>0);
  for(let off=0;off<rows.length;off+=713){
   const input=rows.slice(off,off+713).map(p=>[p.article,p.brand]);input.push(['MISSING',''],[rows[1].article,''],[rows[2].article,'Wrong']);
   const actual=await lookup.batch(input,r=>norm(r[0]),r=>norm(r[1]));
@@ -51,12 +52,18 @@ function legacy(rows){const idx=new Map(),idxArt=new Map(),duplicateArt=new Set(
  const querySparse=await lookup.query('article',sparseKeys);assert.equal(querySparse.size,new Set(sparseKeys).size);for(const key of querySparse.keys())assert(sparseKeys.includes(key));
  const mostlyMissing=Array.from({length:60},(_,i)=>'MISSING'+i).concat(denseKeys.slice(0,4));
  assert.equal((await lookup.query('article',mostlyMissing)).size,4);
- await lookup.dispose();assert.equal(await B.database().catalogKeys.count(),0);assert.equal(await B.database().catalogRuns.count(),0);
+ await lookup.dispose();assert.equal(await B.database().catalogKeys.count(),0);assert.equal(await B.database().keyPages.count(),0);assert.equal(await B.database().catalogRuns.count(),0);
+ // Reordered catalog positions exercise leaf insertion/splits rather than
+ // only the append path; first representatives must follow the new order.
+ const shuffled=rows.slice();let seed=77;for(let i=shuffled.length-1;i>0;i--){seed=(Math.imul(seed,1664525)+1013904223)>>>0;const j=seed%(i+1);[shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]];}
+ const reordered=await L.create(shuffled,'reordered'),ref=legacy(shuffled);
+ for(let off=0;off<shuffled.length;off+=900){const input=shuffled.slice(off,off+900).map(p=>[p.article,p.brand]),found=await reordered.batch(input,r=>norm(r[0]),r=>norm(r[1]));for(const r of input){const a=norm(r[0]),k=a+'|'+norm(r[1]);assert.strictEqual(found.idx.get(k),ref.idx.get(k));assert.equal(found.duplicatePair.has(k),ref.duplicatePair.has(k));assert.strictEqual(found.idxArt.get(a),ref.idxArt.get(a));assert.equal(found.duplicateArt.has(a),ref.duplicateArt.has(a));}}
+ await reordered.dispose();
  // Aborted builds cannot leak a usable partial index; next Apply cleans old
  // same-source runs (e.g. after tab crash), and removing source cleans all runs.
  cancel=true;await assert.rejects(()=>L.create(rows,'cancel-source'),/cancelled/);cancel=false;assert.equal(await B.database().catalogRuns.count(),0);
  const old=await L.create(rows.slice(0,8),'same-source'),newer=await L.create(rows.slice(0,9),'same-source');assert(!await B.database().catalogRuns.get(old.run));await newer.dispose();
- await B.database().sources.add({id:'remove-source',status:'ready',total:0});await L.create(rows.slice(0,5),'remove-source');await B.remove('remove-source');assert.equal(await B.database().catalogKeys.count(),0);assert.equal(await B.database().catalogRuns.count(),0);
+ await B.database().sources.add({id:'remove-source',status:'ready',total:0});await L.create(rows.slice(0,5),'remove-source');await B.remove('remove-source');assert.equal(await B.database().catalogKeys.count(),0);assert.equal(await B.database().catalogRuns.count(),0);assert.equal(await B.database().keyPages.count(),0);
  await B.database().delete();
  console.log('OK: disk target indexes vs RAM: exact/article duplicates, bounded batch maps, lazy OE snapshot, ambiguity, graph traversal, frozen row references, abort and stale-run cleanup; catalog rows',rows.length);
 })().catch(e=>{console.error(e);process.exitCode=1});

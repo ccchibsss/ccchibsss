@@ -28805,32 +28805,28 @@ const BrowserCatalogLookup = {
     }catch(e){try{await lookup.dispose();}catch(ignore){}throw e;}
   },
   async write(records,sameObject) {
-    const table=BrowserImportSources.database().catalogKeys,run=this.run;
-    // Bound transactions even when one SKU contains thousands of OE codes.
+    if(!this._highKeys)this._highKeys=new Map();
     for(let off=0;off<records.length;off+=this.BATCH){
-      BrowserImportSources.check();const chunk=records.slice(off,off+this.BATCH);
-      if(!this._highKeys)this._highKeys=new Map();
-      const ranges=new Map();for(const item of chunk){const r=ranges.get(item.kind);if(!r)ranges.set(item.kind,{min:item.key,max:item.key});else{if(item.key<r.min)r.min=item.key;if(item.key>r.max)r.max=item.key;}}
-      const fresh=[...ranges].every(([kind,r])=>!this._highKeys.has(kind)||r.min>this._highKeys.get(kind));
-      await BrowserImportSources.database().transaction('rw',table,async()=>{
-        const old=fresh?[]:await table.bulkGet(chunk.map(r=>[run,r.kind,r.key])),local=new Map();
-        for(let i=0;i<chunk.length;i++)if(old[i])local.set(JSON.stringify([chunk[i].kind,chunk[i].key]),old[i]);
-        for(const item of chunk){
-          const k=JSON.stringify([item.kind,item.key]),prior=local.get(k);
-          if(!prior)local.set(k,{run,...item,duplicate:0});
-          else if(!sameObject||this.rows[prior.pos]!==this.rows[item.pos])prior.duplicate=1;
-        }
-        await table.bulkPut([...local.values()]);
-      });
-      for(const [kind,r] of ranges)if(!this._highKeys.has(kind)||r.max>this._highKeys.get(kind))this._highKeys.set(kind,r.max);
+      BrowserImportSources.check();const grouped=new Map();
+      for(const item of records.slice(off,off+this.BATCH)){
+        if(!grouped.has(item.kind))grouped.set(item.kind,[]);grouped.get(item.kind).push({key:item.key,pos:item.pos});
+      }
+      for(const [kind,items] of grouped){
+        const merge=(prior,item)=>{
+          if(!prior)return {...item,conflict:!!item.conflict};
+          if(item.conflict||!sameObject||this.rows[prior.pos]!==this.rows[item.pos])prior.conflict=true;
+          return prior;
+        };
+        const high=await BrowserImportSources.writeKeyPages(this.run+':'+kind,items,this._highKeys.get(kind),merge);
+        this._highKeys.set(kind,high);
+      }
     }
   },
   async query(kind,keys) {
-    const unique=[...new Set(keys)],out=new Map(),table=BrowserImportSources.database().catalogKeys;
-    for(let off=0;off<unique.length;off+=this.BATCH){
-      BrowserImportSources.check();
-      const found=await BrowserImportSources.readKeyBatch(table,'[run+kind+key]',unique.slice(off,off+this.BATCH).map(key=>[this.run,kind,key]),r=>[r.run,r.kind,r.key]);
-      for(const record of found)if(record)out.set(record.key,record);
+    const found=await BrowserImportSources.lookupKeyPages(this.run+':'+kind,keys),out=new Map();
+    for(const [key,record] of found){
+      if(!Number.isSafeInteger(record.pos)||record.pos<0||record.pos>=this.rows.length)throw new Error('Индекс каталога повреждён');
+      out.set(key,{...record,duplicate:record.conflict});
     }
     return out;
   },
@@ -28903,7 +28899,8 @@ const BrowserCatalogLookup = {
   },
   async clear(run) {
     const d=BrowserImportSources.database();
-    await d.transaction('rw',d.catalogKeys,d.catalogRuns,async()=>{
+    await d.transaction('rw',d.catalogKeys,d.keyPages,d.catalogRuns,async()=>{
+      for(const kind of ['pair','article','oe'])await d.keyPages.where('run').equals(run+':'+kind).delete();
       await d.catalogKeys.where('run').equals(run).delete();await d.catalogRuns.delete(run);
     });
   },
@@ -28934,6 +28931,7 @@ const BrowserImportSources = {
       d.version(1).stores({sources:'id,status,created',rows:'[source+pos],source',keys:'[run+key],run',runs:'id,source,created'});
       d.version(2).stores({catalogKeys:'[run+kind+key],run',catalogRuns:'id,source,created'});
       d.version(3).stores({rowPages:'[source+start],source'});
+      d.version(4).stores({keyPages:'[run+first],run'});
       this._db=d;
     }
     return this._db;
@@ -29041,6 +29039,68 @@ const BrowserImportSources = {
       for(;;){this.check();const page=await ask({type:'next'});if(page.rows.length)await onBatch(page.rows);if(page.done)break;}
     }finally{clearInterval(cancelTimer);worker.terminate();URL.revokeObjectURL(url);}
   },
+  mergeKey(prior,item) {
+    if(!prior)return {...item,conflict:!!item.conflict};
+    if(item.conflict)prior.conflict=true;
+    if(prior.brand&&item.brand&&prior.brand!==item.brand)prior.conflict=true;
+    if(prior.signature!==item.signature)prior.conflict=true;
+    if(!prior.brand&&item.brand)prior.brand=item.brand;
+    return prior;
+  },
+  validateKeyPage(page) {
+    if(!page||!Array.isArray(page.records)||!page.records.length||page.records.length>this.BATCH||page.first!==page.records[0]?.key)throw new Error('Индекс ключей повреждён');
+    let previous;
+    for(const row of page.records){
+      if(!row||typeof row.key!=='string'||typeof row.conflict!=='boolean'||(previous!==undefined&&previous>=row.key))throw new Error('Индекс ключей повреждён');
+      previous=row.key;
+    }
+    return page;
+  },
+  async keyNeighbors(run,key) {
+    const table=this.database().keyPages;
+    const before=await table.where('[run+first]').between([run],[run,key],true,true).last();
+    if(before)this.validateKeyPage(before);
+    const after=await table.where('[run+first]').between(before?[run,before.first]:[run],[run,Dexie.maxKey],!before,true).first();
+    if(after)this.validateKeyPage(after);
+    if(before&&after&&before.records[before.records.length-1].key>=after.first)throw new Error('Страницы индекса перекрываются');
+    return {before,after};
+  },
+  async writeKeyPages(run,descriptions,highKey,merge=(prior,item)=>this.mergeKey(prior,item)) {
+    const local=new Map();
+    for(const item of descriptions)local.set(item.key,merge(local.get(item.key),item));
+    const incoming=[...local.values()].sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
+    if(!incoming.length)return highKey;
+    const d=this.database(),table=d.keyPages;
+    await d.transaction('rw',table,async()=>{
+      if(highKey===undefined||incoming[0].key>highKey){
+        // Strictly new upper interval; incoming is already unique and bounded.
+        await table.add({run,first:incoming[0].key,records:incoming});return;
+      }
+      let offset=0;
+      while(offset<incoming.length){
+        this.check();const {before,after}=await this.keyNeighbors(run,incoming[offset].key);
+        const merged=new Map(before?before.records.map(row=>[row.key,row]):[]);
+        do{const item=incoming[offset++];merged.set(item.key,merge(merged.get(item.key),item));}
+        while(offset<incoming.length&&(!after||incoming[offset].key<after.first));
+        const records=[...merged.values()].sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
+        if(before)await table.delete([run,before.first]);
+        const pages=[];
+        for(let start=0;start<records.length;start+=this.BATCH){const part=records.slice(start,start+this.BATCH);pages.push({run,first:part[0].key,records:part});}
+        await table.bulkAdd(pages);
+      }
+    });
+    const maximum=incoming[incoming.length-1].key;return highKey===undefined||maximum>highKey?maximum:highKey;
+  },
+  async lookupKeyPages(run,keys) {
+    const sorted=[...new Set(keys)].sort(),out=new Map();let offset=0;
+    while(offset<sorted.length){
+      this.check();const {before,after}=await this.keyNeighbors(run,sorted[offset]);
+      const records=new Map(before?before.records.map(row=>[row.key,row]):[]);
+      do{const key=sorted[offset++],record=records.get(key);if(record)out.set(key,record);}
+      while(offset<sorted.length&&(!after||sorted[offset]<after.first));
+    }
+    return out;
+  },
   async prepareKeys(id,run,describe,fingerprint) {
     const d=this.database();
     if(fingerprint){
@@ -29048,27 +29108,12 @@ const BrowserImportSources = {
       const cached=(await d.runs.where('source').equals(id).toArray()).find(r=>r.complete&&r.fingerprint===fingerprint);
       if(cached){this.check();return cached.id;}
     }
-    await d.runs.add({id:run,source:id,created:Date.now(),fingerprint:fingerprint||null});
+    await d.runs.add({id:run,source:id,created:Date.now(),fingerprint:fingerprint||null,storage:'key-pages-v1'});
     const s=await this.source(id);let highKey;
     for(let off=0;off<s.total;off+=this.BATCH){
       this.check();const rows=await this.page(id,off,Math.min(this.BATCH,s.total-off));
-      const descriptions=rows.map(describe).filter(Boolean),keys=[...new Set(descriptions.map(x=>x.key))];
-      await d.transaction('rw',d.keys,async()=>{
-        const fresh=highKey===undefined||keys.every(key=>key>highKey);
-        const existing=fresh?[]:await d.keys.bulkGet(keys.map(key=>[run,key])),local=new Map();
-        keys.forEach((key,i)=>{if(existing[i])local.set(key,existing[i]);});
-        for(const item of descriptions){
-          const prior=local.get(item.key);
-          if(!prior)local.set(item.key,{run,...item,conflict:false});
-          else{
-            if(prior.brand&&item.brand&&prior.brand!==item.brand)prior.conflict=true;
-            if(prior.signature!==item.signature)prior.conflict=true;
-            if(!prior.brand&&item.brand)prior.brand=item.brand;
-          }
-        }
-        await d.keys.bulkPut([...local.values()]);
-      });
-      for(const key of keys)if(highKey===undefined||key>highKey)highKey=key;
+      const descriptions=rows.map(describe).filter(Boolean);
+      highKey=await this.writeKeyPages(run,descriptions,highKey);
       if(typeof Prog!=='undefined')Prog.msg('Проверка ключей всего источника: '+Math.min(off+this.BATCH,s.total)+' из '+s.total);
     }
     await d.runs.update(run,{complete:true});
@@ -29092,12 +29137,20 @@ const BrowserImportSources = {
   },
   async conflicts(run,rows,describe) {
     const keys=[...new Set(rows.map(describe).filter(Boolean).map(x=>x.key))];
+    const meta=await this.database().runs.get(run);
+    if(!meta?.complete)throw new Error('Индекс ключей не готов');
+    if(meta.storage==='key-pages-v1'){
+      const values=await this.lookupKeyPages(run,keys);
+      if(values.size!==keys.length)throw new Error('Индекс ключей неполон; применение остановлено');
+      return new Set([...values.values()].filter(v=>v.conflict).map(v=>v.key));
+    }
+    if(meta.storage)throw new Error('Неизвестный формат индекса ключей');
     const values=await this.readKeyBatch(this.database().keys,'[run+key]',keys.map(key=>[run,key]),r=>[r.run,r.key]);
     return new Set(values.filter(v=>v?.conflict).map(v=>v.key));
   },
   async clearRun(run) {
     if(!run)return;const d=this.database();
-    await d.transaction('rw',d.keys,d.runs,async()=>{await d.keys.where('run').equals(run).delete();await d.runs.delete(run);});
+    await d.transaction('rw',d.keys,d.keyPages,d.runs,async()=>{await d.keys.where('run').equals(run).delete();await d.keyPages.where('run').equals(run).delete();await d.runs.delete(run);});
   },
   async releaseRun(run) {
     const meta=await this.database().runs.get(run);
@@ -29107,12 +29160,13 @@ const BrowserImportSources = {
   async _remove(id) {
     if(this.active.has(id))throw new Error('Источник сейчас применяется; дождитесь завершения');
     const d=this.database();
-    await d.transaction('rw',d.sources,d.rows,d.rowPages,d.keys,d.runs,d.catalogKeys,d.catalogRuns,async()=>{
+    await d.transaction('rw',d.sources,d.rows,d.rowPages,d.keys,d.keyPages,d.runs,d.catalogKeys,d.catalogRuns,async()=>{
       for(const run of await d.catalogRuns.where('source').equals(id).toArray()){
+        for(const kind of ['pair','article','oe'])await d.keyPages.where('run').equals(run.id+':'+kind).delete();
         await d.catalogKeys.where('run').equals(run.id).delete();await d.catalogRuns.delete(run.id);
       }
       for(const run of await d.runs.where('source').equals(id).toArray()){
-        await d.keys.where('run').equals(run.id).delete();await d.runs.delete(run.id);
+        await d.keys.where('run').equals(run.id).delete();await d.keyPages.where('run').equals(run.id).delete();await d.runs.delete(run.id);
       }
       await d.rows.where('source').equals(id).delete();await d.rowPages.where('source').equals(id).delete();await d.sources.delete(id);
     });
