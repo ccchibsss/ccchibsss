@@ -21,7 +21,7 @@ vm.runInContext(h.slice(start,end),c);
  c.S._bootError={inner:{message:'database boot failed'}};
  await assert.rejects(()=>c.persistImportOrThrow('Прайс не сохранён'),/database boot failed/);
  delete c.S._bootError;
- const apply=h.slice(h.indexOf("return withProgress('Применение импорта'"),h.indexOf('      const movedToCost',h.indexOf("return withProgress('Применение импорта'")));
+ const apply=h.slice(h.indexOf("return BrowserImportSources.exclusive(()=>withProgress('Применение импорта'"),h.indexOf('      const movedToCost',h.indexOf("return BrowserImportSources.exclusive(()=>withProgress('Применение импорта'")));
  assert(apply.includes('if(S._bootReady!==true||S._bootError)'));
  c.persistNow=async()=>{throw {message:{reason:'actual disk failure'}}};
  await assert.rejects(()=>c.persistImportOrThrow('Прайс не сохранён'),/actual disk failure/);

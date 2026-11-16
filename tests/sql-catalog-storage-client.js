@@ -1,6 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
 let mode='sql',writes=0,upload,revision='',fail=false;
-const ctx={S:{rows:[],settings:{},catalogVersion:1,_bootReady:true},_persistDirty:true,_persistPending:0,
+const ctx={BrowserImportSources:{exclusive:fn=>fn()},S:{rows:[],settings:{},catalogVersion:1,_bootReady:true},_persistDirty:true,_persistPending:0,
  lsGet:()=>mode,lsSet:(k,v)=>{mode=v},productVolumeIsExplicit:p=>p._volumeExplicit===true,
  codeFieldsToStr:()=>{},normalizeFormatSettings:()=>{},HVC:{load:async()=>{}},
  db:{meta:{get:async()=>null}},Toast:{warn:()=>{},err:()=>{},info:()=>{}},StorageCtl:{catalogToken:()=>'',withWriteLock:()=>{throw Error('SQL must not acquire IndexedDB lock')}},

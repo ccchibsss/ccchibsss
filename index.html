@@ -26871,6 +26871,9 @@ const PyEngine = {
     finally {control.disabled=false;this.renderProcessingMode();}
   },
   async toggleProcessingMode() {
+    return BrowserImportSources.exclusive(()=>this._toggleProcessingMode());
+  },
+  async _toggleProcessingMode() {
     if(S._bootError&&this.processingMode()==='sql'){
       if(await askConfirm('Открыть браузерный каталог','SQL-каталог не загружен. Открыть прежний браузерный каталог без переноса и перезаписи данных?','Открыть')){lsSet('uc.processingMode','browser');location.reload();}
       return;
@@ -28666,7 +28669,20 @@ const DiskImport = {
 
 /* Browser-only immutable input tables. Never used by SQL processing. */
 const BrowserImportSources = {
-  BATCH:1000, active:new Set(),
+  BATCH:1000, active:new Set(), busy:false,
+  async exclusive(task) {
+    if(this.busy)throw new Error('Идёт импорт, удаление источника или переключение режима. Дождитесь завершения.');
+    this.busy=true;
+    try{
+      const locks=typeof navigator!=='undefined'&&navigator.locks;
+      if(locks&&typeof locks.request==='function')return await locks.request('UC-import-mode-operation',{mode:'exclusive',ifAvailable:true},lock=>{
+        if(!lock)throw new Error('Операция импорта выполняется в другой вкладке');
+        return task();
+      });
+      // Local serialization still works in browsers without Web Locks.
+      return await task();
+    }finally{this.busy=false;}
+  },
   database() {
     if(!this._db){
       const d=new Dexie('UC_BrowserImportSources');
@@ -28742,7 +28758,7 @@ const BrowserImportSources = {
       await d.sources.put(s);return {...s,preview};
     }catch(e){
       this.active.delete(id);
-      try{await this.remove(id);}catch(cleanup){console.warn('[UC] очистка источника:',cleanup);}
+      try{await this._remove(id);}catch(cleanup){console.warn('[UC] очистка источника:',cleanup);}
       throw e;
     }finally{this.active.delete(id);}
   },
@@ -28759,8 +28775,14 @@ const BrowserImportSources = {
       for(;;){this.check();const page=await ask({type:'next'});if(page.rows.length)await onBatch(page.rows);if(page.done)break;}
     }finally{clearInterval(cancelTimer);worker.terminate();URL.revokeObjectURL(url);}
   },
-  async prepareKeys(id,run,describe) {
-    const d=this.database();await d.runs.add({id:run,source:id,created:Date.now()});
+  async prepareKeys(id,run,describe,fingerprint) {
+    const d=this.database();
+    if(fingerprint){
+      await this.source(id);
+      const cached=(await d.runs.where('source').equals(id).toArray()).find(r=>r.complete&&r.fingerprint===fingerprint);
+      if(cached){this.check();return cached.id;}
+    }
+    await d.runs.add({id:run,source:id,created:Date.now(),fingerprint:fingerprint||null});
     const s=await this.source(id);
     for(let off=0;off<s.total;off+=this.BATCH){
       this.check();const rows=await this.page(id,off,Math.min(this.BATCH,s.total-off));
@@ -28781,6 +28803,11 @@ const BrowserImportSources = {
       });
       if(typeof Prog!=='undefined')Prog.msg('Проверка ключей всего источника: '+Math.min(off+this.BATCH,s.total)+' из '+s.total);
     }
+    await d.runs.update(run,{complete:true});
+    // Retain at most one reusable mapping index per source. Interrupted
+    // indexes are never published as reusable.
+    if(fingerprint)for(const old of await d.runs.where('source').equals(id).toArray())if(old.id!==run)await this.clearRun(old.id);
+    return run;
   },
   async conflicts(run,rows,describe) {
     const keys=[...new Set(rows.map(describe).filter(Boolean).map(x=>x.key))];
@@ -28791,7 +28818,12 @@ const BrowserImportSources = {
     if(!run)return;const d=this.database();
     await d.transaction('rw',d.keys,d.runs,async()=>{await d.keys.where('run').equals(run).delete();await d.runs.delete(run);});
   },
-  async remove(id) {
+  async releaseRun(run) {
+    const meta=await this.database().runs.get(run);
+    if(!meta?.complete||!meta.fingerprint)await this.clearRun(run);
+  },
+  async remove(id) {return this.exclusive(()=>this._remove(id));},
+  async _remove(id) {
     if(this.active.has(id))throw new Error('Источник сейчас применяется; дождитесь завершения');
     const d=this.database();
     await d.transaction('rw',d.sources,d.rows,d.keys,d.runs,async()=>{
@@ -28844,7 +28876,7 @@ const Import = {
     Import.read(file);
   },
   async read(file, savedSourceId) {
-    await withProgress('Чтение файла', file.name, async () => {
+    return BrowserImportSources.exclusive(()=>withProgress('Чтение файла', file.name, async () => {
       Prog.step(35);
       let table = [],source=null;
       if(typeof savedSourceId!=='undefined'&&savedSourceId){
@@ -28898,7 +28930,7 @@ const Import = {
       $('#impFileName').innerHTML = `<i class="fa-solid fa-file-lines" style="color:var(--teal)"></i> ${esc(file.name)} · ${fmt(body.length)} строк · ${headers.length} колон${headers.length % 10 === 1 && headers.length % 100 !== 11 ? 'ка' : headers.length % 10 >= 2 && headers.length % 10 <= 4 && (headers.length % 100 < 10 || headers.length % 100 > 20) ? 'ки' : 'ок'}`;
       modal('#mImport');
       if (guess) Toast.info('Подобран профиль маппинга', '«' + guess.name + '» для файла, похошего на ' + (guess.file_pattern || '—'));
-    });
+    }));
   },
   guessProfile(name, headers) {
     return (S.mprof || []).find(p => {
@@ -29011,10 +29043,11 @@ const Import = {
     /* v11-аудит: artCol мог устареть после ручных правок маппинга — пересчитываем. */
     Import.normalize();
     if (S.pending.artCol === -1) { Toast.err('Не выбран артикул', 'В окне маппинга назначьте одну колонку как «Артикул» в списке «Стандартное поле»'); return; }
-    const sourceId=S.pending.sourceId,collisionRun=sourceId?uid('lookup'):null;
+    const sourceId=S.pending.sourceId;let collisionRun=sourceId?uid('lookup'):null;
     if(sourceId&&PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
-    if(sourceId){if(BrowserImportSources.active.has(sourceId))throw new Error('Источник уже применяется');BrowserImportSources.active.add(sourceId);}
-    return withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
+    return BrowserImportSources.exclusive(()=>withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
+      if(sourceId&&PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
+      if(sourceId)BrowserImportSources.active.add(sourceId);
       // Do not mutate the catalog when boot has already made persistence impossible.
       if(S._bootReady!==true||S._bootError)throw new Error('Импорт не начат: '+storageErrorText(S._bootError||'Хранилище ещё не готово. Дождитесь завершения запуска.'));
       const movedToCost = this.applyPriceIsCost();
@@ -29148,7 +29181,8 @@ const Import = {
         const brand=normArticle(brandMap?r[brandMap.col]:'');
         return {key:keyMode==='article+brand'?a+'|'+brand:a,brand,signature:importDataSignature(r)};
       };
-      if(sourceId)await BrowserImportSources.prepareKeys(sourceId,collisionRun,describeSource);
+      if(sourceId)collisionRun=await BrowserImportSources.prepareKeys(sourceId,collisionRun,describeSource,
+        JSON.stringify({version:1,keyMode,headers,mapped:mapped.map(cm=>({col:cm.col,target:cm.target,virtual:cm.m.virtual,def:cm.m.def})),standard:STD.map(x=>x.k)}));
       else       for(const r of body) {
         const raw=artMap && r[artMap.col], a=normArticle(raw);if(!a)continue;
         const rawBrand=brandMap ? r[brandMap.col] : '', b=normArticle(rawBrand);
@@ -29481,6 +29515,7 @@ const Import = {
             if (mergedAnalog !== (p.analog_list || '')) { p.analog_list = mergedAnalog; rowChanged = true; }
           }
           codeFieldsToStr(p);
+          const firstChange=rowChanged&&!changedRows.has(p);
           if (rowChanged) changedRows.add(p);
           if (!keepVisibility && visibilityTrigger && (num(p.price) <= 0 || num(p.stock) <= 0)) {
             if (p.visible !== false || p.visibleReason !== 'price_or_stock_zero') {
@@ -29489,7 +29524,7 @@ const Import = {
               if (typeof Goods !== 'undefined' && Goods.queue) Goods.queue('visibility', p.article, false);
             }
           }
-          if (rowChanged) touched.push(p);   /* v12.9.7-mem: обогащаем только изменённые */
+          if (firstChange) touched.push(p);   /* v12.9.7-mem: обогащаем только изменённые */
         }
         await Exp._yield();
       }
@@ -29533,7 +29568,10 @@ const Import = {
       if (rejectedDimensionCells) Toast.warn('Некорректные весогабариты пропущены', fmt(rejectedDimensionCells) + ' ячеек: прежние значения при наличии сохранены; затронутые SKU требуют проверки. Артикулы и причины — в разделе аномалий.');
       /* Схлопывание дублей, накопленных прошлыми загрузками (артикул+бренд) */
       if (prog) prog('проверка дублей по артикулу…');
-      const changedList = Array.from(new Set([...touched, ...visibilityUpdates, ...ambiguousProtected]));
+      const changedSet=new Set(touched);
+      for(const row of visibilityUpdates)changedSet.add(row);
+      for(const row of ambiguousProtected)changedSet.add(row);
+      const changedList=Array.from(changedSet);changedSet.clear();
       const changedTouched = changedList.length;
       /* v12.9.77: полный dedupe — один раз на новый массив каталога (загрузка,
          серверная замена); дальше дубли могут появиться только в связках,
@@ -29551,7 +29589,7 @@ const Import = {
       /* Каталог V: UPSERT в OE-реестр / кроссы / цены + обогащение габаритами и аналогами */
       if (!isPriceFile && touched.length) {
         if (prog) prog('Каталог V: обновление реестров…');
-        const touchedUnique = [...new Set(touched)];
+        const touchedUnique = touched.slice(); // already unique via changedRows
         const targets = enabled.map(m => m.target || '');
         /* Не допускать неподтверждённую аномалию из свежего импорта в
            реестр доноров до общего пересчёта и установки карантина. */
@@ -29755,7 +29793,7 @@ const Import = {
       if (!S.view.length && S.rows.length) {
         Toast.warn('Строки не видны в таблице', 'Все SKU отсеяны правилами-исключениями или фильтрами. Смотрите жёлтый баннер в разделе 2 и счётчик «исключено».');
       }
-    }).finally(async()=>{if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.clearRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}});
+    }).finally(async()=>{if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.releaseRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}}));
   },
   /* v12.9.50 · СВЯЗАННЫЕ СТРОКИ КАТАЛОГА.
      Файлы, загружаемые ПОСЛЕ источника (весогабариты, OE-кроссы, названия),

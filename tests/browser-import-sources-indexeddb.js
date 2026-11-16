@@ -10,11 +10,21 @@ const a=h.indexOf('const BrowserImportSources = {'),b=h.indexOf('const Import = 
 const B=c.B;
 const preStart=h.indexOf('      const sourceVariants=',h.indexOf('const Import = {')),preEnd=h.indexOf('      let sourceCollision=',preStart);
 c.normArticle=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-vm.runInContext('this.conflictParity=async(body,sourceId,collisionRun,keyMode,mapped,STD)=>{const artMap=mapped.find(x=>x.target==="article"),brandMap=mapped.find(x=>x.target==="brand");'+h.slice(preStart,preEnd)+';if(!sourceId)return [...sourceConflicts];const s=await BrowserImportSources.source(sourceId);const found=new Set();for(let off=0;off<s.total;off+=1000)for(const k of await BrowserImportSources.conflicts(collisionRun,await BrowserImportSources.page(sourceId,off,Math.min(1000,s.total-off)),describeSource))found.add(k);return [...found];};',c);
+vm.runInContext('this.conflictParity=async(body,sourceId,collisionRun,keyMode,mapped,STD)=>{const headers=[];const artMap=mapped.find(x=>x.target==="article"),brandMap=mapped.find(x=>x.target==="brand");'+h.slice(preStart,preEnd)+';if(!sourceId)return [...sourceConflicts];const s=await BrowserImportSources.source(sourceId);const found=new Set();for(let off=0;off<s.total;off+=1000)for(const k of await BrowserImportSources.conflicts(collisionRun,await BrowserImportSources.page(sourceId,off,Math.min(1000,s.total-off)),describeSource))found.add(k);return [...found];};',c);
 
 function file(name,text){const f=new Blob([text]);f.name=name;return f}
 const plain=v=>JSON.parse(JSON.stringify(v));
 (async()=>{
+ // Local guard, cross-tab Web Lock refusal, exception cleanup; never replay
+ // the callback outside the lock after an operation failure.
+ let unlock,entered=0;
+ const held=B.exclusive(()=>new Promise(r=>unlock=r));
+ await assert.rejects(()=>B.exclusive(async()=>{}),/Идёт импорт/);unlock();await held;assert(!B.busy);
+ c.navigator.locks={request:async(name,opts,fn)=>fn(null)};
+ await assert.rejects(()=>B.exclusive(async()=>entered++),/другой вкладке/);assert.equal(entered,0);assert(!B.busy);
+ c.navigator.locks={request:async(name,opts,fn)=>fn({name})};
+ await assert.rejects(()=>B.exclusive(async()=>{entered++;throw Error('one shot')}),/one shot/);assert.equal(entered,1);assert(!B.busy);
+ delete c.navigator.locks;
  const n=Number(process.env.SOURCE_ROWS||12000);
  let text='Артикул;Бренд;OE\n';for(let i=0;i<n;i++)text+='A'+i+';B;OE'+i+'\n';
  text+='A0;OTHER;last\n';
@@ -59,6 +69,16 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  assert.equal(read,2504);
  const originalXlsx=B.xlsx.bind(B);B.xlsx=async(f,onBatch)=>{for(let i=0;i<matrix.length;i+=1000)await onBatch(matrix.slice(i,i+1000))};
  const xs=await B.stage({name:'book.xlsx'});assert.equal(xs.total,2503);assert.equal((await B.page(xs.id,2502,1))[0][0],'002502');await B.remove(xs.id);B.xlsx=originalXlsx;
+ // Cached indexes skip the full scan, survive release/reopen, and are
+ // invalidated on a mapping change; interrupted runs cannot be reused.
+ const cached=await B.prepareKeys(second.id,'cache1',describe,'mapping1');assert.equal(cached,'cache1');await B.releaseRun(cached);
+ B.database().close();await B.database().open();
+ const originalPage=B.page;B.page=async()=>{throw Error('unexpected source scan')};
+ assert.equal(await B.prepareKeys(second.id,'unused',describe,'mapping1'),'cache1');B.page=originalPage;
+ assert.equal(await B.prepareKeys(second.id,'cache2',describe,'mapping2'),'cache2');assert(!await B.database().runs.get('cache1'));
+ await B.database().runs.add({id:'partial',source:second.id,fingerprint:'mapping3'});
+ assert.equal(await B.prepareKeys(second.id,'cache3',describe,'mapping3'),'cache3');assert(!await B.database().runs.get('partial'));
+ await B.clearRun('cache3');
  // Reopen source after closing the DB: no file reread, no missing tail rows.
  B.database().close();await B.database().open();assert.equal((await B.source(first.id)).total,n+1);
  assert.equal((await B.page(first.id,n,1))[0][1],'OTHER');
@@ -74,5 +94,9 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  sql=true;await assert.rejects(()=>B.stage(file('sql.csv','article;brand\nA;B\n')),/браузерном/);sql=false;
  await B.remove(first.id);assert.equal(await B.database().rows.where('source').equals(first.id).count(),0);assert.equal((await B.source(second.id)).total,1);
  await B.remove(second.id);await B.database().delete();
- console.log('OK: embedded Dexie source staging, bounded preview, independent tables, cross-batch conflicts, remapping, reopen, failure cleanup and SQL isolation; rows',n+2);
+ // Execute the production unique-touched membership check for repeated OE rows.
+ const markStart=h.indexOf('          const firstChange=rowChanged&&!changedRows.has(p);'),markEnd=h.indexOf('          if (!keepVisibility',markStart);
+ const pushStart=h.indexOf('          if (firstChange) touched.push(p);',markEnd),pushEnd=h.indexOf('\n',pushStart);
+ vm.runInContext('this.uniqueTouched=()=>{const changedRows=new WeakSet(),touched=[],p={};for(let i=0;i<10000;i++){const rowChanged=true;'+h.slice(markStart,markEnd)+h.slice(pushStart,pushEnd)+'}return touched.length;};',c);assert.equal(c.uniqueTouched(),1);
+ console.log('OK: operation locks, reusable indexes, unique touched rows; embedded Dexie source staging, bounded preview, independent tables, cross-batch conflicts, remapping, reopen, failure cleanup and SQL isolation; rows',n+2);
 })().catch(e=>{console.error(e);process.exitCode=1});
