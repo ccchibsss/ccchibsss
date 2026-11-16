@@ -36,6 +36,7 @@ jobs:
           NODE_PATH=.arena/idb-tests/node_modules node tests/browser-apply-checkpoint-indexeddb.js
           NODE_PATH=.arena/idb-tests/node_modules node tests/browser-catalog-lookup-indexeddb.js
           NODE_PATH=.arena/idb-tests/node_modules node tests/persist-indexeddb-probe.js
+          NODE_PATH=.arena/idb-tests/node_modules node tests/product-key-reconcile-indexeddb.js
       - name: Браузерный импорт — Chromium smoke
         run: |
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund

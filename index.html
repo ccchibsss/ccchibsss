@@ -18208,6 +18208,48 @@ const StorageCtl = {
     }
     return true;
   },
+  productIds(rows, withId) {
+    // One compact ID vector, never a second array of product payloads or a
+    // full Set plus all on-disk keys. IDB key ordering also catches duplicate
+    // compound/binary keys by value, unlike Set's object identity semantics.
+    const ids=[];let ordered=true;
+    for(const row of rows){
+      if(row.id===undefined||row.id===null)withId(row);
+      const id=row.id;
+      if(Dexie.cmp(id,id)!==0)throw new Error('Недопустимый внутренний ID товара; запись остановлена без замены каталога.');
+      if(ids.length&&Dexie.cmp(ids[ids.length-1],id)>=0)ordered=false;
+      ids.push(id);
+    }
+    if(!ordered)ids.sort(Dexie.cmp);
+    for(let i=1;i<ids.length;i++)if(Dexie.cmp(ids[i-1],ids[i])===0)throw new Error('Обнаружены повторяющиеся внутренние ID товаров; запись остановлена без замены каталога.');
+    return ids;
+  },
+  async reconcileProductKeys(ids) {
+    // Merge two sorted key streams. Old keys stay bounded to 1000; deleting
+    // a batch cannot invalidate the next keyset cursor (the last key is kept).
+    let last,position=0,deleted=0,hadRows=false;
+    for(;;){
+      // Under saveDiffAtomic these join its outer transaction. Under
+      // saveChunked each deletion batch commits separately, like write batches;
+      // interruption remains marked incomplete and recoverable by Apply undo.
+      const more=await db.transaction('rw',db.products,db.meta,async()=>{
+        await this.assertCatalogFresh();
+        if(typeof UCCancel!=='undefined')UCCancel.check();
+        const keys=await (last===undefined?db.products.orderBy(':id'):db.products.where(':id').above(last)).limit(1000).primaryKeys();
+        if(!keys.length)return false;hadRows=true;last=keys[keys.length-1];
+        const gone=[];
+        for(const key of keys){
+          while(position<ids.length&&Dexie.cmp(ids[position],key)<0)position++;
+          if(position===ids.length||Dexie.cmp(ids[position],key)!==0)gone.push(key);
+        }
+        if(gone.length){await db.products.bulkDelete(gone);deleted+=gone.length;}
+        return true;
+      });
+      if(!more)break;
+    }
+    return {deleted,hadRows};
+  },
+
   async saveDiffAtomic({ rowCount, chunk, changedList, withId, slimChunk, fullWrite }) {
     const onlyChanged = Array.isArray(changedList) && changedList.length > 0 && changedList.length < rowCount;
     let written = 0, deleted = 0, committedCatalog;
@@ -18219,22 +18261,8 @@ const StorageCtl = {
           await db.products.bulkPut(rows); written += rows.length;
         }
       } else {
-        /* Готовим множество ключей до удаления устаревших строк: никаких копий
-           объектов каталога и никакой промежуточной таблицы на диске. */
-        const keys = new Set();
-        for (let i = 0; i < rowCount; i++) {
-          const row = S.rows[i];
-          if (row.id === undefined || row.id === null) withId(row);
-          if (keys.has(row.id)) throw new Error('Обнаружены повторяющиеся внутренние ID товаров; запись остановлена без замены каталога.');
-          keys.add(row.id);
-        }
-        const oldKeys = await db.products.toCollection().primaryKeys();
-        let gone = [];
-        for (const id of oldKeys) {
-          if (!keys.has(id)) gone.push(id);
-          if (gone.length >= chunk) { await db.products.bulkDelete(gone); deleted += gone.length; gone = []; }
-        }
-        if (gone.length) { await db.products.bulkDelete(gone); deleted += gone.length; }
+        const ids=this.productIds(S.rows,withId);
+        const reconciled=await this.reconcileProductKeys(ids);deleted=reconciled.deleted;
         for (let i = 0; i < rowCount; i += chunk) {
           const rows = slimChunk(i, i + chunk);
           /* fullWrite: каталог перезаписывается целиком — читать прежние записи и
@@ -18243,7 +18271,7 @@ const StorageCtl = {
           if (fullWrite) {
             if (rows.length) { await db.products.bulkPut(rows); written += rows.length; }
           } else {
-            const previous = oldKeys.length ? await db.products.bulkGet(rows.map(x => x.id)) : null, changed = [];
+            const previous = reconciled.hadRows ? await db.products.bulkGet(rows.map(x => x.id)) : null, changed = [];
             for (let j = 0; j < rows.length; j++) if (!previous || !previous[j] || !this.same(rows[j], previous[j])) changed.push(rows[j]);
             if (changed.length) { await db.products.bulkPut(changed); written += changed.length; }
           }
@@ -18275,6 +18303,8 @@ const StorageCtl = {
     let written = 0, deleted = 0, committedCatalog;
     let fp = { count: rowCount, fp: '' }, oldFp = '';
     try { fp = catFp(S.rows); } catch (e) { console.warn('[UC] отпечаток каталога не посчитан:', e); }
+    // Validate every ID before publishing an incomplete marker or deleting rows.
+    let ids=onlyChanged?null:this.productIds(S.rows,withId);
     const started = nowISO();
     const _tWriteStart = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     await db.transaction('rw', db.meta, async () => {
@@ -18283,23 +18313,8 @@ const StorageCtl = {
       await db.meta.put({ key: 'incomplete', value: { started, count: rowCount, fp: fp.fp, oldFp, backup: '' } });
     });
     if (!onlyChanged) {
-      /* Устаревшие ключи удаляются до записи: иначе исчезнувшие SKU остались бы
-         в кэше рядом с новыми. Ключи новых строк проверяются так же, как в
-         атомарной записи. */
-      const keys = new Set();
-      for (let i = 0; i < rowCount; i++) {
-        const row = S.rows[i];
-        if (row.id === undefined || row.id === null) withId(row);
-        if (keys.has(row.id)) throw new Error('Обнаружены повторяющиеся внутренние ID товаров; запись остановлена без замены каталога.');
-        keys.add(row.id);
-      }
-      const oldKeys = await db.products.toCollection().primaryKeys();
-      let gone = [];
-      for (const id of oldKeys) {
-        if (!keys.has(id)) gone.push(id);
-        if (gone.length >= chunkRows) { await db.products.bulkDelete(gone); deleted += gone.length; gone = []; }
-      }
-      if (gone.length) { await db.products.bulkDelete(gone); deleted += gone.length; }
+      const reconciled=await this.reconcileProductKeys(ids);deleted=reconciled.deleted;
+      ids=null; // release the source key vector before materializing write batches
     }
     const total = onlyChanged ? changedList.length : rowCount;
     for (let i = 0; i < total; i += chunkRows) {

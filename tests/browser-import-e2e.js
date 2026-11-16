@@ -20,6 +20,7 @@ const html=fs.readFileSync(__dirname+'/../index.html');
    const instrument=(object,key,label)=>{const original=object[key];object[key]=async function(...args){const t=performance.now();console.info('[E2E] start '+label);try{return await original.apply(this,args)}finally{const phase={phase:label,ms:Math.round(performance.now()-t)};phases.push(phase);console.info('[E2E] end '+JSON.stringify(phase));}};};
    instrument(BrowserApplyCheckpoint,'begin','checkpoint');instrument(BrowserApplyCheckpoint,'commit','checkpoint-commit');
    instrument(BrowserCatalogLookup,'create','target-index');instrument(BrowserImportSources,'prepareKeys','source-index');
+   instrument(StorageCtl,'reconcileProductKeys','product-keys');
    instrument(BrowserImportSources,'stage','source-stage');instrument(HVC,'save','HVC-save');instrument(StorageCtl,'saveVerifiedMetadata','baseline-verify');
    let parts=['Артикул;Бренд;Себестоимость\n'];for(let i=0;i<n;i++)parts.push('A'+String(i).padStart(8,'0')+';Brand;12.5\n');
    await Import.read(new File(parts,'price.csv',{type:'text/csv'}));parts=null;
