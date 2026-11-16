@@ -37,3 +37,4 @@ jobs:
         run: |
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
           E2E_ROWS=1000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js
+          E2E_STAGE_ONLY=1 E2E_ROWS=1000000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js

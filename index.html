@@ -28933,14 +28933,34 @@ const BrowserImportSources = {
       const d=new Dexie('UC_BrowserImportSources');
       d.version(1).stores({sources:'id,status,created',rows:'[source+pos],source',keys:'[run+key],run',runs:'id,source,created'});
       d.version(2).stores({catalogKeys:'[run+kind+key],run',catalogRuns:'id,source,created'});
+      d.version(3).stores({rowPages:'[source+start],source'});
       this._db=d;
     }
     return this._db;
   },
   check() { if(typeof UCCancel!=='undefined')UCCancel.check(); },
   async page(id,start,count=this.BATCH) {
-    const records=await this.database().rows.where('[source+pos]').between([id,start],[id,start+count],true,false).toArray();
-    if(records.length!==count||records.some((r,i)=>r.pos!==start+i))throw new Error('Источник IndexedDB повреждён или удалён; применение остановлено');
+    const d=this.database(),meta=await d.sources.get(id),end=start+count;
+    const invalid=()=>new Error('Источник IndexedDB повреждён или удалён; применение остановлено');
+    if(!meta||!['ready','applied'].includes(meta.status)||!Number.isSafeInteger(meta.total)||meta.total<0||!Number.isSafeInteger(start)||!Number.isSafeInteger(count)||start<0||count<0||!Number.isSafeInteger(end)||end>meta.total)throw invalid();
+    if(!count)return [];
+    if(meta.storage==='pages-v1'){
+      const first=await d.rowPages.where('[source+start]').between([id,0],[id,start],true,true).last();
+      if(!first)throw invalid();
+      const pages=await d.rowPages.where('[source+start]').between([id,first.start],[id,end],true,false).toArray();
+      const rows=[];let expected=first.start;
+      for(const page of pages){
+        if(page.start!==expected||!Array.isArray(page.cells)||!page.cells.length||page.cells.length>this.BATCH)throw invalid();
+        for(const row of page.cells)if(!Array.isArray(row))throw invalid();
+        expected+=page.cells.length;if(expected>meta.total)throw invalid();
+        rows.push(...page.cells.slice(Math.max(0,start-page.start),Math.min(page.cells.length,end-page.start)));
+      }
+      if(expected<end||rows.length!==count)throw invalid();return rows;
+    }
+    if(meta.storage&&meta.storage!=='rows-v1')throw invalid();
+    // Existing v1/v2 sources remain readable without an expensive migration.
+    const records=await d.rows.where('[source+pos]').between([id,start],[id,end],true,false).toArray();
+    if(records.length!==count||records.some((r,i)=>r.pos!==start+i))throw invalid();
     return records.map(r=>r.cells);
   },
   async source(id) {
@@ -28966,13 +28986,13 @@ const BrowserImportSources = {
     const d=this.database(),id=uid('source'),created=Date.now();
     await d.sources.add({id,file:file.name,status:'loading',created,total:0});
     this.active.add(id);
-    const prefix=[],preview=[],numericCounts=[];let headers=null,buffer=[],total=0;
+    const prefix=[],preview=[],numericCounts=[];let headers=null,buffer=[],total=0,written=0;
     const consume=row=>{
       if(!row.some(v=>String(v??'').trim()!==''))return;
       if(!headers){prefix.push(row);return;}
       if(preview.length<200)preview.push(row);
       row.forEach((v,i)=>{if(typeof v==='number')numericCounts[i]=(numericCounts[i]||0)+1;});
-      buffer.push({source:id,pos:total++,cells:row});
+      buffer.push(row);total++;
     };
     const header=()=>{
       if(headers)return;
@@ -28988,7 +29008,7 @@ const BrowserImportSources = {
     };
     const flush=async()=>{
       this.check();if(!headers&&prefix.length>=9)header();
-      while(buffer.length){const batch=buffer.splice(0,this.BATCH);await d.rows.bulkAdd(batch);this.check();}
+      while(buffer.length){const batch=buffer.splice(0,this.BATCH);await d.rowPages.add({source:id,start:written,cells:batch});written+=batch.length;this.check();}
       if(typeof Prog!=='undefined')Prog.msg('IndexedDB: сохранено '+total+' строк источника');
     };
     try{
@@ -29000,7 +29020,7 @@ const BrowserImportSources = {
         await this.xlsx(file,async batch=>{for(const row of batch){consume(row);if(!headers&&prefix.length>=9)header();}await flush();});
       }
       header();await flush();
-      const s={id,file:file.name,status:'ready',created,total,headers,numericCounts};
+      const s={id,file:file.name,status:'ready',created,total,headers,numericCounts,storage:'pages-v1'};
       await d.sources.put(s);return {...s,preview};
     }catch(e){
       this.active.delete(id);
@@ -29087,14 +29107,14 @@ const BrowserImportSources = {
   async _remove(id) {
     if(this.active.has(id))throw new Error('Источник сейчас применяется; дождитесь завершения');
     const d=this.database();
-    await d.transaction('rw',d.sources,d.rows,d.keys,d.runs,d.catalogKeys,d.catalogRuns,async()=>{
+    await d.transaction('rw',d.sources,d.rows,d.rowPages,d.keys,d.runs,d.catalogKeys,d.catalogRuns,async()=>{
       for(const run of await d.catalogRuns.where('source').equals(id).toArray()){
         await d.catalogKeys.where('run').equals(run.id).delete();await d.catalogRuns.delete(run.id);
       }
       for(const run of await d.runs.where('source').equals(id).toArray()){
         await d.keys.where('run').equals(run.id).delete();await d.runs.delete(run.id);
       }
-      await d.rows.where('source').equals(id).delete();await d.sources.delete(id);
+      await d.rows.where('source').equals(id).delete();await d.rowPages.where('source').equals(id).delete();await d.sources.delete(id);
     });
   },
   async show() {

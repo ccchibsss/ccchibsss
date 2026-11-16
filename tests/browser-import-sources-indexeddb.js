@@ -15,6 +15,12 @@ vm.runInContext('this.conflictParity=async(body,sourceId,collisionRun,keyMode,ma
 function file(name,text){const f=new Blob([text]);f.name=name;return f}
 const plain=v=>JSON.parse(JSON.stringify(v));
 (async()=>{
+ // Upgrade an actual v1 source DB in place: no reset or eager full migration.
+ vm.runInContext("this.oldSourceDb=new Dexie('UC_BrowserImportSources');oldSourceDb.version(1).stores({sources:'id,status,created',rows:'[source+pos],source',keys:'[run+key],run',runs:'id,source,created'});",c);
+ await c.oldSourceDb.open();await c.oldSourceDb.sources.add({id:'v1-source',status:'ready',created:0,total:2,headers:['a']});
+ await c.oldSourceDb.rows.bulkAdd([{source:'v1-source',pos:0,cells:['00001']},{source:'v1-source',pos:1,cells:['00002']}]);c.oldSourceDb.close();
+ assert.deepEqual(plain(await B.page('v1-source',0,2)),[['00001'],['00002']]);assert.equal(B.database().verno,3);await B.remove('v1-source');
+
  // Local guard, cross-tab Web Lock refusal, exception cleanup; never replay
  // the callback outside the lock after an operation failure.
  let unlock,entered=0;
@@ -30,7 +36,8 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  text+='A0;OTHER;last\n';
  const first=await B.stage(file('one.csv',text)),second=await B.stage(file('two.csv','Артикул;Бренд;OE\nA0;B;"OE1\nOE2"\n'));
  assert.equal(first.total,n+1);assert.equal(first.preview.length,200);assert.equal(second.total,1);
- assert.equal(await B.database().rows.where('source').equals(first.id).count(),n+1);
+ assert.equal(await B.database().rows.where('source').equals(first.id).count(),0);
+ assert.equal(first.storage,'pages-v1');assert(await B.database().rowPages.where('source').equals(first.id).count()<Math.ceil((n+1)/1000)+Math.ceil(text.length/(256*1024))+2);
  assert.deepEqual(plain(await B.page(second.id,0,1)),[['A0','B','OE1\nOE2']]);
  const body=B.facade(first,first.preview);assert.equal(body.length,n+1);assert(!Array.isArray(body));assert.equal(body.slice(0,5).length,5);assert.equal(Object.keys(body).length,202);
  const describe=row=>({key:row[0],brand:row[1],signature:''});
@@ -88,6 +95,17 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  const wantedText=new Set(wanted.map(k=>k[1]));assert(exact.every(r=>wantedText.has(r.key)));
  const contiguous=await B.readKeyBatch(B.database().keys,'[run+key]',dense.slice(10,50).map(r=>[r.run,r.key]),r=>[r.run,r.key]);assert.equal(contiguous.length,40);
  await B.database().keys.where('run').equals('range-test').delete();
+ // Legacy row-per-record sources and new variable-length pages coexist.
+ await B.database().sources.add({id:'legacy',status:'ready',total:3,headers:['a']});
+ await B.database().rows.bulkAdd([0,1,2].map(pos=>({source:'legacy',pos,cells:['L'+pos]})));
+ assert.deepEqual(plain(await B.page('legacy',1,2)),[['L1'],['L2']]);await B.remove('legacy');
+ await B.database().sources.add({id:'variable',status:'ready',total:7,headers:['a'],storage:'pages-v1'});
+ await B.database().rowPages.bulkAdd([{source:'variable',start:0,cells:[['0'],['1']]},{source:'variable',start:2,cells:[['2']]},{source:'variable',start:3,cells:[['3'],['4'],['5'],['6']]}]);
+ for(let start=0;start<=7;start++)for(let count=0;count<=7-start;count++)assert.deepEqual(plain(await B.page('variable',start,count)),Array.from({length:count},(_,i)=>[String(start+i)]));
+ await B.database().rowPages.delete(['variable',2]);await assert.rejects(()=>B.page('variable',0,7),/повреждён/);
+ await B.database().rowPages.add({source:'variable',start:2,cells:[['2']]});await B.database().rowPages.add({source:'variable',start:1,cells:[['overlap']]});await assert.rejects(()=>B.page('variable',0,7),/повреждён/);await B.database().rowPages.delete(['variable',1]);
+ await assert.rejects(()=>B.page('variable',6,2),/повреждён/);await assert.rejects(()=>B.page('variable',-1,2),/повреждён/);
+ await B.database().sources.update('variable',{storage:'unknown-version'});await assert.rejects(()=>B.page('variable',0,1),/повреждён/);await B.remove('variable');
  // Reopen source after closing the DB: no file reread, no missing tail rows.
  B.database().close();await B.database().open();assert.equal((await B.source(first.id)).total,n+1);
  assert.equal((await B.page(first.id,n,1))[0][1],'OTHER');
@@ -97,11 +115,15 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  await assert.rejects(()=>B.stage(file('broken.csv','article;brand\nA;"broken')),/незакрытая/);assert.equal(await B.database().sources.count(),before);
  await assert.rejects(()=>B.stage(file('duplicate.csv','article;article\nA;B\n')),/Повторяющиеся/);
  // Storage failure cannot silently fall back to a million-element array.
- const bulk=B.database().rows.bulkAdd.bind(B.database().rows);B.database().rows.bulkAdd=async()=>{throw Error('QuotaExceededError')};
- await assert.rejects(()=>B.stage(file('full.csv','article;brand\nA;B\n')),/QuotaExceeded/);B.database().rows.bulkAdd=bulk;
+ const bulk=B.database().rowPages.add.bind(B.database().rowPages);B.database().rowPages.add=async()=>{throw Error('QuotaExceededError')};
+ await assert.rejects(()=>B.stage(file('full.csv','article;brand\nA;B\n')),/QuotaExceeded/);B.database().rowPages.add=bulk;
  assert.equal(await B.database().sources.count(),before);
+ const pageCount=await B.database().rowPages.count();let pageWrites=0;
+ B.database().rowPages.add=async value=>{if(++pageWrites===2)throw Error('QuotaExceededAfterPage');return bulk(value)};
+ await assert.rejects(()=>B.stage(file('partially-full.csv',text)),/QuotaExceededAfterPage/);B.database().rowPages.add=bulk;
+ assert.equal(await B.database().rowPages.count(),pageCount);assert.equal(await B.database().sources.count(),before);
  sql=true;await assert.rejects(()=>B.stage(file('sql.csv','article;brand\nA;B\n')),/браузерном/);sql=false;
- await B.remove(first.id);assert.equal(await B.database().rows.where('source').equals(first.id).count(),0);assert.equal((await B.source(second.id)).total,1);
+ await B.remove(first.id);assert.equal(await B.database().rows.where('source').equals(first.id).count(),0);assert.equal(await B.database().rowPages.where('source').equals(first.id).count(),0);assert.equal((await B.source(second.id)).total,1);
  await B.remove(second.id);await B.database().delete();
  // Execute the production unique-touched membership check for repeated OE rows.
  const markStart=h.indexOf('          const firstChange=rowChanged&&!changedRows.has(p);'),markEnd=h.indexOf('          if (!keepVisibility',markStart);
