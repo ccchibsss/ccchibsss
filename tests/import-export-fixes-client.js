@@ -29,9 +29,9 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSy
  changeBlob=true;await assert.rejects(()=>o.exportOzon('csv',[]),/изменились/);assert(!clicked);
  changeBlob=false;ctx.setTimeout=()=>0;await o.exportOzon('csv',[]);assert(clicked);
  // SQL parsing feeds the SAME preview/mapping code; no XLSX/CsvStream fallback.
- const r=h.indexOf('  async read(file) {',h.indexOf('const Import = {'));
- const start=h.indexOf('      let table = [];',r),end=h.indexOf("      if (!table.length)",start);
- ctx.PyEngine={processingAvailable:async()=>true,parseFile:async()=>[{'Артикул':'0001','Extra':'x'}]};
+ const r=h.indexOf('  async read(file, savedSourceId) {',h.indexOf('const Import = {'));
+ const start=h.indexOf('      let table = [],source=null;',r),end=h.indexOf("      if (!table.length)",start);
+ ctx.PyEngine={processingAvailable:async()=>true,parseFile:async(f,opts)=>{assert.equal(opts.table,true);return Object.assign([['0001','x']],{headers:['Артикул','Extra']})}};
  vm.runInContext('this.readTable=async(file)=>{'+h.slice(start,end)+'return table;};',ctx);
  assert.deepEqual(JSON.parse(JSON.stringify(await ctx.readTable({name:'a.csv'}))),[['Артикул','Extra'],['0001','x']]);
  assert(h.includes('await PyEngine.processingAvailable(); Import.pick();'));
@@ -42,6 +42,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSy
  ctx.fetch=async(url,options)=>{assert.equal(options.headers['X-Catalog-Import'],'1');return {ok:true,json:async()=>({parse_id:'p',total:5001,headers:['2','1']})}};
  parser._fetch=async url=>({total:5001,rows:Array.from({length:url.includes('offset=0&')?5000:1},()=>({'2':'a','1':'b'}))});
  const parsed=await parser.parseFile({name:'price.csv'},{catalogImport:true});assert.equal(parsed.length,5001);assert.deepEqual(Array.from(parsed.headers),['2','1']);
+ const matrix=await parser.parseFile({name:'price.csv'},{catalogImport:true,table:true});assert.equal(matrix.length,5001);assert.deepEqual(Array.from(matrix[0]),['a','b']);assert.deepEqual(Array.from(matrix.headers),['2','1']);
  parser._fetch=async()=>({total:5001,rows:[{}]});
  await assert.rejects(()=>parser.parseFile({name:'price.csv'},{catalogImport:true}),/Неполный разбор/);
  console.log('OK: exact staged SQL sync, unified SQL parsing/mapping, fail-closed Ozon and stale download guard');

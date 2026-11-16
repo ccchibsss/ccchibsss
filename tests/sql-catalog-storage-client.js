@@ -1,6 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
 let mode='sql',writes=0,upload,revision='',fail=false;
-const ctx={S:{rows:[],settings:{},catalogVersion:1,_bootReady:true},_persistDirty:true,_persistPending:0,
+const ctx={BrowserImportSources:{exclusive:fn=>fn()},S:{rows:[],settings:{},catalogVersion:1,_bootReady:true},_persistDirty:true,_persistPending:0,
  lsGet:()=>mode,lsSet:(k,v)=>{mode=v},productVolumeIsExplicit:p=>p._volumeExplicit===true,
  codeFieldsToStr:()=>{},normalizeFormatSettings:()=>{},HVC:{load:async()=>{}},
  db:{meta:{get:async()=>null}},Toast:{warn:()=>{},err:()=>{},info:()=>{}},StorageCtl:{catalogToken:()=>'',withWriteLock:()=>{throw Error('SQL must not acquire IndexedDB lock')}},
@@ -27,7 +27,7 @@ P._fetch=async(path,opts)=>{
  // Execute the actual persistence entry: neither the local writer nor its lock
  // may be touched when a selected SQL engine is offline.
  Object.assign(ctx,{PyEngine:P,_persistQueue:Promise.resolve(),_cancelPersistSoon:null});
- const start=h.indexOf('function persistNow(changedList)'),end=h.indexOf('async function storageFreeInfo',start);
+ const start=h.indexOf('function persistNow(changedList, options={})'),end=h.indexOf('async function storageFreeInfo',start);
  vm.runInContext(h.slice(start,end),ctx);
  await assert.rejects(()=>ctx.persistNow(),/offline/);
  assert(h.includes("if(!legacySqlMigration&&PyEngine.processingMode()==='sql')return PyEngine.loadSqlCatalog();"));

@@ -121,7 +121,7 @@ assert(app.includes('skipEconomics: S._econPending === true'), 'лёгкий с�
 assert(app.includes('if (estimated) { soft = 700; hard = 950; }'), 'MemGuard: для эвристики пороги выше');
 assert(app.includes('smallDelta: true, persist: false, suppressSummaryToast: true, preserveView: true'), 'лёгкий экспорт: срез таблицы не перестраивается');
 assert(app.includes('used = this.usedEstMB();'), 'MemGuard: check использует эвристику в Firefox/Safari');
-assert(app.includes('const findByOe = r => {'), 'импорт: поиск SKU прайса только по OE');
+assert(app.includes('const findByOe = async r => {'), 'импорт: поиск SKU прайса только по OE');
 assert(!app.includes('analogMap'), 'импорт: поиска по аналогам нет');
 assert(app.includes('matchedByKey && (cm.target === \'article\' || cm.target === \'brand\')'), 'импорт: OE-сопоставление не затирает артикул/бренд прайса');
 assert(html.includes('Только обогащение по текущему прайсу, новых SKU не создавать'), 'импорт: подпись переключателя прайс-первым');
@@ -524,7 +524,8 @@ assert(app.includes('запись каталога одной порцией'), 
 // v12.9.95: остальные разделы пакета
 assert(app.includes('12.9.156-client+dual-processing'), 'версия 12.9.95');
 assert(app.includes('warnQuarantinedBeforeExport'), 'карантин: предупреждение перед выгрузкой');
-assert(app.includes("await CsvStream.rows(file, r => { table.push(r); }"), 'обычный импорт: потоковый разбор CSV');
+assert(app.includes('source=await BrowserImportSources.stage(file)'), 'обычный браузерный импорт: отдельная таблица IndexedDB');
+assert(app.includes('onChunk:flush'), 'браузерный CSV: backpressure при записи источника');
 assert(app.includes('let first = true;'), 'дисковый импорт: заголовок файла не попадает в данные');
 assert(app.includes('покрытие OE: '), 'дисковый импорт: отчёт о покрытии кроссами');
 assert(app.includes('oePairSets'), 'дисковый импорт: неоднозначные OE считаются');
