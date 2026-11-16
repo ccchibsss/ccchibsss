@@ -42,6 +42,7 @@ jobs:
       - name: Браузерный импорт — Chromium smoke
         run: |
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
+          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-conflict-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-export-e2e.js
           E2E_ROWS=1000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js
           E2E_ROWS=30000 E2E_PARTIAL_WRITE=1 E2E_TIMEOUT_MS=180000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js

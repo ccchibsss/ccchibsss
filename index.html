@@ -9177,6 +9177,7 @@ try {
     </div>
   </div>
   <div id="impApplyStatus" role="status" aria-live="polite" hidden></div>
+  <div id="impConflictActions" hidden style="padding:10px 16px"><p class="hint">Вкладка устарела. Её данные и исходный файл не удалены. Новая вкладка использует сохранённый каталог, а не несохранённые правки этой вкладки. Закройте остальные активные редакторы каталога.</p><button type="button" class="btn pri" id="impConflictResume">Продолжить импорт в новой вкладке</button> <button type="button" class="btn gh" id="impConflictExport">Экспорт данных этой вкладки</button></div>
   <div class="mfoot"><span class="hint mono" id="impMeta"></span><div class="sp" style="flex:1"></div>
     <button type="button" class="btn gh" data-close>Отмена</button>
     <button type="button" class="btn pri" id="impApply"><i class="fa-solid fa-database"></i> Применить к каталогу</button></div>
@@ -13631,7 +13632,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.158-client+reliable-downloads';
+const APP_VERSION = '12.9.159-client+import-conflict-recovery';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -18173,12 +18174,14 @@ const StorageCtl = {
     return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + '-' + Math.random().toString(36).slice(2);
   },
   catalogValue(count, fp) { return { custom:S.custom, saved:nowISO(), count, fp:fp || '', revision:this.newRevision() }; },
-  acceptCatalog(value) { S._catalogToken = this.catalogToken({value}); S._catalogConflict = false; },
+  acceptCatalog(value) { S._catalogToken = this.catalogToken({value}); S._catalogConflict = false;S._catalogConflictInfo=null; },
   async assertCatalogFresh() {
     if(typeof BrowserApplyCheckpoint!=='undefined')await BrowserApplyCheckpoint.assertWriter();
     const current = await db.meta.get('catalog');
     if (typeof S._catalogToken !== 'string' || this.catalogToken(current) !== S._catalogToken) {
       S._catalogConflict = true;
+      S._catalogConflictInfo={at:nowISO(),expected:S._catalogToken??null,current:this.catalogToken(current)};
+      console.warn('[UC] конфликт ревизий каталога',S._catalogConflictInfo);
       const e = new Error('Каталог изменился в другой вкладке. Сохраните изменения этой вкладки отдельным экспортом и только после проверки копии откройте файл заново.');
       e.name = 'CatalogConflictError'; throw e;
     }
@@ -28815,8 +28818,13 @@ const BrowserApplyCheckpoint = {
   async begin() {
     if(S._volatileStorage)throw new Error('Без IndexedDB безопасное применение недоступно');
     if(this.owner)throw new Error('Контрольная точка уже используется');
+    // Fail before attempting a save; keep the typed conflict for the recovery UI.
+    await db.transaction('r',db.meta,()=>StorageCtl.assertCatalogFresh());
     // Flush legitimate pre-existing edits before taking an undo checkpoint.
-    if(!await persistNow(undefined,{verifyUnchanged:true})||S._cacheAuxError||S._hvcPersistError)throw new Error('Не удалось сохранить исходное состояние перед импортом');
+    if(!await persistNow(undefined,{verifyUnchanged:true})||S._cacheAuxError||S._hvcPersistError){
+      const e=new Error(S._catalogConflict?'Импорт не начат: сохранённая ревизия каталога отличается от этой вкладки. Откройте актуальную копию в новой вкладке.':'Не удалось сохранить исходное состояние перед импортом');
+      if(S._catalogConflict)e.name='CatalogConflictError';throw e;
+    }
     const owner=uid('apply');this.owner=owner;
     try{
       await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
@@ -29316,6 +29324,55 @@ function BrowserSourceXlsxWorker() {
   }catch(error){self.postMessage({error:String(error.message||error)});}};
 }
 
+/* A conflict is not permission to overwrite another writer. Open the current
+   disk catalogue in a separate tab; keep the original RAM and staged input.
+   Only a bounded mapping descriptor goes through the copied sessionStorage. */
+const ImportConflictRecovery = {
+  PREFIX:'uc.import-resume.',
+  CONTROLS:['impKey','impMode','impPriceIsCost','impRenameStd','impOe','impKeepVisibility','impAnomOeAuto','impEnrichOnly','impEnrichRelated','enDims','enName','enAppl','enCat'],
+  SETTINGS:['enrich','enrichCols','enrichCatMode','enrichMode','autoStdDims','autoOeAnomalyOnImport','enrichRelatedOnImport','importEnrichOnly','priceIsCost'],
+  open() {
+    if(PyEngine.processingMode()!=='browser'||!S.pending?.sourceId)throw new Error('Откройте новую вкладку приложения и выберите сохранённый источник в «Источники браузера». Эту вкладку не закрывайте без экспорта.');
+    const key=this.PREFIX+uid('resume');
+    const descriptor={created:Date.now(),sourceId:S.pending.sourceId,map:S.pending.map,
+      key:$('#impKey').value,mode:$('#impMode').value,keepVisibility:$('#impKeepVisibility').checked,
+      controls:this.CONTROLS.map(id=>{const el=document.getElementById(id);return {id,value:el.value,checked:el.checked,on:el.classList.contains('on')};}),
+      settings:Object.fromEntries(this.SETTINGS.filter(k=>S.settings[k]!==undefined).map(k=>[k,S.settings[k]]))};
+    sessionStorage.setItem(key,JSON.stringify(descriptor));
+    const url=new URL(location.href);url.searchParams.set('ucImportResume',key);url.hash='export';
+    // Deliberately retain opener until the child has read its sessionStorage
+    // copy. noopener would prevent that copy in Chromium.
+    const tab=window.open(url.href,'_blank');
+    sessionStorage.removeItem(key);
+    if(!tab)throw new Error('Браузер заблокировал новую вкладку. Разрешите всплывающие окна для приложения и нажмите кнопку ещё раз.');
+  },
+  async restore() {
+    const url=new URL(location.href),key=url.searchParams.get('ucImportResume');
+    if(!key)return;
+    url.searchParams.delete('ucImportResume');history.replaceState(null,'',url.href);
+    if(!key.startsWith(this.PREFIX))throw new Error('Некорректная ссылка продолжения импорта');
+    const raw=sessionStorage.getItem(key);sessionStorage.removeItem(key);
+    try{window.opener=null;}catch(e){}
+    if(!raw)throw new Error('Настройки продолжения недоступны. Откройте файл в «Источники браузера». Старая вкладка не изменена.');
+    const d=JSON.parse(raw);
+    if(!Number.isFinite(d.created)||Date.now()-d.created>3600000||d.created>Date.now()+60000||typeof d.sourceId!=='string'||!Array.isArray(d.map))throw new Error('Настройки продолжения устарели или повреждены');
+    if(PyEngine.processingMode()!=='browser'||!S._bootReady||S._bootError)throw new Error('Продолжение требует готового браузерного хранилища');
+    const source=await BrowserImportSources.source(d.sourceId);
+    await Import.read({name:source.file},source.id);
+    for(const k of this.SETTINGS)if(Object.prototype.hasOwnProperty.call(d.settings||{},k))S.settings[k]=d.settings[k];
+    S.pending.map=d.map;Import.normalize();Import.render();
+    $('#impKey').value=d.key;$('#impMode').value=d.mode;$('#impKeepVisibility').checked=d.keepVisibility;
+    for(const control of d.controls||[]){
+      if(!this.CONTROLS.includes(control.id))continue;
+      const el=document.getElementById(control.id);if('value' in el&&control.value!==undefined)el.value=control.value;
+      if('checked' in el)el.checked=control.checked===true;el.classList.toggle('on',control.on===true);
+    }
+    Import.render();
+    const status=$('#impApplyStatus');status.hidden=false;
+    status.textContent='Открыт актуальный сохранённый каталог. Файл и маппинг восстановлены, импорт ещё не применён. Проверьте настройки и нажмите «Применить». Несохранённые правки остались в старой вкладке.';
+  }
+};
+
 const Import = {
   pick() {
     const inp = document.createElement('input');
@@ -29376,6 +29433,7 @@ const Import = {
         if ($('#impKey')) $('#impKey').value = 'article+brand';
         if ($('#impMode')) $('#impMode').value = 'upsert';
       }
+      const conflictActions=$('#impConflictActions');if(conflictActions)conflictActions.hidden=true;
       const applyStatus = $('#impApplyStatus'); if (applyStatus) { applyStatus.textContent = ''; applyStatus.hidden = true; }
       S.pending = { file: file.name, sourceId:source?.id, headers, body, advisorTemplate, map: (guess ? guess.config : autoMap(headers)).map(m => ({ ...m })) };
       Import.normalize();
@@ -47670,6 +47728,7 @@ function bindAll() {
     const button = $('#impApply'), status = $('#impApplyStatus');
     if (button.disabled) return;
     button.disabled = true;
+    $('#impConflictActions').hidden=true;
     console.info('[UC] импорт · нажата кнопка применения', {file:S.pending?.file,rows:S.pending?.body?.length});
     if (status) { status.hidden = false; status.textContent = 'Применение импорта… Дождитесь завершения; повторно выбирать файл не нужно.'; }
     try {
@@ -47681,16 +47740,20 @@ function bindAll() {
       console.info('[UC] импорт · результат применения: '+(stillOpen ? 'мастер остался открыт (проверка не пройдена)' : 'мастер закрыт'));
     } catch (err) {
       console.error('[UC] Import.apply error:', err);
+      const conflict=err?.name==='CatalogConflictError';
+      $('#impConflictActions').hidden=!conflict;
       const reason = storageErrorText(err);
       if (status) {
         status.hidden = false;
-        status.textContent = 'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
+        status.textContent = conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
       }
       if (!err || !err._ucShown) Toast.err('Ошибка импорта', reason.slice(0, 400));
     } finally {
       button.disabled = false;
     }
   });
+  on('#impConflictResume','onclick',()=>{try{ImportConflictRecovery.open();}catch(e){Toast.err('Продолжение импорта',storageErrorText(e));}});
+  on('#impConflictExport','onclick',()=>{$('#mImport').classList.remove('on');UI.go('export');});
   const runExportFormat = async (e, format) => {
     e && e.preventDefault();
     const button=$('#expRun'),csvButton=$('#expRunCsv');if(button.disabled)return;button.disabled=true;csvButton.disabled=true;
@@ -49074,6 +49137,7 @@ window.addEventListener('DOMContentLoaded', () => {
   try { RecommendedPriceScenario.init(); } catch (e) { console.error('[RP] init error:', e); }
   // ШАГ 2: загружаем данные и рендерим
   UI.boot().then(() => {
+    ImportConflictRecovery.restore().catch(e=>Toast.err('Продолжение импорта',storageErrorText(e)));
     try {
       OzonSellerUI.restoreMarker().catch(e => console.warn('[Ozon] marker restore failed', e));
       const av = document.getElementById('appVer'); if (av) av.textContent = 'v' + APP_VERSION + ' monolith';
