@@ -29,8 +29,8 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSy
  changeBlob=true;await assert.rejects(()=>o.exportOzon('csv',[]),/изменились/);assert(!clicked);
  changeBlob=false;ctx.setTimeout=()=>0;await o.exportOzon('csv',[]);assert(clicked);
  // SQL parsing feeds the SAME preview/mapping code; no XLSX/CsvStream fallback.
- const r=h.indexOf('  async read(file) {',h.indexOf('const Import = {'));
- const start=h.indexOf('      let table = [];',r),end=h.indexOf("      if (!table.length)",start);
+ const r=h.indexOf('  async read(file, savedSourceId) {',h.indexOf('const Import = {'));
+ const start=h.indexOf('      let table = [],source=null;',r),end=h.indexOf("      if (!table.length)",start);
  ctx.PyEngine={processingAvailable:async()=>true,parseFile:async(f,opts)=>{assert.equal(opts.table,true);return Object.assign([['0001','x']],{headers:['Артикул','Extra']})}};
  vm.runInContext('this.readTable=async(file)=>{'+h.slice(start,end)+'return table;};',ctx);
  assert.deepEqual(JSON.parse(JSON.stringify(await ctx.readTable({name:'a.csv'}))),[['Артикул','Extra'],['0001','x']]);

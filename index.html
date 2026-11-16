@@ -7178,6 +7178,7 @@ html { -webkit-text-size-adjust: 100%; }
     <div><h2>Данные <span class="hint mono" style="font-size:11px">/ virtual scroll</span></h2><p>Виртуальная прокрутка (окно строк, фикс. высота ряда) — локально в браузере (IndexedDB) до ~300 000 SKU. <b style="color:var(--amber)">Облачная синхронизация с Google Sheets рекомендована до ~20 000 SKU</b> — Apps Script ограничен 6 минутами исполнения и кэш одной записи CacheService лимитирован 100 КБ; выше этого объёма используйте только локальный режим и XLSX/CSV-экспорт напрямую из браузера.</p></div>
     <div class="sp"></div>
     <button type="button" class="btn pri" id="btnImport" title="Если локальный движок запущен, файл разбирает он (CSV/XLSX/ZIP в SQLite, подмешивание только в пустые поля); если движок недоступен — обычный мастер импорта приложения"><i class="fa-solid fa-file-arrow-up"></i> Импорт / дозагрузка</button>
+    <button type="button" class="btn gh" id="btnBrowserSources">Таблицы источников</button>
     <button type="button" class="btn" id="btnDiskImport" title="Прайс и кросс-листы пишутся потоком сразу в хранилище приложения (IndexedDB), файл целиком в память не поднимается. CSV или XLSX (через воркер), каталог заменяется целиком."><i class="fa-solid fa-hard-drive"></i> Прайс + кроссы — сразу в приложение</button>
     <button type="button" class="btn gh" id="btnSettingsSnapshot" title="Скачать снимок ключевых настроек (без секретов) в формате проекта arena-project — для сверки и переноса между проектами"><i class="fa-solid fa-camera"></i> Снимок настроек</button>
     <button type="button" class="btn gh" id="btnReviewExport" title="Сформировать очередь ручной проверки (конфликты габаритов по OE, висячие кроссы, похожие артикулы) и скачать CSV: заполните колонку «Решение» и загрузите обратно соседней кнопкой"><i class="fa-solid fa-list-check"></i> Очередь проверки ↓</button>
@@ -9127,6 +9128,9 @@ try {
     </div>
   </div>
 </div>
+<div class="modal" id="mBrowserSources" role="dialog" aria-modal="true" aria-label="Таблицы источников"><div class="mbox" style="width:900px">
+<div class="mhead"><h3>Исходные файлы · IndexedDB</h3><div class="sp"></div><button type="button" class="btn sm" data-close>Закрыть</button></div>
+<div class="mbody"><p class="hint">Каждый файл хранится отдельно. Маппинг можно открыть без повторного чтения файла. Удаление источника не удаляет каталог. Сохранение зависит от квоты хранилища браузера; это не резервная копия.</p><div id="browserSourcesList"></div></div></div></div>
 <div class="modal" id="mImport" role="dialog" aria-modal="true" aria-label="Мастер импорта"><div class="mbox" style="width:1120px">
   <div class="mhead"><i class="fa-solid fa-right-left" style="color:var(--amber)"></i><h3>Мастер импорта · маппинг колонок</h3>
     <div class="sp" style="flex:1"></div>
@@ -28296,10 +28300,12 @@ const CsvStream = {
       }
       parser.feed(t);
     };
-    for (let off = 0; off < file.size; off += this.CHUNK) {
-      const buf = await file.slice(off, Math.min(off + this.CHUNK, file.size)).arrayBuffer();
+    const chunkBytes=opts.chunkBytes||this.CHUNK;
+    for (let off = 0; off < file.size; off += chunkBytes) {
+      const buf = await file.slice(off, Math.min(off + chunkBytes, file.size)).arrayBuffer();
       feedText(dec.decode(buf, { stream: true }));
-      if (opts.onProgress) opts.onProgress(Math.min(off + this.CHUNK, file.size), file.size);
+      if(opts.onChunk)await opts.onChunk();
+      if (opts.onProgress) opts.onProgress(Math.min(off + chunkBytes, file.size), file.size);
       if (parser && parser.stopped) return parser.rows;
       if (typeof UCCancel !== 'undefined') UCCancel.check();
       await new Promise(r => setTimeout(r, 0));
@@ -28311,6 +28317,7 @@ const CsvStream = {
       parser.feed(firstText.replace(/^\uFEFF/, ''));
     }
     parser.end();
+    if(opts.onChunk)await opts.onChunk();
     return parser.rows;
   },
   async headers(file) {
@@ -28657,6 +28664,173 @@ const DiskImport = {
   }
 };
 
+/* Browser-only immutable input tables. Never used by SQL processing. */
+const BrowserImportSources = {
+  BATCH:1000, active:new Set(),
+  database() {
+    if(!this._db){
+      const d=new Dexie('UC_BrowserImportSources');
+      d.version(1).stores({sources:'id,status,created',rows:'[source+pos],source',keys:'[run+key],run',runs:'id,source,created'});
+      this._db=d;
+    }
+    return this._db;
+  },
+  check() { if(typeof UCCancel!=='undefined')UCCancel.check(); },
+  async page(id,start,count=this.BATCH) {
+    const records=await this.database().rows.where('[source+pos]').between([id,start],[id,start+count],true,false).toArray();
+    if(records.length!==count||records.some((r,i)=>r.pos!==start+i))throw new Error('Источник IndexedDB повреждён или удалён; применение остановлено');
+    return records.map(r=>r.cells);
+  },
+  async source(id) {
+    const s=await this.database().sources.get(id);
+    if(!s||!['ready','applied'].includes(s.status))throw new Error('Источник не готов или удалён');
+    return s;
+  },
+  facade(s,preview) {
+    // Preview is NOT a sparse million-element array. Only UI/sample access is
+    // synchronous; all full-source passes use the async iterator below.
+    const body={get length(){return s.total;},slice:(a,b)=>preview.slice(a,b),*[Symbol.iterator](){yield* preview;}};
+    preview.forEach((r,i)=>body[i]=r);return body;
+  },
+  async *iterate(id,body) {
+    if(!id){yield* body;return;}
+    const s=await this.source(id);
+    for(let off=0;off<s.total;off+=this.BATCH){
+      this.check();yield* await this.page(id,off,Math.min(this.BATCH,s.total-off));
+    }
+  },
+  async stage(file) {
+    if(PyEngine.processingMode()!=='browser')throw new Error('Таблицы источников IndexedDB доступны только в браузерном режиме');
+    const d=this.database(),id=uid('source'),created=Date.now();
+    await d.sources.add({id,file:file.name,status:'loading',created,total:0});
+    this.active.add(id);
+    const prefix=[],preview=[],numericCounts=[];let headers=null,buffer=[],total=0;
+    const consume=row=>{
+      if(!row.some(v=>String(v??'').trim()!==''))return;
+      if(!headers){prefix.push(row);return;}
+      if(preview.length<200)preview.push(row);
+      row.forEach((v,i)=>{if(typeof v==='number')numericCounts[i]=(numericCounts[i]||0)+1;});
+      buffer.push({source:id,pos:total++,cells:row});
+    };
+    const header=()=>{
+      if(headers)return;
+      if(!prefix.length)throw new Error('Файл пуст или не распознан');
+      let hi=0;
+      for(let i=0;i<Math.min(9,prefix.length);i++){
+        const filled=prefix[i].filter(c=>String(c).trim()!=='').length,alpha=prefix[i].filter(c=>/[а-яa-z]/i.test(String(c))).length;
+        if(filled>=2&&alpha>=filled*.4){hi=i;break;}
+      }
+      headers=prefix[hi].map((h,i)=>String(h||'').trim()||'Колонка_'+(i+1));
+      if(new Set(headers).size!==headers.length)throw new Error('Повторяющиеся заголовки: переименуйте колонки, иначе значения будут потеряны');
+      const rest=prefix.splice(hi+1);prefix.length=0;rest.forEach(consume);
+    };
+    const flush=async()=>{
+      this.check();if(!headers&&prefix.length>=9)header();
+      while(buffer.length){const batch=buffer.splice(0,this.BATCH);await d.rows.bulkAdd(batch);this.check();}
+      if(typeof Prog!=='undefined')Prog.msg('IndexedDB: сохранено '+total+' строк источника');
+    };
+    try{
+      if(/\.csv$/i.test(file.name)){
+        await CsvStream.rows(file,row=>{consume(row);if(!headers&&prefix.length>=9)header();},{chunkBytes:256*1024,onChunk:flush,onProgress:(n,t)=>{if(typeof Prog!=='undefined')Prog.step(5+60*n/Math.max(1,t));}});
+      }else{
+        // Workbook stays in the worker; only one requested row block is sent.
+        // SheetJS still parses the workbook in memory (not a streaming XLSX parser).
+        await this.xlsx(file,async batch=>{for(const row of batch){consume(row);if(!headers&&prefix.length>=9)header();}await flush();});
+      }
+      header();await flush();
+      const s={id,file:file.name,status:'ready',created,total,headers,numericCounts};
+      await d.sources.put(s);return {...s,preview};
+    }catch(e){
+      this.active.delete(id);
+      try{await this.remove(id);}catch(cleanup){console.warn('[UC] очистка источника:',cleanup);}
+      throw e;
+    }finally{this.active.delete(id);}
+  },
+  async xlsx(file,onBatch) {
+    const source=DiskImport._xlsxLibSource()+'\n('+BrowserSourceXlsxWorker.toString()+')();';
+    const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+    let worker;try{worker=new Worker(url);}catch(e){URL.revokeObjectURL(url);throw e;}let pending=null;
+    const ask=message=>new Promise((resolve,reject)=>{pending={resolve,reject};worker.postMessage(message,message.buf?[message.buf]:[]);});
+    worker.onerror=event=>{if(pending){pending.reject(new Error(event.message||'Ошибка чтения XLSX'));pending=null;}};
+    worker.onmessage=event=>{if(pending){const p=pending;pending=null;event.data.error?p.reject(new Error(event.data.error)):p.resolve(event.data);}};
+    const cancelTimer=setInterval(()=>{try{this.check();}catch(e){if(pending){pending.reject(e);pending=null;}worker.terminate();}},100);
+    try{
+      const buf=await file.arrayBuffer();this.check();await ask({type:'init',buf});
+      for(;;){this.check();const page=await ask({type:'next'});if(page.rows.length)await onBatch(page.rows);if(page.done)break;}
+    }finally{clearInterval(cancelTimer);worker.terminate();URL.revokeObjectURL(url);}
+  },
+  async prepareKeys(id,run,describe) {
+    const d=this.database();await d.runs.add({id:run,source:id,created:Date.now()});
+    const s=await this.source(id);
+    for(let off=0;off<s.total;off+=this.BATCH){
+      this.check();const rows=await this.page(id,off,Math.min(this.BATCH,s.total-off));
+      const descriptions=rows.map(describe).filter(Boolean),keys=[...new Set(descriptions.map(x=>x.key))];
+      await d.transaction('rw',d.keys,async()=>{
+        const existing=await d.keys.bulkGet(keys.map(key=>[run,key])),local=new Map();
+        keys.forEach((key,i)=>{if(existing[i])local.set(key,existing[i]);});
+        for(const item of descriptions){
+          const prior=local.get(item.key);
+          if(!prior)local.set(item.key,{run,...item,conflict:false});
+          else{
+            if(prior.brand&&item.brand&&prior.brand!==item.brand)prior.conflict=true;
+            if(prior.signature!==item.signature)prior.conflict=true;
+            if(!prior.brand&&item.brand)prior.brand=item.brand;
+          }
+        }
+        await d.keys.bulkPut([...local.values()]);
+      });
+      if(typeof Prog!=='undefined')Prog.msg('Проверка ключей всего источника: '+Math.min(off+this.BATCH,s.total)+' из '+s.total);
+    }
+  },
+  async conflicts(run,rows,describe) {
+    const keys=[...new Set(rows.map(describe).filter(Boolean).map(x=>x.key))];
+    const values=await this.database().keys.bulkGet(keys.map(key=>[run,key]));
+    return new Set(values.filter(v=>v?.conflict).map(v=>v.key));
+  },
+  async clearRun(run) {
+    if(!run)return;const d=this.database();
+    await d.transaction('rw',d.keys,d.runs,async()=>{await d.keys.where('run').equals(run).delete();await d.runs.delete(run);});
+  },
+  async remove(id) {
+    if(this.active.has(id))throw new Error('Источник сейчас применяется; дождитесь завершения');
+    const d=this.database();
+    await d.transaction('rw',d.sources,d.rows,d.keys,d.runs,async()=>{
+      for(const run of await d.runs.where('source').equals(id).toArray()){
+        await d.keys.where('run').equals(run.id).delete();await d.runs.delete(run.id);
+      }
+      await d.rows.where('source').equals(id).delete();await d.sources.delete(id);
+    });
+  },
+  async show() {
+    if(PyEngine.processingMode()!=='browser'){Toast.warn('Источники браузера','Переключитесь в браузерный режим; SQL не использует эти таблицы.');return;}
+    const sources=await this.database().sources.orderBy('created').reverse().toArray(),box=$('#browserSourcesList');
+    box.innerHTML=sources.map(s=>`<div style="padding:10px;border-bottom:1px solid var(--line)"><b>${esc(s.file)}</b> · ${fmt(s.total)} строк · ${esc(s.status)}
+      ${['ready','applied'].includes(s.status)?`<button type="button" class="btn sm" data-source-open="${esc(s.id)}">Открыть маппинг</button>`:''}
+      <button type="button" class="btn sm gh" data-source-delete="${esc(s.id)}">Удалить источник</button></div>`).join('')||'Нет сохранённых источников';
+    box.onclick=async e=>{try{
+      const open=e.target.closest('[data-source-open]'),del=e.target.closest('[data-source-delete]');
+      if(open){const s=await this.source(open.dataset.sourceOpen);$('#mBrowserSources').classList.remove('on');await Import.read({name:s.file},s.id);}
+      if(del&&confirm('Удалить только исходную таблицу? Каталог и результаты обогащения останутся.')){await this.remove(del.dataset.sourceDelete);await this.show();}
+    }catch(error){Toast.err('Источник',storageErrorText(error));}};
+    modal('#mBrowserSources');
+  }
+};
+function BrowserSourceXlsxWorker() {
+  let ws=null,range=null,next=0;
+  self.onmessage=e=>{try{
+    if(e.data.type==='init'){
+      const wb=XLSX.read(new Uint8Array(e.data.buf),{type:'array',cellDates:true});
+      ws=wb.Sheets[wb.SheetNames[0]];range=ws?.['!ref']?XLSX.utils.decode_range(ws['!ref']):null;next=range?range.s.r:0;
+      self.postMessage({ready:true});
+    }else{
+      if(!range||next>range.e.r){self.postMessage({rows:[],done:true});return;}
+      const end=Math.min(next+999,range.e.r);
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:'',blankrows:false,range:{s:{r:next,c:range.s.c},e:{r:end,c:range.e.c}}});
+      next=end+1;self.postMessage({rows,done:next>range.e.r});
+    }
+  }catch(error){self.postMessage({error:String(error.message||error)});}};
+}
+
 const Import = {
   pick() {
     const inp = document.createElement('input');
@@ -28669,38 +28843,32 @@ const Import = {
     const file = new File([DEMO_IMPORT_CSV], 'UNIT-CONTROL-demo-data.csv', { type: 'text/csv;charset=utf-8' });
     Import.read(file);
   },
-  async read(file) {
+  async read(file, savedSourceId) {
     await withProgress('Чтение файла', file.name, async () => {
       Prog.step(35);
-      let table = [];
-      if (await PyEngine.processingAvailable()) {
+      let table = [],source=null;
+      if(typeof savedSourceId!=='undefined'&&savedSourceId){
+        if(PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
+        source=await BrowserImportSources.source(savedSourceId);source.preview=await BrowserImportSources.page(source.id,0,Math.min(200,source.total));table=[source.headers,...source.preview];
+      }else if (await PyEngine.processingAvailable()) {
         const rows=await PyEngine.parseFile(file,{catalogImport:true,table:true});
         if(rows.length)table=[rows.headers,...rows];
-      } else if (/\.csv$/i.test(file.name)) {
-        /* v12.9.95: потоковый разбор (CsvStream) — файл не поднимается целиком
-           строкой, таблица строится по мере чтения кусков по 4 МБ. Значения,
-           как и раньше, остаются ТЕКСТОМ (десятичная запятая не портится). */
-        await CsvStream.rows(file, r => { table.push(r); },
-          { onProgress: (n, t) => Prog.step(35 + Math.round(30 * n / Math.max(t, 1))) });
       } else {
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array', dense: false, cellDates: true });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        table = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false });
+        source=await BrowserImportSources.stage(file);table=[source.headers,...source.preview];
       }
       if (!table.length) throw new Error('Файл пуст или не распознан');
       let hi = 0;
       for (let i = 0; i < Math.min(9, table.length); i++) { const filled = table[i].filter(c => String(c).trim() !== '').length; const alpha = table[i].filter(c => /[а-яa-z]/i.test(String(c))).length; if (filled >= 2 && alpha >= filled * .4) { hi = i; break; } }
-      const headers = table[hi].map((h, i) => String(h || '').trim() || ('Колонка_' + (i + 1)));
-      const body = table.slice(hi + 1).filter(r => r.some(c => String(c).trim() !== ''));
+      const headers = source?source.headers:table[hi].map((h, i) => String(h || '').trim() || ('Колонка_' + (i + 1)));
+      const body = source?BrowserImportSources.facade(source,source.preview):table.slice(hi + 1).filter(r => r.some(c => String(c).trim() !== ''));
       /* v12.9.97 (QA): в XLSX артикул может приехать ЧИСЛОМ — Excel в этом случае
          теряет ведущие нули (00123 → 123) ещё до нас. Предупреждаем до маппинга. */
       try {
         if (!/\.csv$/i.test(file.name)) {
           const ai = autoMap(headers).findIndex(m => m.field === 'article');
           if (ai >= 0) {
-            let numericCells = 0;
-            for (const r of body) if (typeof r[ai] === 'number') numericCells++;
+            let numericCells = source?(source.numericCounts[ai]||0):0;
+            if(!source)for (const r of body) if (typeof r[ai] === 'number') numericCells++;
             if (numericCells) Toast.warn('Артикулы пришли числами (XLSX)',
               fmt(numericCells) + ' ячеек артикула — числа: Excel мог потерять ведущие нули (00123 → 123). Если в исходном файле есть такие артикулы, отформатируйте колонку как текст и загрузите заново.');
           }
@@ -28724,7 +28892,7 @@ const Import = {
         if ($('#impMode')) $('#impMode').value = 'upsert';
       }
       const applyStatus = $('#impApplyStatus'); if (applyStatus) { applyStatus.textContent = ''; applyStatus.hidden = true; }
-      S.pending = { file: file.name, headers, body, advisorTemplate, map: (guess ? guess.config : autoMap(headers)).map(m => ({ ...m })) };
+      S.pending = { file: file.name, sourceId:source?.id, headers, body, advisorTemplate, map: (guess ? guess.config : autoMap(headers)).map(m => ({ ...m })) };
       Import.normalize();
       Import.render();
       $('#impFileName').innerHTML = `<i class="fa-solid fa-file-lines" style="color:var(--teal)"></i> ${esc(file.name)} · ${fmt(body.length)} строк · ${headers.length} колон${headers.length % 10 === 1 && headers.length % 100 !== 11 ? 'ка' : headers.length % 10 >= 2 && headers.length % 10 <= 4 && (headers.length % 100 < 10 || headers.length % 100 > 20) ? 'ки' : 'ок'}`;
@@ -28843,6 +29011,9 @@ const Import = {
     /* v11-аудит: artCol мог устареть после ручных правок маппинга — пересчитываем. */
     Import.normalize();
     if (S.pending.artCol === -1) { Toast.err('Не выбран артикул', 'В окне маппинга назначьте одну колонку как «Артикул» в списке «Стандартное поле»'); return; }
+    const sourceId=S.pending.sourceId,collisionRun=sourceId?uid('lookup'):null;
+    if(sourceId&&PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
+    if(sourceId){if(BrowserImportSources.active.has(sourceId))throw new Error('Источник уже применяется');BrowserImportSources.active.add(sourceId);}
     return withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
       // Do not mutate the catalog when boot has already made persistence impossible.
       if(S._bootReady!==true||S._bootError)throw new Error('Импорт не начат: '+storageErrorText(S._bootError||'Хранилище ещё не готово. Дождитесь завершения запуска.'));
@@ -28914,6 +29085,7 @@ const Import = {
          создаёт, даже если переключатель обогащения выключен. Каталог стал
          пустым (очистка/замена) — следующий файл снова считается первым. */
       if (!S.rows.length) Import._priceFileDone = false;
+      else if(Import._priceFileDone===undefined)Import._priceFileDone=true; // Reloaded catalog is already the first price.
       const isPriceFile = !Import._priceFileDone;
       const enrichOnlyRef = (enrichOnlyOn || !isPriceFile) && S.rows.length > 0;
       if (!isPriceFile && S.rows.length) Prog.msg('файл после первого: только обогащение прайса (первого файла) — новые SKU не создаются');
@@ -28957,7 +29129,7 @@ const Import = {
       };
       // Detect collisions in the whole file first: do not import the first variant
       // before discovering another literal with the same normalized key.
-      const sourceVariants=new Map(), sourceConflicts=new Set();
+      const sourceVariants=new Map();let sourceConflicts=new Set();
       const importDataSignature=r=>JSON.stringify(mapped.map(cm=>{
         if(cm.target==='article'||cm.target==='brand')return '';
         /* v12.9.61: OE-номера и применимость — поля-накопители. В файле кроссов
@@ -28971,7 +29143,13 @@ const Import = {
         if(!STD.find(s=>s.k===cm.target))return '';
         const raw=cm.m.virtual?(cm.m.def||''):r[cm.col];return raw==null?'':String(raw).trim();
       }));
-      for(const r of body) {
+      const describeSource=r=>{
+        const a=normArticle(artMap&&r[artMap.col]);if(!a)return null;
+        const brand=normArticle(brandMap?r[brandMap.col]:'');
+        return {key:keyMode==='article+brand'?a+'|'+brand:a,brand,signature:importDataSignature(r)};
+      };
+      if(sourceId)await BrowserImportSources.prepareKeys(sourceId,collisionRun,describeSource);
+      else       for(const r of body) {
         const raw=artMap && r[artMap.col], a=normArticle(raw);if(!a)continue;
         const rawBrand=brandMap ? r[brandMap.col] : '', b=normArticle(rawBrand);
         const k=keyMode==='article+brand' ? a+'|'+b : a;
@@ -29019,8 +29197,9 @@ const Import = {
         const col = headers.indexOf(m.src);
         if (col < 0) continue;
         const vals = [];
-        for (let i = 0; i < body.length && vals.length < 200; i++) {
-          const v = body[i] ? body[i][col] : '';
+        for await (const row of BrowserImportSources.iterate(sourceId,body)) {
+          if(vals.length>=200)break;
+          const v = row ? row[col] : '';
           if (v === '' || v === undefined || v === null) continue;
           const n = num(v);
           if (!(n > 0) || !Number.isInteger(n)) { vals.length = 0; break; }
@@ -29049,8 +29228,10 @@ const Import = {
         if (prog) prog(`импорт строк ${fmt(start + 1)}–${fmt(end)} из ${fmt(body.length)}`);
         if (typeof UCCancel !== 'undefined') UCCancel.check();
         Prog.step(15 + (start / Math.max(body.length, 1)) * 45);
+        const inputBatch=sourceId?await BrowserImportSources.page(sourceId,start,end-start):body.slice(start,end);
+        if(sourceId)sourceConflicts=await BrowserImportSources.conflicts(collisionRun,inputBatch,describeSource);
         for (let ri = start; ri < end; ri++) {
-          const r = body[ri];
+          const r = inputBatch[ri-start];
           const rawArtCell = artMap && r[artMap.col] != null ? r[artMap.col] : '';
           const rawArt = articleText(rawArtCell);
           if (rawArtCell instanceof Date || articleLooksLikeDate(rawArt)) {
@@ -29520,6 +29701,7 @@ const Import = {
       // save does not destroy the user's import preview and retry source.
       try { body.length = 0; } catch (e) { }
       if (S.pending) { S.pending.body = []; S.pending.rows = []; }
+      if(sourceId)try{await BrowserImportSources.database().sources.update(sourceId,{status:'applied'});}catch(e){console.warn('[UC] статус применённого источника:',e);}
       Import._priceFileDone = true;
       _mark('пересчёт и запись');
       /* Автоматическая сверка работает независимо от общего режима обогащения.
@@ -29573,7 +29755,7 @@ const Import = {
       if (!S.view.length && S.rows.length) {
         Toast.warn('Строки не видны в таблице', 'Все SKU отсеяны правилами-исключениями или фильтрами. Смотрите жёлтый баннер в разделе 2 и счётчик «исключено».');
       }
-    });
+    }).finally(async()=>{if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.clearRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}});
   },
   /* v12.9.50 · СВЯЗАННЫЕ СТРОКИ КАТАЛОГА.
      Файлы, загружаемые ПОСЛЕ источника (весогабариты, OE-кроссы, названия),
@@ -46949,6 +47131,7 @@ function bindAll() {
       Toast.err('Ошибка экспорта', String(err.message || err).slice(0, 180));
     }
   });
+  on('#btnBrowserSources', 'onclick', () => BrowserImportSources.show().catch(e=>Toast.err('Источники',storageErrorText(e))));
   on('#btnImport', 'onclick', () => Import.pick());
   on('#btnPriceListUpsert', 'onclick', () => PriceListManager.pickFile());
   on('#btnExportOzon', 'onclick', () => OzonExport.open());

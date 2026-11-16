@@ -524,7 +524,8 @@ assert(app.includes('запись каталога одной порцией'), 
 // v12.9.95: остальные разделы пакета
 assert(app.includes('12.9.156-client+dual-processing'), 'версия 12.9.95');
 assert(app.includes('warnQuarantinedBeforeExport'), 'карантин: предупреждение перед выгрузкой');
-assert(app.includes("await CsvStream.rows(file, r => { table.push(r); }"), 'обычный импорт: потоковый разбор CSV');
+assert(app.includes('source=await BrowserImportSources.stage(file)'), 'обычный браузерный импорт: отдельная таблица IndexedDB');
+assert(app.includes('onChunk:flush'), 'браузерный CSV: backpressure при записи источника');
 assert(app.includes('let first = true;'), 'дисковый импорт: заголовок файла не попадает в данные');
 assert(app.includes('покрытие OE: '), 'дисковый импорт: отчёт о покрытии кроссами');
 assert(app.includes('oePairSets'), 'дисковый импорт: неоднозначные OE считаются');

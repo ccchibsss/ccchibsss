@@ -26,3 +26,7 @@ jobs:
           node-version: '20'
       - name: Тесты приложения (без зависимостей)
         run: node tests/run-tests.js
+      - name: IndexedDB источники — встроенный Dexie
+        run: |
+          npm install --prefix .arena/idb-tests fake-indexeddb@6.2.8 --no-save --no-audit --no-fund
+          NODE_PATH=.arena/idb-tests/node_modules node tests/browser-import-sources-indexeddb.js
