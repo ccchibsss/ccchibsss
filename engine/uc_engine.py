@@ -4691,24 +4691,10 @@ def enrich_name_categories(conn, rows, context, enabled=True):
 
 _HVC_REFERENCE_FIELDS = ('parts','oe','byArt','byOe','unsafeKeys','unsafeOe')
 
-# ThreadingHTTPServer can receive three HVC chunks at once. Queue them before
-# SQLite (one writer), including schema setup and commit/release operations.
-_HVC_REFERENCE_WRITE_LOCK=threading.Lock()
-
-def hvc_reference_upload(conn, body):
-    if not _HVC_REFERENCE_WRITE_LOCK.acquire(timeout=60):
-        raise ValueError('Очередь записи HVC занята больше 60 секунд; операция не выполнена')
-    previous_timeout=None
-    try:
-        previous_timeout=conn.execute('PRAGMA busy_timeout').fetchone()[0]
-        # Other endpoints/processes may also be writing. Wait without replaying
-        # the request; restore the connection policy even after an exception.
-        conn.execute('PRAGMA busy_timeout=30000')
-        return _hvc_reference_upload_locked(conn,body)
-    finally:
-        try:
-            if previous_timeout is not None:conn.execute('PRAGMA busy_timeout='+str(int(previous_timeout)))
-        finally:_HVC_REFERENCE_WRITE_LOCK.release()
+# HVC and canonical catalog writes share one queue, not nested queues with
+# additive waits. Reads retain WAL concurrency.
+def hvc_reference_upload(conn,body):
+    return _bulk_write(_hvc_reference_upload_locked)(conn,body)
 
 def _hvc_reference_upload_locked(conn, body):
     """Bounded, immutable SQLite reference chunks; no monolithic JSON upload."""
@@ -5053,65 +5039,103 @@ def enrich_full(conn, cat_mode='artbrand', enrich_mode='auto', enrich_cols=None,
     return {'cat_mode': cat_mode, 'filled': filled, 'conflicts': conflicts, 'donors': len(donors), 'quarantined': quarantined, 'dimension_reviews': reviews}
 
 # ---------------- обобщённый разбор файлов (п.5 аудита, v12.9.111) ----------------
-def _raw_table(filename, data):
-    """Файл -> (заголовки, строки-списки) без привязки к каталогу.
-       CSV — stdlib; XLSX — openpyxl, если есть; ZIP — первый файл внутри."""
-    name = os.path.basename(str(filename or 'file'))
+def iter_raw_file_rows(filename,data):
+    """Yield nonempty raw rows, keeping XLSX/CSV parsing buffers bounded."""
+    name=str(filename or 'file')
     if not name.lower().endswith(('.csv','.xlsx','.zip')):raise ValueError('SQL-парсер поддерживает CSV, XLSX и ZIP с одним файлом. Сохраните XLS/ODS как XLSX.')
     if name.lower().endswith('.zip'):
-        files = files_from_zip(data)
-        if not files: raise RuntimeError('в ZIP нет CSV/XLSX')
-        if len(files)!=1: raise ValueError('Для импорта с маппингом выберите один CSV/XLSX, а не архив с несколькими файлами')
-        name, data = files[0]
+        files=files_from_zip(data)
+        if not files:raise RuntimeError('в ZIP нет CSV/XLSX')
+        if len(files)!=1:raise ValueError('Для импорта с маппингом выберите один CSV/XLSX, а не архив с несколькими файлами')
+        name,data=files[0]
+    def nonempty(row):return any(str(v).strip() for v in row if v is not None)
     if name.lower().endswith('.xlsx'):
-        # v12.9.147: как импорт каталога — openpyxl если есть, иначе stdlib
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-            try: table = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
-            finally: wb.close()
+        try:import openpyxl
         except ImportError:
-            table = [list(r) for r in _xlsx_sheet_rows(data)]
+            for row in _xlsx_sheet_rows(data):
+                if nonempty(row):yield list(row)
+            return
+        wb=openpyxl.load_workbook(io.BytesIO(data),read_only=True,data_only=True)
+        try:
+            for row in wb.worksheets[0].iter_rows(values_only=True):
+                if nonempty(row):yield list(row)
+        finally:wb.close()
     else:
-        try: text = data.decode('utf-8-sig')
-        except UnicodeDecodeError: text = data.decode('cp1251')
-        first = text.split('\n', 1)[0]
-        delim = ';' if first.count(';') >= first.count(',') and first.count(';') >= first.count('\t') else ('\t' if first.count('\t') > first.count(',') else ',')
-        try: delim = csv.Sniffer().sniff(text[:2048], delimiters=';,\t|').delimiter
-        except csv.Error: pass
-        table = list(csv.reader(io.StringIO(text), delimiter=delim))
-    table = [r for r in table if any(str(c).strip() for c in r if c is not None)]
-    if not table: return [], []
-    headers = [str(h).strip() if h is not None else '' for h in table[0]]
-    return headers, table[1:]
+        import codecs
+        encoding='utf-8-sig'
+        try:
+            decoder=codecs.getincrementaldecoder(encoding)()
+            for off in range(0,len(data),65536):decoder.decode(data[off:off+65536])
+            decoder.decode(b'',final=True)
+        except UnicodeDecodeError:encoding='cp1251'
+        with io.TextIOWrapper(io.BytesIO(data),encoding=encoding,newline='') as stream:
+            sample=stream.read(2048);stream.seek(0);first=sample.split('\n',1)[0]
+            delim=';' if first.count(';')>=first.count(',') and first.count(';')>=first.count('\t') else ('\t' if first.count('\t')>first.count(',') else ',')
+            try:delim=csv.Sniffer().sniff(sample,delimiters=';,\t|').delimiter
+            except csv.Error:pass
+            for row in csv.reader(stream,delimiter=delim):
+                if nonempty(row):yield row
 
-def parse_file_bytes(conn, filename, data, catalog_import=False):
-    """Разобрать файл в кэш парсинга: наружу — постранично через /parse/rows.
-       Каталог не трогаем: это сырьё для импортов приложения (цены конкурентов,
-       продажи, заказы, тарифы — у каждого свои правила применения)."""
-    headers, table = _raw_table(filename, data)
-    if catalog_import:
-        all_rows=[headers]+table
-        hi=import_header_index(all_rows)
-        headers=[str(v).strip() if v is not None and str(v).strip() else 'Колонка_'+str(i+1) for i,v in enumerate(all_rows[hi])]
-        table=all_rows[hi+1:]
-    if len(headers)!=len(set(headers)):
-        raise ValueError('Повторяющиеся заголовки: переименуйте колонки перед импортом, иначе значения будут потеряны')
-    import uuid
-    sid = uuid.uuid4().hex[:16]
-    conn.execute('INSERT INTO parse_sessions(id,filename,headers,total,created) VALUES(?,?,?,?,datetime("now"))',
-                 (sid, os.path.basename(str(filename or 'file')), json.dumps(headers, ensure_ascii=False), len(table)))
-    conn.executemany('INSERT INTO parse_rows(session,idx,data) VALUES(?,?,?)',
-                     [(sid, i, json.dumps({headers[j]: (r[j] if j < len(r) else '') for j in range(len(headers))},
-                                           ensure_ascii=False, default=str)) for i, r in enumerate(table)])
-    # держим только 5 последних разборов
-    old = [r[0] for r in conn.execute('SELECT id FROM parse_sessions ORDER BY created DESC, rowid DESC LIMIT 100 OFFSET 5')]
-    for o in old:
-        conn.execute('DELETE FROM parse_sessions WHERE id=?', (o,))
-        conn.execute('DELETE FROM parse_rows WHERE session=?', (o,))
-    conn.commit()
-    log_api(conn, 'parseFile', str(filename), 'ok', f'строк {len(table)}')
-    return {'parse_id': sid, 'headers': headers, 'total': len(table)}
+def _raw_table(filename,data):
+    rows=iter(iter_raw_file_rows(filename,data))
+    try:first=next(rows)
+    except StopIteration:return [],[]
+    return [str(h).strip() if h is not None else '' for h in first],list(rows)
+
+# Queue heavy writes before SQLite; encoding/parsing stays outside the queue.
+_SQL_BULK_WRITE_LOCK=threading.RLock()
+def _bulk_write(fn):
+    import functools
+    @functools.wraps(fn)
+    def queued(conn,*args,**kwargs):
+        if not _SQL_BULK_WRITE_LOCK.acquire(timeout=60):raise ValueError('Очередь записи SQLite занята; операция не выполнена')
+        previous=None
+        try:
+            previous=conn.execute('PRAGMA busy_timeout').fetchone()[0]
+            conn.execute('PRAGMA busy_timeout=30000')
+            return fn(conn,*args,**kwargs)
+        finally:
+            try:
+                if previous is not None:conn.execute('PRAGMA busy_timeout='+str(int(previous)))
+            finally:_SQL_BULK_WRITE_LOCK.release()
+    return queued
+
+def parse_file_bytes(conn,filename,data,catalog_import=False):
+    import itertools,tempfile,uuid
+    rows=iter(iter_raw_file_rows(filename,data))
+    try:
+        prefix=list(itertools.islice(rows,9 if catalog_import else 1))
+        if prefix:
+            hi=import_header_index(prefix) if catalog_import else 0
+            headers=[str(v).strip() if v is not None else '' for v in prefix[hi]]
+            if catalog_import:headers=[v or 'Колонка_'+str(i+1) for i,v in enumerate(headers)]
+        else:hi=0;headers=[]
+        if len(headers)!=len(set(headers)):raise ValueError('Повторяющиеся заголовки: переименуйте колонки перед импортом, иначе значения будут потеряны')
+        sid=uuid.uuid4().hex[:16];total=0
+        # Parse/encode completely before taking a write lock. Spool to disk,
+        # not a second in-memory list of all encoded rows.
+        with tempfile.TemporaryFile(mode='w+t',encoding='utf-8') as spool:
+            for row in itertools.chain(prefix[hi+1:],rows):
+                spool.write(json.dumps({headers[j]:(row[j] if j<len(row) else '') for j in range(len(headers))},ensure_ascii=False,default=str)+'\n');total+=1
+            spool.seek(0)
+            @_bulk_write
+            def publish(conn):
+                with conn:
+                    conn.execute('INSERT INTO parse_sessions(id,filename,headers,total,created) VALUES(?,?,?,?,datetime("now"))',(sid,os.path.basename(str(filename or 'file')),json.dumps(headers,ensure_ascii=False),total))
+                    pending=[]
+                    for idx,line in enumerate(spool):
+                        pending.append((sid,idx,line.rstrip('\n')))
+                        if len(pending)==1000:
+                            conn.executemany('INSERT INTO parse_rows(session,idx,data) VALUES(?,?,?)',pending);pending.clear()
+                    if pending:conn.executemany('INSERT INTO parse_rows(session,idx,data) VALUES(?,?,?)',pending)
+                    old=[r[0] for r in conn.execute('SELECT id FROM parse_sessions ORDER BY created DESC,rowid DESC LIMIT -1 OFFSET 5')]
+                    for old_id in old:
+                        conn.execute('DELETE FROM parse_rows WHERE session=?',(old_id,));conn.execute('DELETE FROM parse_sessions WHERE id=?',(old_id,))
+                log_api(conn,'parseFile',str(filename),'ok',f'строк {total}')
+            publish(conn)
+        return {'parse_id':sid,'headers':headers,'total':total}
+    finally:
+        if hasattr(rows,'close'):rows.close()
 
 # ---------------- история цен и снапшоты (п.6 аудита, v12.9.112) ----------------
 def price_changes(conn, days=30, limit=200):
@@ -5652,37 +5676,91 @@ def _xlsx_workbook(sheets, column_meta=None, protect=False):
     return out.getvalue()
 
 
-def export_data_only(conn,columns,fmt):
-    """Read the canonical app catalog, never normalized products/eco_results."""
+_DATA_EXPORT_SLOTS=threading.BoundedSemaphore(2)
+def export_data_only_file(conn,columns,fmt,revision=None):
+    """Two-pass disk snapshot and file output; returned file belongs to caller."""
+    import tempfile
     if fmt not in ('csv','xlsx') or not isinstance(columns,list) or not columns:raise ValueError('Неверный формат или колонки')
     if any(not isinstance(c,dict) or not isinstance(c.get('key'),str) or not isinstance(c.get('name'),str) for c in columns):raise ValueError('Неверные колонки')
-    # A read transaction pins head and chunks across concurrent catalog saves.
-    with conn:
-        conn.execute('BEGIN')
-        head=conn.execute('SELECT revision FROM app_catalog_head WHERE id=1').fetchone()
-        if not head:raise ValueError('Каталог SQLite пуст')
-        rows=[]
-        for (raw,) in conn.execute('SELECT data FROM app_catalog_chunks WHERE revision=? ORDER BY part',(head[0],)):
-            chunk=json.loads(raw)
-            rows.extend(decode_special(chunk['rows'],chunk.get('special_values',[])))
-    if not rows:raise ValueError('Каталог пуст')
-    def source(p,c):return (p.get('custom') or {}).get(c['key']) if c.get('custom') else p.get(c['key'])
-    cols=[c for c in columns if c.get('custom') or any(source(p,c) is not None for p in rows)]
-    headers=[c['name']+(' [пользовательская: '+c['key']+']' if c.get('custom') else '') for c in cols]
-    def cell(v):
-        if v is None:return ''
-        if isinstance(v,bool):return 'true' if v else 'false'
-        if isinstance(v,(dict,list)):return json.dumps(v,ensure_ascii=False,separators=(',',':'))
-        if isinstance(v,float) and not math.isfinite(v):return str(v)
-        return v
-    values=([cell(source(p,c)) for c in cols] for p in rows)
-    if fmt=='xlsx':
-        if len(cols)>16384 or len(rows)>1048575:raise ValueError('Превышен лимит XLSX; выберите CSV')
-        return _xlsx_from_rows(headers,values,'Данные')
-    out=io.StringIO(newline='');writer=csv.writer(out,delimiter=';',lineterminator='\r\n',quoting=csv.QUOTE_ALL)
-    writer.writerow([safe_csv_text(h) for h in headers])
-    for row in values:writer.writerow([safe_csv_text(v) for v in row])
-    return ('\ufeff'+out.getvalue()).encode('utf-8')
+    if not _DATA_EXPORT_SLOTS.acquire(timeout=30):raise ValueError('Две выгрузки уже выполняются; повторите позже')
+    output=None
+    try:
+        with tempfile.TemporaryFile(mode='w+t',encoding='utf-8') as snapshot:
+            present=set();total=0
+            def source(p,c):return (p.get('custom') or {}).get(c['key']) if c.get('custom') else p.get(c['key'])
+            with conn:
+                conn.execute('BEGIN')
+                head=conn.execute('SELECT revision FROM app_catalog_head WHERE id=1').fetchone()
+                if not head:raise ValueError('Каталог SQLite пуст')
+                if revision is not None and revision!=head[0]:raise ValueError('Ревизия SQLite изменилась; повторите экспорт')
+                for (raw,) in conn.execute('SELECT data FROM app_catalog_chunks WHERE revision=? ORDER BY part',(head[0],)):
+                    chunk=json.loads(raw)
+                    projected_batch=[]
+                    for p in decode_special(chunk['rows'],chunk.get('special_values',[])):
+                        # Project immediately; encode once per bounded SQL chunk,
+                        # not once per cell/row. No calculation metadata in spool.
+                        projected=[source(p,c) for c in columns]
+                        present.update(i for i,v in enumerate(projected) if v is not None)
+                        projected_batch.append(projected);total+=1
+                    snapshot.write(json.dumps(projected_batch,ensure_ascii=False,default=str)+'\n')
+            # End the read transaction BEFORE formatting or downloading, so a
+            # slow client cannot pin old WAL pages indefinitely.
+            if not total:raise ValueError('Каталог пуст')
+            indices=[i for i,c in enumerate(columns) if c.get('custom') or i in present]
+            cols=[columns[i] for i in indices]
+            headers=[c['name']+(' [пользовательская: '+c['key']+']' if c.get('custom') else '') for c in cols]
+            if fmt=='xlsx' and (len(cols)>16384 or total>1048575):raise ValueError('Превышен лимит XLSX; выберите CSV')
+            def cell(v):
+                if v is None:return ''
+                if isinstance(v,bool):return 'true' if v else 'false'
+                if isinstance(v,(dict,list)):return json.dumps(v,ensure_ascii=False,separators=(',',':'))
+                if isinstance(v,float) and not math.isfinite(v):return str(v)
+                return v
+            snapshot.seek(0)
+            values=([cell(row[i]) for i in indices] for line in snapshot for row in json.loads(line))
+            output=tempfile.TemporaryFile(mode='w+b')
+            if fmt=='csv':
+                text=io.TextIOWrapper(output,encoding='utf-8-sig',newline='')
+                try:
+                    writer=csv.writer(text,delimiter=';',lineterminator='\r\n',quoting=csv.QUOTE_ALL)
+                    writer.writerow([safe_csv_text(h) for h in headers])
+                    for row in values:writer.writerow([safe_csv_text(v) for v in row])
+                    text.flush()
+                finally:text.detach()
+            else:
+                # Reuse the existing minimal workbook envelope, replacing only
+                # sheet XML with a streaming ZIP member. No shared-string table.
+                template=_xlsx_from_rows([],[],'Данные')
+                with zipfile.ZipFile(io.BytesIO(template)) as src,zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as dst:
+                    for name in src.namelist():
+                        if name!='xl/worksheets/sheet1.xml':dst.writestr(name,src.read(name))
+                    with dst.open('xl/worksheets/sheet1.xml','w',force_zip64=True) as sheet:
+                        def write(text):sheet.write(text.encode('utf-8'))
+                        write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>')
+                        def letter(i):
+                            out='';i+=1
+                            while i:i,r=divmod(i-1,26);out=chr(65+r)+out
+                            return out
+                        letters=[letter(i) for i in range(len(cols))]
+                        import itertools
+                        for rn,row in enumerate(itertools.chain([headers],values),1):
+                            write('<row r="'+str(rn)+'">')
+                            for ci,v in enumerate(row):
+                                if v is None or v=='':continue
+                                ref=letters[ci]+str(rn)
+                                if isinstance(v,(int,float)) and not isinstance(v,bool):write('<c r="'+ref+'"><v>'+str(v)+'</v></c>')
+                                else:write('<c r="'+ref+'" t="inlineStr"><is><t xml:space="preserve">'+_xml_esc(v)+'</t></is></c>')
+                            write('</row>')
+                        write('</sheetData></worksheet>')
+            output.seek(0);return output
+    except BaseException:
+        if output is not None:output.close()
+        raise
+    finally:_DATA_EXPORT_SLOTS.release()
+
+def export_data_only(conn,columns,fmt):
+    # Compatibility helper for direct callers/tests. HTTP uses the file path.
+    with export_data_only_file(conn,columns,fmt) as output:return output.read()
 
 def export_catalog_xlsx_bytes(conn, keys=None, columns=None, sheets=None, column_meta=None, protect=False):
     cols=columns if columns is not None else EXPORT_COLS
@@ -6001,6 +6079,19 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in extra.items(): self.send_header(k, v)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers(); self.wfile.write(body)
+    def _send_file(self,output,content_type,filename):
+        output.seek(0,2);size=output.tell();output.seek(0)
+        self.send_response(200)
+        self.send_header('Content-Type',content_type)
+        self.send_header('Content-Disposition','attachment; filename="'+filename+'"')
+        self.send_header('Content-Length',str(size))
+        self.send_header('Access-Control-Allow-Origin','*')
+        self.end_headers()
+        # No whole-file gzip copy; ZIP is already compressed. Caller closes
+        # the temporary file even after disconnect/BrokenPipe.
+        try:shutil.copyfileobj(output,self.wfile,1024*1024)
+        except (BrokenPipeError,ConnectionResetError):return
+
     def _maybe_gzip(self, body):
         if len(body) < 1024 or 'gzip' not in (self.headers.get('Accept-Encoding', '') or ''): return body, {}
         import gzip as _gz
@@ -6109,7 +6200,7 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             sid = (qs.get('parse_id') or [''])[0]
             off = int(num((qs.get('offset') or ['0'])[0])); lim = min(5000, int(num((qs.get('limit') or ['1000'])[0])) or 1000)
-            rows = conn.execute('SELECT data FROM parse_rows WHERE session=? ORDER BY idx LIMIT ? OFFSET ?', (sid, lim, off)).fetchall()
+            rows = conn.execute('SELECT data FROM parse_rows WHERE session=? AND idx>=? ORDER BY idx LIMIT ?', (sid, max(0,off), max(1,lim))).fetchall()
             total = conn.execute('SELECT total FROM parse_sessions WHERE id=?', (sid,)).fetchone()
             if total is None: return self._send(404, {'ok': False, 'error': 'parse_id не найден'})
             return self._send(200, {'ok': True, 'total': total[0], 'rows': [json.loads(r[0]) for r in rows]})
@@ -6306,8 +6397,8 @@ class Handler(BaseHTTPRequestHandler):
                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
             if self.path in ('/export/data-only.csv','/export/data-only.xlsx'):
                 fmt='xlsx' if self.path.endswith('.xlsx') else 'csv'
-                return self._send_bytes(200,export_data_only(conn,body.get('columns'),fmt),
-                    'text/csv; charset=utf-8' if fmt=='csv' else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','UC_data_only.'+fmt)
+                with export_data_only_file(conn,body.get('columns'),fmt,body.get('revision')) as output:
+                    return self._send_file(output,'text/csv; charset=utf-8' if fmt=='csv' else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','UC_data_only.'+fmt)
             if self.path.startswith('/export/catalog'):
                 # Filter before generating row-relative formulas; filtering a
                 # prepared snapshot afterwards would leave references shifted.
@@ -6406,7 +6497,11 @@ def watch_loop():
         time.sleep(300)
 
 
-def app_catalog_state(conn, action, body):
+def app_catalog_state(conn,action,body):
+    if action=='read':return _app_catalog_state(conn,action,body)
+    return _bulk_write(_app_catalog_state)(conn,action,body)
+
+def _app_catalog_state(conn, action, body):
     """Versioned complete application rows, separate from normalized calc tables."""
     import secrets
     conn.execute('CREATE TABLE IF NOT EXISTS app_catalog_head(id INTEGER PRIMARY KEY CHECK(id=1),revision TEXT NOT NULL,metadata TEXT NOT NULL,total INTEGER NOT NULL)')

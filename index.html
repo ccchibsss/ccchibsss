@@ -13829,8 +13829,7 @@ const Prog = {
     if (!this.timer) this.timer = setInterval(() => {
       const s = (performance.now() - this.t0) / 1000;
       $('#prTime').textContent = s.toFixed(1) + ' с';
-      const w = parseFloat($('#prBar').style.width) || 18;
-      if (w < 92) $('#prBar').style.width = (w + 3) + '%';
+      // Elapsed time is not work completed. Only step() changes the bar.
     }, 140);
   },
   msg(m) { $('#prMsg').textContent = m; },
@@ -21583,8 +21582,11 @@ function runPipeline(full, options) {
           if(typeof HVC!=='undefined')HVC.ensureNorm(p);
         }
         if(full) {
+          if(typeof prog==='function')prog('Обогащение: категории по названию · SKU '+fmt(start+1)+'–'+fmt(end));
           await PyEngine.enrichNameCategories(nameCategoryContext,nameAutoEnabled,sqlBatch);
+          if(typeof prog==='function')prog('Обогащение: виды категорий · SKU '+fmt(start+1)+'–'+fmt(end));
           await PyEngine.enrichCategoryKinds(nameCategoryContext,nameAutoEnabled,sqlBatch);
+          if(typeof prog==='function')prog('Обогащение Ozon и подготовка справочника · SKU '+fmt(start+1)+'–'+fmt(end));
           await PyEngine.enrichOzonPreferred(sqlBatch,{reference:ozonSqlReference});
         }
         await PyEngine.applyProductPolicies(sqlBatch,ex);
@@ -27503,7 +27505,10 @@ const PyEngine = {
       for (let off = 0; ; off += 5000) {
         const page = await this._fetch('/parse/rows?parse_id=' + encodeURIComponent(j.parse_id) + '&offset=' + off + '&limit=5000', { timeout: 120000 });
         if(page.total!==j.total||!Array.isArray(page.rows)||page.rows.length!==Math.min(5000,j.total-off))throw new Error('Неполный разбор файла: число строк изменилось или часть потеряна');
-        out.push(...page.rows);
+        if(options?.table)out.push(...page.rows.map(row=>j.headers.map(key=>row[key]??'')));
+        else out.push(...page.rows);
+        if(typeof Prog!=='undefined'){Prog.msg('Чтение из SQLite: '+out.length+' из '+j.total+' строк');Prog.step(35+30*out.length/Math.max(1,j.total));}
+        if(typeof UCCancel!=='undefined')UCCancel.check();
         if(out.length===j.total)break;
       }
       return out;
@@ -28669,8 +28674,8 @@ const Import = {
       Prog.step(35);
       let table = [];
       if (await PyEngine.processingAvailable()) {
-        const rows=await PyEngine.parseFile(file,{catalogImport:true});
-        if(rows.length){const headers=rows.headers||Object.keys(rows[0]);table=[headers,...rows.map(r=>headers.map(k=>r[k]??''))];}
+        const rows=await PyEngine.parseFile(file,{catalogImport:true,table:true});
+        if(rows.length)table=[rows.headers,...rows];
       } else if (/\.csv$/i.test(file.name)) {
         /* v12.9.95: потоковый разбор (CsvStream) — файл не поднимается целиком
            строкой, таблица строится по мере чтения кусков по 4 МБ. Значения,
@@ -40895,38 +40900,67 @@ const DataOnlyExport = {
   },
   async run() {
     const button=$('#dataExportRun');if(button.disabled)return;button.disabled=true;
-    try{await withProgress('Экспорт данных без расчётов','все строки и сохранённые значения',async()=>{
-      const format=$('#dataExportFormat').value==='csv'?'csv':'xlsx',specs=this.specs();let blob;
+    let handle=null,sink=null;
+    try{
+      const format=$('#dataExportFormat').value==='csv'?'csv':'xlsx';
+      // Request the destination while the click still has user activation.
+      // Compatible browsers stream to disk; others retain the Blob download.
+      if(typeof window!=='undefined'&&typeof window.showSaveFilePicker==='function')handle=await window.showSaveFilePicker({suggestedName:'UC_данные_без_расчётов.'+format});
+      await withProgress('Экспорт данных без расчётов','все строки и сохранённые значения',async()=>{
+      const specs=this.specs();let blob;
       if(PyEngine.processingMode()==='sql'){
         await PyEngine.processingAvailable();
+        if(typeof Prog!=='undefined')Prog.msg('SQLite: сохранение актуальной ревизии каталога…');
         if(await persistNow()===false)throw new Error('Каталог не сохранён в SQLite; экспорт остановлен');
+        if(typeof Prog!=='undefined')Prog.msg('Python: запись файла на диск и скачивание, без расчётов…');
         const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),600000);
         try{
           const r=await fetch(PyEngine.base()+'/export/data-only.'+format,{method:'POST',signal:ctl.signal,
-            headers:{'Content-Type':'application/json','X-UC-Token':PyEngine.token()},body:JSON.stringify({columns:specs})});
+            headers:{'Content-Type':'application/json','X-UC-Token':PyEngine.token()},body:JSON.stringify({columns:specs,revision:S._sqlCatalogRevision})});
           if(!r.ok){const error=await r.json().catch(()=>({}));throw new Error(error.error||'HTTP '+r.status);}
+          if(handle&&r.body){
+            sink=await handle.createWritable();await r.body.pipeTo(sink);sink=null;return;
+          }
           blob=await r.blob();
         }finally{clearTimeout(timer);}
       }else{
-        const rows=S.rows;if(!rows.length)throw new Error('Каталог пуст');
+        const rows=S.rows,version=S.catalogVersion,custom=JSON.stringify(S.custom);
+        const validate=()=>{if(S.rows!==rows||S.catalogVersion!==version||PyEngine.processingMode()!=='browser'||JSON.stringify(S.custom)!==custom)throw new Error('Каталог или режим изменились во время экспорта; повторите выгрузку');};
+        if(!rows.length)throw new Error('Каталог пуст');
         const present=new Set();for(const p of rows)for(const c of specs)if((c.custom?(p.custom||{})[c.key]:p[c.key])!==undefined)present.add(c);
         const cols=specs.filter(c=>c.custom||present.has(c));
         const headers=cols.map(c=>c.name+(c.custom?' [пользовательская: '+c.key+']':''));
         if(format==='csv'){
           const quote=v=>'"'+safeCsvText(v).replace(/"/g,'""')+'"';
-          const chunks=['\ufeff',headers.map(quote).join(';')+'\r\n'];
-          for(let i=0;i<rows.length;i+=1000)chunks.push(rows.slice(i,i+1000).map(p=>cols.map(c=>quote(this.value(p,c))).join(';')).join('\r\n')+'\r\n');
+          const chunks=[];
+          if(handle)sink=await handle.createWritable();
+          const emit=async text=>{if(sink)await sink.write(text);else chunks.push(text);};
+          await emit('\ufeff'+headers.map(quote).join(';')+'\r\n');
+          for(let i=0;i<rows.length;i+=1000){
+            await emit(rows.slice(i,i+1000).map(p=>cols.map(c=>quote(this.value(p,c))).join(';')).join('\r\n')+'\r\n');
+            if(typeof Prog!=='undefined'){Prog.msg('CSV: '+Math.min(i+1000,rows.length)+' из '+rows.length+' строк');Prog.step(10+80*Math.min(i+1000,rows.length)/rows.length);}
+            if(typeof UCCancel!=='undefined')UCCancel.check();
+            await new Promise(resolve=>setTimeout(resolve,0));validate();
+          }
+          if(sink){await sink.close();sink=null;return;}
           blob=new Blob(chunks,{type:'text/csv;charset=utf-8'});
         }else{
           if(cols.length>16384||rows.length>1048575)throw new Error('Превышен лимит XLSX; выберите CSV');
-          const ws=XLSX.utils.aoa_to_sheet([headers,...rows.map(p=>cols.map(c=>this.value(p,c)))]);
+          const ws=XLSX.utils.aoa_to_sheet([headers]);
+          for(let i=0;i<rows.length;i+=1000){
+            XLSX.utils.sheet_add_aoa(ws,rows.slice(i,i+1000).map(p=>cols.map(c=>this.value(p,c))),{origin:-1});
+            if(typeof Prog!=='undefined'){Prog.msg('XLSX: '+Math.min(i+1000,rows.length)+' из '+rows.length+' строк');Prog.step(10+70*Math.min(i+1000,rows.length)/rows.length);}
+            if(typeof UCCancel!=='undefined')UCCancel.check();
+            await new Promise(resolve=>setTimeout(resolve,0));validate();
+          }
           const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Данные');
           blob=new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
         }
       }
+      if(handle){sink=await handle.createWritable();await sink.write(blob);await sink.close();sink=null;return;}
       const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='UC_данные_без_расчётов.'+format;
       document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);
-    });}catch(e){if(!e?._ucShown)Toast.err('Экспорт данных',storageErrorText(e));}finally{button.disabled=false;}
+    });}catch(e){if(sink)try{await sink.abort();}catch(cleanup){}if(e?.name!=='AbortError'&&!e?._ucShown)Toast.err('Экспорт данных',storageErrorText(e));}finally{button.disabled=false;}
   }
 };
 
