@@ -28752,6 +28752,135 @@ const BrowserApplyCheckpoint = {
   }
 };
 
+/* Temporary target identity indexes: bounded key batches, not a second Map of
+   the full catalog. Row references are frozen to preserve legacy pre-dedup keys. */
+const BrowserCatalogLookup = {
+  BATCH:1000,
+  async create(rows,source='') {
+    const lookup=Object.create(this);lookup.run=uid('catalog-lookup');lookup.rows=rows.slice();lookup.oeReady=false;
+    try{
+      const d=BrowserImportSources.database();
+      // Normal Apply holds the operation lock: prior runs for this source
+      // can only be leftovers of a closed/crashed application.
+      if(source)for(const old of await d.catalogRuns.where('source').equals(source).toArray())await this.clear(old.id);
+      await d.catalogRuns.add({id:lookup.run,source,created:Date.now()});
+      for(let start=0;start<rows.length;start+=this.BATCH){
+        BrowserImportSources.check();const records=[];
+        for(let pos=start;pos<Math.min(start+this.BATCH,rows.length);pos++){
+          const row=rows[pos],a=normArticle(row.article);if(!a)continue;
+          records.push({kind:'pair',key:a+'|'+normArticle(row.brand),pos},{kind:'article',key:a,pos});
+        }
+        await lookup.write(records,false);
+        if(typeof Prog!=='undefined')Prog.msg('Индекс каталога IndexedDB: '+Math.min(start+this.BATCH,rows.length)+' из '+rows.length);
+      }
+      return lookup;
+    }catch(e){try{await lookup.dispose();}catch(ignore){}throw e;}
+  },
+  async write(records,sameObject) {
+    const table=BrowserImportSources.database().catalogKeys,run=this.run;
+    // Bound transactions even when one SKU contains thousands of OE codes.
+    for(let off=0;off<records.length;off+=this.BATCH){
+      BrowserImportSources.check();const chunk=records.slice(off,off+this.BATCH);
+      await BrowserImportSources.database().transaction('rw',table,async()=>{
+        const old=await table.bulkGet(chunk.map(r=>[run,r.kind,r.key])),local=new Map();
+        for(let i=0;i<chunk.length;i++)if(old[i])local.set(JSON.stringify([chunk[i].kind,chunk[i].key]),old[i]);
+        for(const item of chunk){
+          const k=JSON.stringify([item.kind,item.key]),prior=local.get(k);
+          if(!prior)local.set(k,{run,...item,duplicate:0});
+          else if(!sameObject||this.rows[prior.pos]!==this.rows[item.pos])prior.duplicate=1;
+        }
+        await table.bulkPut([...local.values()]);
+      });
+    }
+  },
+  async query(kind,keys) {
+    const unique=[...new Set(keys)],out=new Map(),table=BrowserImportSources.database().catalogKeys;
+    for(let off=0;off<unique.length;off+=this.BATCH){
+      BrowserImportSources.check();
+      const found=await table.bulkGet(unique.slice(off,off+this.BATCH).map(key=>[this.run,kind,key]));
+      for(const record of found)if(record)out.set(record.key,record);
+    }
+    return out;
+  },
+  async batch(input,article,brand) {
+    const pairs=[],articles=[];
+    for(const row of input){const a=article(row);if(a){articles.push(a);pairs.push(a+'|'+brand(row));}}
+    const pair=await this.query('pair',pairs),art=await this.query('article',articles);
+    const idx=new Map(),idxArt=new Map(),duplicatePair=new Set(),duplicateArt=new Set();
+    for(const [key,record] of pair){idx.set(key,this.rows[record.pos]);if(record.duplicate)duplicatePair.add(key);}
+    for(const [key,record] of art){idxArt.set(key,this.rows[record.pos]);if(record.duplicate)duplicateArt.add(key);}
+    return {idx,idxArt,duplicatePair,duplicateArt};
+  },
+  async protectDuplicates(protectedRows) {
+    for(let off=0;off<this.rows.length;off+=this.BATCH){
+      const rows=this.rows.slice(off,off+this.BATCH),keys=rows.map(p=>normArticle(p.article)+'|'+normArticle(p.brand));
+      const pairs=await this.query('pair',keys);
+      rows.forEach((p,i)=>{if(pairs.get(keys[i])?.duplicate&&!p._ozonPreserveKey){p._ozonPreserveKey=true;protectedRows.push(p);}});
+    }
+  },
+  async ensureOe() {
+    if(this.oeReady)return;
+    let records=[];
+    for(let pos=0;pos<this.rows.length;pos++){
+      BrowserImportSources.check();const row=this.rows[pos];
+      for(const oe of codeList(mergeCodeLists(row.oe_numbers,row.oe_list))){
+        const key=HVC.normalizeKey(oe);if(!key)continue;
+        records.push({kind:'oe',key,pos});
+        if(records.length>=this.BATCH){await this.write(records,true);records=[];}
+      }
+    }
+    if(records.length)await this.write(records,true);this.oeReady=true;
+    if(typeof Prog!=='undefined')Prog.msg('Индекс OE каталога IndexedDB готов');
+  },
+  async oeBatch(input,maps) {
+    if(this._oeInput===input)return;
+    const keys=[];for(const row of input)for(const cm of maps)for(const oe of codeList(row[cm.col])){const k=HVC.normalizeKey(oe);if(k)keys.push(k);}
+    this._oeHits=await this.query('oe',keys);this._oeInput=input;
+  },
+  findOe(row,maps) {
+    for(const cm of maps)for(const oe of codeList(row[cm.col])){
+      const hit=this._oeHits.get(HVC.normalizeKey(oe));if(hit&&!hit.duplicate)return this.rows[hit.pos];
+    }
+    return null;
+  },
+  async related(imported,importedSet) {
+    const out=[],seen=new Set(),flags=HVC._enrichFlags();let requests=[];
+    const empty=p=>{
+      if(flags.name&&!String(p.name||'').trim())return true;
+      if(flags.applicability&&!String(p.applicability||'').trim())return true;
+      if(flags.category){const cat=String(p.category||'').trim().toLowerCase();if(!cat||['без категории','разное','прочее','не определено'].includes(cat))return true;}
+      if(flags.tnved&&!String(p.tnved||'').trim())return true;
+      return flags.dims.some(k=>!(num(p[k])>0));
+    };
+    const flush=async()=>{
+      const pairs=await this.query('pair',requests.filter(x=>x.kind==='pair').map(x=>x.key));
+      const arts=await this.query('article',requests.filter(x=>x.kind==='article').map(x=>x.key));
+      for(const item of requests){const record=(item.kind==='pair'?pairs:arts).get(item.key),p=record&&this.rows[record.pos];
+        if(!p||importedSet.has(p)||seen.has(p))continue;seen.add(p);if(empty(p))out.push(p);
+      }
+      requests=[];
+    };
+    const add=async(kind,key)=>{requests.push({kind,key});if(requests.length>=this.BATCH)await flush();};
+    for(const row of imported){
+      if(!row)continue;const key=HVC.keyOf(row),art=HVC.normalizeKey(row.article);if(art)await add('article',art);
+      for(const oe of HVC.byArt.get(key)||[])for(const k of HVC.byOe.get(oe)||[]){
+        await add('pair',k);const cut=String(k).indexOf('|');if(cut>0)await add('article',String(k).slice(0,cut));
+      }
+    }
+    if(requests.length)await flush();return out;
+  },
+  async clear(run) {
+    const d=BrowserImportSources.database();
+    await d.transaction('rw',d.catalogKeys,d.catalogRuns,async()=>{
+      await d.catalogKeys.where('run').equals(run).delete();await d.catalogRuns.delete(run);
+    });
+  },
+  async dispose() {
+    await this.clear(this.run);
+    this.rows=[];this._oeHits=null;this._oeInput=null;
+  }
+};
+
 const BrowserImportSources = {
   BATCH:1000, active:new Set(), busy:false,
   async exclusive(task) {
@@ -28771,6 +28900,7 @@ const BrowserImportSources = {
     if(!this._db){
       const d=new Dexie('UC_BrowserImportSources');
       d.version(1).stores({sources:'id,status,created',rows:'[source+pos],source',keys:'[run+key],run',runs:'id,source,created'});
+      d.version(2).stores({catalogKeys:'[run+kind+key],run',catalogRuns:'id,source,created'});
       this._db=d;
     }
     return this._db;
@@ -28910,7 +29040,10 @@ const BrowserImportSources = {
   async _remove(id) {
     if(this.active.has(id))throw new Error('Источник сейчас применяется; дождитесь завершения');
     const d=this.database();
-    await d.transaction('rw',d.sources,d.rows,d.keys,d.runs,async()=>{
+    await d.transaction('rw',d.sources,d.rows,d.keys,d.runs,d.catalogKeys,d.catalogRuns,async()=>{
+      for(const run of await d.catalogRuns.where('source').equals(id).toArray()){
+        await d.catalogKeys.where('run').equals(run.id).delete();await d.catalogRuns.delete(run.id);
+      }
       for(const run of await d.runs.where('source').equals(id).toArray()){
         await d.keys.where('run').equals(run.id).delete();await d.runs.delete(run.id);
       }
@@ -29127,7 +29260,7 @@ const Import = {
     /* v11-аудит: artCol мог устареть после ручных правок маппинга — пересчитываем. */
     Import.normalize();
     if (S.pending.artCol === -1) { Toast.err('Не выбран артикул', 'В окне маппинга назначьте одну колонку как «Артикул» в списке «Стандартное поле»'); return; }
-    const sourceId=S.pending.sourceId;let collisionRun=sourceId?uid('lookup'):null,checkpoint=null;
+    const sourceId=S.pending.sourceId;let collisionRun=sourceId?uid('lookup'):null,checkpoint=null,catalogLookup=null;
     if(sourceId&&PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
     return BrowserImportSources.exclusive(()=>withProgress('Применение импорта', 'нормализация → upsert по ключу → OE-группы', async prog => {
       if(sourceId&&PyEngine.processingMode()!=='browser')throw new Error('Источник IndexedDB нельзя применять в SQL-режиме');
@@ -29152,10 +29285,11 @@ const Import = {
        * существующим «артикул|бренд» → создавался дубль (216k строк → 600k+).
        * Теперь ведём ДВА индекса: точный (article+brand) и запасной (только article).
        * Если в файле нет колонки бренда — матчим по артикулу. */
-      const idx = new Map();     // точный ключ
-      const idxArt = new Map();  // запасной: только нормализованный артикул
-      const duplicateArt = new Set(), duplicatePair = new Set();
-      S.rows.forEach(p => {
+      let idx = new Map();     // точный ключ
+      let idxArt = new Map();  // запасной: только нормализованный артикул
+      let duplicateArt = new Set(), duplicatePair = new Set();
+      if(sourceId&&S.rows.length&&Import._priceFileDone!==false)catalogLookup=await BrowserCatalogLookup.create(S.rows,sourceId);
+      else S.rows.forEach(p => {
         const a = normArticle(p.article);
         if (!a) return;
         const full = a + '|' + normArticle(p.brand);
@@ -29225,7 +29359,13 @@ const Import = {
       const oeMaps = mapped.filter(x => ['oe_numbers','oe_list','oe'].includes(x.target));
       let oeIdx = null;
       const AMBIG = {};
-      const findByOe = r => {
+      let inputBatch=null;
+      const findByOe = async r => {
+        if(catalogLookup){
+          if(!oeMaps.length)return null;
+          await catalogLookup.ensureOe();await catalogLookup.oeBatch(inputBatch,oeMaps);
+          return catalogLookup.findOe(r,oeMaps);
+        }
         if (!oeMaps.length) return null;
         if (!oeIdx) {
           oeIdx = new Map();
@@ -29297,7 +29437,8 @@ const Import = {
       const oeAcc = new Map();
       const visibilityUpdates = [];
       const ambiguousProtected = [];
-      if (duplicatePair.size) {
+      if(catalogLookup)await catalogLookup.protectDuplicates(ambiguousProtected);
+      else if (duplicatePair.size) {
         S.rows.forEach(p => {
           const pair = normArticle(p.article) + '|' + normArticle(p.brand);
           if (duplicatePair.has(pair) && !p._ozonPreserveKey) { p._ozonPreserveKey = true; ambiguousProtected.push(p); }
@@ -29347,7 +29488,11 @@ const Import = {
         if (prog) prog(`импорт строк ${fmt(start + 1)}–${fmt(end)} из ${fmt(body.length)}`);
         if (typeof UCCancel !== 'undefined') UCCancel.check();
         Prog.step(15 + (start / Math.max(body.length, 1)) * 45);
-        const inputBatch=sourceId?await BrowserImportSources.page(sourceId,start,end-start):body.slice(start,end);
+        inputBatch=sourceId?await BrowserImportSources.page(sourceId,start,end-start):body.slice(start,end);
+        if(catalogLookup){
+          ({idx,idxArt,duplicatePair,duplicateArt}=await catalogLookup.batch(inputBatch,
+            r=>normArticle(articleText(artMap&&r[artMap.col])),r=>normArticle(brandMap?r[brandMap.col]:'')));
+        }
         if(sourceId)sourceConflicts=await BrowserImportSources.conflicts(collisionRun,inputBatch,describeSource);
         for (let ri = start; ri < end; ri++) {
           const r = inputBatch[ri-start];
@@ -29385,7 +29530,7 @@ const Import = {
           /* Расширенный ключ: уникальный OE текущего прайса. */
           let matchedByKey = false;
           if (!p) {
-            const hit = findByOe(r);
+            const hit = await findByOe(r);
             if (hit) { p = hit; matchedByKey = true; matchedByOeAnalog++; }
           }
           const existing = !!p;
@@ -29745,8 +29890,8 @@ const Import = {
         S.settings.enrichRelatedOnImport = relOn;
         if (relOn && fileHasSources) {
           let relRows = [];
-          try { relRows = Import._relatedRows(touchedUnique, new Set(touchedUnique), idx, idxArt); }
-          catch (eRel) { console.warn('[UC] связанные строки:', eRel); }
+          try { relRows = catalogLookup?await catalogLookup.related(touchedUnique,new Set(touchedUnique)):Import._relatedRows(touchedUnique, new Set(touchedUnique), idx, idxArt); }
+          catch (eRel) { if(catalogLookup)throw eRel;console.warn('[UC] связанные строки:', eRel); }
           if (relRows.length) {
             if (prog) prog('обогащение связанных строк каталога: ' + fmt(relRows.length));
             await HVC.enrichAsync(relRows, prog);
@@ -29898,7 +30043,7 @@ const Import = {
           throw new Error('Импорт прерван. Автооткат не завершён: '+storageErrorText(recoveryError)+'. Не продолжайте работу; перезагрузите страницу для восстановления. Причина: '+storageErrorText(error));}
       }
       throw error;
-    }).finally(async()=>{if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.releaseRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}}));
+    }).finally(async()=>{if(catalogLookup)try{await catalogLookup.dispose();}catch(e){console.warn('[UC] очистка индекса каталога:',e);}if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.releaseRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}}));
   },
   /* v12.9.50 · СВЯЗАННЫЕ СТРОКИ КАТАЛОГА.
      Файлы, загружаемые ПОСЛЕ источника (весогабариты, OE-кроссы, названия),

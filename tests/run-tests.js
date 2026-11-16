@@ -121,7 +121,7 @@ assert(app.includes('skipEconomics: S._econPending === true'), 'лёгкий с�
 assert(app.includes('if (estimated) { soft = 700; hard = 950; }'), 'MemGuard: для эвристики пороги выше');
 assert(app.includes('smallDelta: true, persist: false, suppressSummaryToast: true, preserveView: true'), 'лёгкий экспорт: срез таблицы не перестраивается');
 assert(app.includes('used = this.usedEstMB();'), 'MemGuard: check использует эвристику в Firefox/Safari');
-assert(app.includes('const findByOe = r => {'), 'импорт: поиск SKU прайса только по OE');
+assert(app.includes('const findByOe = async r => {'), 'импорт: поиск SKU прайса только по OE');
 assert(!app.includes('analogMap'), 'импорт: поиска по аналогам нет');
 assert(app.includes('matchedByKey && (cm.target === \'article\' || cm.target === \'brand\')'), 'импорт: OE-сопоставление не затирает артикул/бренд прайса');
 assert(html.includes('Только обогащение по текущему прайсу, новых SKU не создавать'), 'импорт: подпись переключателя прайс-первым');
