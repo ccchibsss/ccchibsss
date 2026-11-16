@@ -188,6 +188,10 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.160-c
   const probe = { article: 'ART1', brand: 'BRAND', oe_norm: 'OE1', category: '', name: '', applicability: '' };
   assert.strictEqual(H.textFor(probe, 'oe').category, '', 'доноры OE расходятся — категория по OE не берётся');
   assert.strictEqual(H._oeSetOf(probe).catConflict, true, 'конфликт категорий зафиксирован');
+  assert.equal(H._oeSetOf(probe).analog_list,'ART2');
+  const otherSku={article:'ART2',brand:'BRAND',oe_norm:'OE1'};
+  assert.equal(H._oeSetOf(otherSku).analog_list,'ART1','одинаковые OE не переиспользуют список без собственного SKU первого товара');
+  assert.equal(H._oeSetOf(otherSku).group.split(' / ')[0],'ART2','группа начинается со своего SKU, а не первого вызова кэша');
   H.parts.get(k2).category = 'Фильтры'; H._oeAggCache = null; H._oeSetCache = null;
   assert.strictEqual(H.textFor(probe, 'oe').category, 'Фильтры', 'единогласные доноры OE — категория берётся');
   const p2 = { article: 'ART1', brand: 'BRAND', oe_norm: 'OE1', category: '', tnved: '', name: '', applicability: '', weight: 0, length: 0, width: 0, height: 0 };

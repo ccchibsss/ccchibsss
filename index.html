@@ -24478,7 +24478,8 @@ const HVC = {
   _oeSetOf(p) {
     const key = HVC.keyOf(p);
     const myOes = HVC.byArt.get(key);
-    const oeKey = myOes && myOes.size ? [...myOes].sort().join('\u0001') : '';
+    // Group order and self-excluding analogs depend on SKU, not only OE set.
+    const oeKey = myOes && myOes.size ? key+'\u0000'+[...myOes].sort().join('\u0001') : '';
     if (oeKey) {
       if (!HVC._oeSetCache) HVC._oeSetCache = new Map();
       const hit = HVC._oeSetCache.get(oeKey);
@@ -30502,9 +30503,9 @@ const Import = {
       console.info('[UC] импорт · профиль дельты: изменено строк ' + fmt(changedTouched) + ' из каталога ' + fmt(S.rows.length) +
         ' (' + (S.rows.length ? Math.round(1000 * changedTouched / S.rows.length) / 10 : 0) + '%)' + (dedup ? ' · объединено дублей ' + fmt(dedup) : '') + ' · новых SKU ' + fmt(added));
       console.info('[UC] импорт: ' + fmt(_stageTotal) + ' мс всего' + (_stageText ? ' · ' + _stageText : '') +
-        ' · кэш ' + Math.round(performance.memory ? performance.memory.usedJSHeapSize / 1048576 : 0) + ' МБ' +
+        ' · JS heap≈ ' + (performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576)+' МБ (оценка браузера, не память процесса)' : 'недоступен') +
         (performance.memory && performance.memory.jsHeapSizeLimit ? ' (' + Math.round(100 * performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit) + '%)' : '') +
-        ' · на SKU ' + Math.round((performance.memory ? performance.memory.usedJSHeapSize : 0) / Math.max(1, S.rows.length) / 1024) + ' КБ');
+        (performance.memory ? ' · JS на SKU≈ ' + Math.round(performance.memory.usedJSHeapSize / Math.max(1, S.rows.length) / 1024) + ' КБ' : ''));
       Toast[S._cacheWriteError || S._volatileStorage ? 'warn' : 'ok'](S._cacheWriteError || S._volatileStorage ? 'Импорт в памяти — сохранение не завершено' : 'Импорт завершён', `новых ${fmt(added)} · обновлено ${fmt(updated)} · пропущено ${fmt(skipped)} · колонок ${enabled.length}` +
         (mergedByArticle ? ` · сопоставлено по артикулу (без бренда в файле): ${fmt(mergedByArticle)}` : '') +
         (matchedByOeAnalog ? ` · сопоставлено по OE прайса: ${fmt(matchedByOeAnalog)}` : '') +

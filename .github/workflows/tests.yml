@@ -43,6 +43,8 @@ jobs:
         run: |
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-key-index-perf-e2e.js
+          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-enrichment-parity-e2e.js
+          REPEAT_ROWS=1000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-repeat-memory-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-abort-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-conflict-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-export-e2e.js
