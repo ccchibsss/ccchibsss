@@ -43,6 +43,14 @@ function legacy(rows){const idx=new Map(),idxArt=new Map(),duplicateArt=new Set(
  assert.deepEqual(Array.from(await lookup.related(imported,new Set(imported))),Array.from(related));
  // Post-dedup replacement of S.rows must not change frozen index references.
  c.S.rows=rows.slice(20);const got=await lookup.batch([[rows[0].article,rows[0].brand]],r=>norm(r[0]),r=>norm(r[1]));assert.strictEqual(got.idxArt.get(norm(rows[0].article)),rows[0]);
+ // Dense range reads must filter non-requested keys, and overflowing sparse
+ // ranges must fall back to exact bulkGet without returning arbitrary hits.
+ const denseKeys=rows.slice(100,164).map(p=>norm(p.article));
+ const queryDense=await lookup.query('article',denseKeys);assert.equal(queryDense.size,64);
+ const sparseKeys=rows.filter((_,i)=>i%53===0).slice(0,64).map(p=>norm(p.article));
+ const querySparse=await lookup.query('article',sparseKeys);assert.equal(querySparse.size,new Set(sparseKeys).size);for(const key of querySparse.keys())assert(sparseKeys.includes(key));
+ const mostlyMissing=Array.from({length:60},(_,i)=>'MISSING'+i).concat(denseKeys.slice(0,4));
+ assert.equal((await lookup.query('article',mostlyMissing)).size,4);
  await lookup.dispose();assert.equal(await B.database().catalogKeys.count(),0);assert.equal(await B.database().catalogRuns.count(),0);
  // Aborted builds cannot leak a usable partial index; next Apply cleans old
  // same-source runs (e.g. after tab crash), and removing source cleans all runs.

@@ -79,6 +79,15 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  await B.database().runs.add({id:'partial',source:second.id,fingerprint:'mapping3'});
  assert.equal(await B.prepareKeys(second.id,'cache3',describe,'mapping3'),'cache3');assert(!await B.database().runs.get('partial'));
  await B.clearRun('cache3');
+ // The bounded compound-key reader returns exact keys for both dense and
+ // sparse/overflowing ranges; it must never leak unrelated conflict records.
+ const dense=Array.from({length:1100},(_,i)=>({run:'range-test',key:String(i).padStart(6,'0'),conflict:i%2===0}));
+ await B.database().keys.bulkAdd(dense);
+ const wanted=Array.from({length:40},(_,i)=>['range-test',String(i*20).padStart(6,'0')]);
+ const exact=await B.readKeyBatch(B.database().keys,'[run+key]',wanted,r=>[r.run,r.key]);assert.equal(exact.length,40);
+ const wantedText=new Set(wanted.map(k=>k[1]));assert(exact.every(r=>wantedText.has(r.key)));
+ const contiguous=await B.readKeyBatch(B.database().keys,'[run+key]',dense.slice(10,50).map(r=>[r.run,r.key]),r=>[r.run,r.key]);assert.equal(contiguous.length,40);
+ await B.database().keys.where('run').equals('range-test').delete();
  // Reopen source after closing the DB: no file reread, no missing tail rows.
  B.database().close();await B.database().open();assert.equal((await B.source(first.id)).total,n+1);
  assert.equal((await B.page(first.id,n,1))[0][1],'OTHER');

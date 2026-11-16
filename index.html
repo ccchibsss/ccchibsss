@@ -24945,16 +24945,17 @@ const HVC = {
           /* oeNorm/key — уникальный ВТОРИЧНЫЙ индекс, а первичный ключ — ++id.
              Сопоставляем оба индекса, иначе bulkGet/Put создаст дубликаты или
              будет каждый раз переписывать весь реестр. */
-          let last;
+          let last,initiallyEmpty=true;
           for(;;){
             const stored=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(1000).toArray();
-            if(!stored.length)break;last=stored[stored.length-1].id;
+            if(!stored.length)break;initiallyEmpty=false;last=stored[stored.length-1].id;
             const doomed=stored.filter(row=>!source.has(row[pk])).map(row=>row.id);
             if(doomed.length)await table.bulkDelete(doomed);
           }
           let batch=[];
           const flush=async()=>{
-            const prior=await table.where(pk).anyOf(batch.map(item=>item.key)).toArray();
+            if(batch.some(item=>item.row[pk]!==item.key))initiallyEmpty=false;
+            const prior=initiallyEmpty?[]:await table.where(pk).anyOf(batch.map(item=>item.key)).toArray();
             const byKey=new Map(prior.map(row=>[row[pk],row])),changed=[];
             for(const {key,row} of batch){
               const old=byKey.get(key);if(old)row.id=old.id;else delete row.id;
@@ -28808,8 +28809,11 @@ const BrowserCatalogLookup = {
     // Bound transactions even when one SKU contains thousands of OE codes.
     for(let off=0;off<records.length;off+=this.BATCH){
       BrowserImportSources.check();const chunk=records.slice(off,off+this.BATCH);
+      if(!this._highKeys)this._highKeys=new Map();
+      const ranges=new Map();for(const item of chunk){const r=ranges.get(item.kind);if(!r)ranges.set(item.kind,{min:item.key,max:item.key});else{if(item.key<r.min)r.min=item.key;if(item.key>r.max)r.max=item.key;}}
+      const fresh=[...ranges].every(([kind,r])=>!this._highKeys.has(kind)||r.min>this._highKeys.get(kind));
       await BrowserImportSources.database().transaction('rw',table,async()=>{
-        const old=await table.bulkGet(chunk.map(r=>[run,r.kind,r.key])),local=new Map();
+        const old=fresh?[]:await table.bulkGet(chunk.map(r=>[run,r.kind,r.key])),local=new Map();
         for(let i=0;i<chunk.length;i++)if(old[i])local.set(JSON.stringify([chunk[i].kind,chunk[i].key]),old[i]);
         for(const item of chunk){
           const k=JSON.stringify([item.kind,item.key]),prior=local.get(k);
@@ -28818,13 +28822,14 @@ const BrowserCatalogLookup = {
         }
         await table.bulkPut([...local.values()]);
       });
+      for(const [kind,r] of ranges)if(!this._highKeys.has(kind)||r.max>this._highKeys.get(kind))this._highKeys.set(kind,r.max);
     }
   },
   async query(kind,keys) {
     const unique=[...new Set(keys)],out=new Map(),table=BrowserImportSources.database().catalogKeys;
     for(let off=0;off<unique.length;off+=this.BATCH){
       BrowserImportSources.check();
-      const found=await table.bulkGet(unique.slice(off,off+this.BATCH).map(key=>[this.run,kind,key]));
+      const found=await BrowserImportSources.readKeyBatch(table,'[run+kind+key]',unique.slice(off,off+this.BATCH).map(key=>[this.run,kind,key]),r=>[r.run,r.kind,r.key]);
       for(const record of found)if(record)out.set(record.key,record);
     }
     return out;
@@ -29024,12 +29029,13 @@ const BrowserImportSources = {
       if(cached){this.check();return cached.id;}
     }
     await d.runs.add({id:run,source:id,created:Date.now(),fingerprint:fingerprint||null});
-    const s=await this.source(id);
+    const s=await this.source(id);let highKey;
     for(let off=0;off<s.total;off+=this.BATCH){
       this.check();const rows=await this.page(id,off,Math.min(this.BATCH,s.total-off));
       const descriptions=rows.map(describe).filter(Boolean),keys=[...new Set(descriptions.map(x=>x.key))];
       await d.transaction('rw',d.keys,async()=>{
-        const existing=await d.keys.bulkGet(keys.map(key=>[run,key])),local=new Map();
+        const fresh=highKey===undefined||keys.every(key=>key>highKey);
+        const existing=fresh?[]:await d.keys.bulkGet(keys.map(key=>[run,key])),local=new Map();
         keys.forEach((key,i)=>{if(existing[i])local.set(key,existing[i]);});
         for(const item of descriptions){
           const prior=local.get(item.key);
@@ -29042,6 +29048,7 @@ const BrowserImportSources = {
         }
         await d.keys.bulkPut([...local.values()]);
       });
+      for(const key of keys)if(highKey===undefined||key>highKey)highKey=key;
       if(typeof Prog!=='undefined')Prog.msg('Проверка ключей всего источника: '+Math.min(off+this.BATCH,s.total)+' из '+s.total);
     }
     await d.runs.update(run,{complete:true});
@@ -29050,9 +29057,22 @@ const BrowserImportSources = {
     if(fingerprint)for(const old of await d.runs.where('source').equals(id).toArray())if(old.id!==run)await this.clearRun(old.id);
     return run;
   },
+  async readKeyBatch(table,index,keys,keyOf) {
+    const found=[];
+    for(let off=0;off<keys.length;off+=1000){
+      this.check();const chunk=keys.slice(off,off+1000);
+      if(chunk.length>=32){
+        const sorted=chunk.slice().sort(Dexie.cmp),wanted=new Set(chunk.map(k=>JSON.stringify(k)));
+        const range=await table.where(index).between(sorted[0],sorted[sorted.length-1],true,true).limit(chunk.length+1).toArray();
+        if(range.length<=chunk.length){found.push(...range.filter(row=>wanted.has(JSON.stringify(keyOf(row)))));continue;}
+      }
+      found.push(...(await table.bulkGet(chunk)).filter(Boolean));
+    }
+    return found;
+  },
   async conflicts(run,rows,describe) {
     const keys=[...new Set(rows.map(describe).filter(Boolean).map(x=>x.key))];
-    const values=await this.database().keys.bulkGet(keys.map(key=>[run,key]));
+    const values=await this.readKeyBatch(this.database().keys,'[run+key]',keys.map(key=>[run,key]),r=>[r.run,r.key]);
     return new Set(values.filter(v=>v?.conflict).map(v=>v.key));
   },
   async clearRun(run) {
