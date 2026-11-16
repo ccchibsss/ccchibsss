@@ -42,6 +42,20 @@ const x=h.indexOf('async function _persistNowImpl('),y=h.indexOf('\n}\n',x)+2;vm
  await c.db.products_stage.add({article:'draft'});assert.equal(await c.StorageCtl.saveVerifiedMetadata(source,p=>p),false);await c.db.products_stage.clear();
  c.S._catalogToken='stale';await assert.rejects(()=>c.StorageCtl.saveVerifiedMetadata(source,p=>p),/Каталог изменился/);c.S._catalogToken=token;
  console.log('PASS verified baseline fails closed for duplicate/missing IDs, count changes, draft and stale revision');
+ // Large PARTIAL imports must not run a single >20k-row transaction.
+ const realChunk=c.StorageCtl.saveChunked;let chunked=0;
+ c.StorageCtl.saveChunked=async function(args){chunked++;assert(args.changedList.length>20000);return realChunk.call(this,args)};
+ for(const mode of ['economy','staged']){c.StorageCtl._mode=mode;assert(await c._persistNowImpl(c.S.rows.slice(0,21000)));assert(c.S._cacheLastWrite.partial);}
+ assert.equal(chunked,2);c.StorageCtl.saveChunked=realChunk;
+ // A committed products table is NOT success when HVC/rules failed.
+ c.HVC.save=async()=>{c.S._hvcPersistError='HVC injected failure';return false};
+ assert.equal(await c._persistNowImpl(undefined,false,true),false);assert(c.S._cacheWriteError.includes('HVC injected failure'));assert.equal(c.S._lastPersistFailure.phase,'служебные таблицы/HVC');
+ let hvcCalls=0;c.HVC.save=async()=>{hvcCalls++;c.S._hvcPersistError='';return true};
+ c.S.cats=[{id:1,name:'category'}];const auxFail=()=>{throw Error('rules injected failure')};c.db.cats.hook('creating',auxFail);
+ assert.equal(await c._persistNowImpl(undefined,false,true),false);assert(c.S._cacheAuxError.includes('rules injected failure'));assert.equal(hvcCalls,1);
+ c.db.cats.hook('creating').unsubscribe(auxFail);assert(await c._persistNowImpl(undefined,false,true));assert.equal(c.S._cacheAuxError,'');
+ // A stale revision must not trigger additional auxiliary writes after failure.
+ const freshToken=c.S._catalogToken;hvcCalls=0;c.S._catalogToken='other-tab';assert.equal(await c._persistNowImpl(),false);assert.equal(hvcCalls,0);c.S._catalogToken=freshToken;
  // Execute actual HVC.save against real transactional stores.
  const hs=h.indexOf('  async save() {',h.indexOf('const HVC = {')),he=h.indexOf('  async load() {',hs);
  vm.runInContext('this.realHVC={'+h.slice(hs,he)+'};Object.assign(HVC,{save:realHVC.save,storageFormats:realHVC.storageFormats,oe:new Map(),parts:new Map(),cross:new Map(),prices:new Map(),ozonApplicability:new Map(),rules:[],exclusions:[],descTemplate:""});S._bootReady=true;for(let i=0;i<4003;i++){HVC.oe.set("OE"+i,{name:"N"+i});HVC.parts.set("A"+i+"|B",{name:"P"+i});}',c);

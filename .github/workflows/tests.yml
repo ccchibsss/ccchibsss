@@ -25,7 +25,9 @@ jobs:
         with:
           node-version: '20'
       - name: Тесты приложения (без зависимостей)
-        run: node tests/run-tests.js
+        run: |
+          node tests/run-tests.js
+          node tests/console-log-regressions-client.js
       - name: IndexedDB источники — встроенный Dexie
         run: |
           npm install --prefix .arena/idb-tests fake-indexeddb@6.2.8 --no-save --no-audit --no-fund
@@ -41,5 +43,5 @@ jobs:
         run: |
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
           E2E_ROWS=1000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js
-          E2E_ROWS=20000 E2E_TIMEOUT_MS=180000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js
+          E2E_ROWS=30000 E2E_PARTIAL_WRITE=1 E2E_TIMEOUT_MS=180000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js
           E2E_STAGE_ONLY=1 E2E_PREFLIGHT=1 E2E_TARGET_INDEX=1 E2E_TIMEOUT_MS=300000 E2E_ROWS=1000000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js

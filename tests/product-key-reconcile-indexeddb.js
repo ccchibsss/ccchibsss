@@ -59,5 +59,19 @@ const read=async()=>plain(await db.products.toArray());
  await C.reconcileProductKeys(C.productIds(originalRows,withId));assert.equal(payloadReads,0);db.products.hook('reading').unsubscribe(observe);
  // A partial update must not delete unrelated products.
  c.S.rows=await db.products.toArray();c.S.rows[0].article='partial';await C.saveDiffAtomic({...args(false),changedList:[c.S.rows[0]]});assert.equal(await db.products.count(),3503);assert.equal((await db.products.get(1)).article,'partial');
+ // Non-retryable failures abort ONE product batch, including writes already
+ // queued by a failing bulk operation. Previously the implicit transaction
+ // could commit a partial bulkPut and all errors were retried three times.
+ await reset();const bulkPut=db.products.bulkPut.bind(db.products);let attempts=0;
+ c.S.rows=(await db.products.toArray());const changed=c.S.rows.slice(0,600).map(r=>({...r,article:'changed'}));
+ const partialArgs={...args(false),changedList:changed};
+ db.products.bulkPut=async rows=>{attempts++;await bulkPut(rows.slice(0,50));throw Object.assign(Error('clone failure'),{name:'DataCloneError'})};
+ await assert.rejects(()=>C.saveChunked(partialArgs),/clone failure/);assert.equal(attempts,1);assert.deepEqual(await read(),originalRows);assert(await db.meta.get('incomplete'));
+ await reset();attempts=0;
+ db.products.bulkPut=async rows=>{attempts++;if(attempts===1){await bulkPut(rows.slice(0,50));throw Object.assign(Error('transient abort'),{name:'AbortError'})}return bulkPut(rows)};
+ await C.saveChunked(partialArgs);assert.equal(attempts,4);assert.equal((await db.products.get(600)).article,'changed');assert(!await db.meta.get('incomplete'));
+ await reset();attempts=0;
+ db.products.bulkPut=async()=>{attempts++;throw Object.assign(Error('quota exceeded'),{name:'QuotaExceededError'})};
+ await assert.rejects(()=>C.saveChunked(partialArgs),/quota exceeded/);assert.equal(attempts,1);assert.deepEqual(await read(),originalRows);db.products.bulkPut=bulkPut;
  proto.primaryKeys=original;await db.delete();console.log('OK: bounded product keys <=1000, exact sparse/reordered key merge, invalid/duplicate ID preflight, atomic deletion/write/cancel rollback, freshness, partial updates');
 })().catch(e=>{console.error(e);process.exitCode=1});

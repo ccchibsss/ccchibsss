@@ -11,7 +11,7 @@ const html=fs.readFileSync(__dirname+'/../index.html');
   const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')console.error('browser:',m.text());else if(process.env.E2E_PROGRESS&&m.type()==='info')console.log('browser:',m.text())});
   await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
   await page.goto('http://127.0.0.1:'+server.address().port);await page.waitForFunction(()=>S._bootReady||S._bootError,{},{timeout:60000});
-  const evaluation=page.evaluate(async ({n,stageOnly,preflight,targetIndex})=>{
+  const evaluation=page.evaluate(async ({n,stageOnly,preflight,targetIndex,partialWrite})=>{
    if(S._bootError)throw Error(String(S._bootError));
    S.rows=[];S.view=[];S.settings.autoStdDims=false;S.settings.autoOeAnomalyOnImport=false;S.settings.enrichRelatedOnImport=false;
    const related=document.querySelector('#impEnrichRelated');if(related)related.checked=false;
@@ -93,8 +93,21 @@ const html=fs.readFileSync(__dirname+'/../index.html');
     hvcPageCounts[table]=await db[table].count();if(hvcPageCounts[table]!==Math.ceil(HVC[key].size/1000))throw Error('HVC page count mismatch');
    }
    await Import.read({name:'oe.csv'},oeSource);if(S.pending.body.length!==n||Object.keys(S.pending.body).length>202)throw Error('saved mapping preview lost bounds');
-   return {hvcReloaded:true,verifiedCatalogRows:n,hvcPageCounts,phases,verifiedBaselines,rows:S.rows.length,sources:[(await BrowserImportSources.source(priceSource)).total,(await BrowserImportSources.source(oeSource)).total],last:S.rows[n-1].article,oe:S.rows[n-1].oe_numbers,economicsPending:S._econPending,stamps,heap:performance.memory&&performance.memory.usedJSHeapSize};
-  },{n:Number(process.env.E2E_ROWS||1000),stageOnly:process.env.E2E_STAGE_ONLY==='1',preflight:process.env.E2E_PREFLIGHT==='1',targetIndex:process.env.E2E_TARGET_INDEX==='1'});
+   let verifiedPartialRows=0;
+   if(partialWrite){
+    const count=Math.floor(n*0.8);if(count<=20000)throw Error('partial-write probe needs >25000 rows');
+    const changed=S.rows.slice(0,count);for(const row of changed)row.cost=13.5;
+    if(!await persistNow(changed))throw Error('partial write failed: '+S._cacheWriteError);
+    if(S._cacheLastWrite.mode!=='chunked'||!S._cacheLastWrite.partial||S._cacheLastWrite.written!==count)throw Error('large partial write was not chunked');
+    db.close();await db.open();
+    for(let off=0;off<n;off+=1000){
+     const input=S.rows.slice(off,off+1000),stored=await db.products.bulkGet(input.map(row=>row.id));
+     for(let i=0;i<stored.length;i++){const row=stored[i],pos=off+i;if(row.article!==input[i].article||row.cost!==(pos<count?13.5:12.5)||row.oe_numbers!=='OE'+pos)throw Error('partial write mismatch at '+pos);verifiedPartialRows++;}
+    }
+    if(await db.meta.get('incomplete'))throw Error('partial write incomplete marker leaked');
+   }
+   return {verifiedPartialRows,hvcReloaded:true,verifiedCatalogRows:n,hvcPageCounts,phases,verifiedBaselines,rows:S.rows.length,sources:[(await BrowserImportSources.source(priceSource)).total,(await BrowserImportSources.source(oeSource)).total],last:S.rows[n-1].article,oe:S.rows[n-1].oe_numbers,economicsPending:S._econPending,stamps,heap:performance.memory&&performance.memory.usedJSHeapSize};
+  },{n:Number(process.env.E2E_ROWS||1000),stageOnly:process.env.E2E_STAGE_ONLY==='1',preflight:process.env.E2E_PREFLIGHT==='1',targetIndex:process.env.E2E_TARGET_INDEX==='1',partialWrite:process.env.E2E_PARTIAL_WRITE==='1'});
   const result=await Promise.race([evaluation,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('E2E deadline exceeded; run is incomplete')),Number(process.env.E2E_TIMEOUT_MS||180000))})]);
   if(!result.stageOnly){assert(result.economicsPending);assert(result.verifiedBaselines.some(x=>x.rows===Number(process.env.E2E_ROWS||1000)&&x.equal),'second Apply must verify the unchanged baseline');}assert.equal(errors.length,0,errors.join('\n'));console.log(JSON.stringify(result,null,2));
  }finally{clearTimeout(deadline);if(browser)await browser.close();await new Promise(r=>server.close(r));}
