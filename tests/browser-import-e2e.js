@@ -17,7 +17,7 @@ const html=fs.readFileSync(__dirname+'/../index.html');
    const related=document.querySelector('#impEnrichRelated');if(related)related.checked=false;
    const stamps={},t=performance.now(),verifiedBaselines=[];const verify=StorageCtl.saveVerifiedMetadata;StorageCtl.saveVerifiedMetadata=async function(rows,...args){const equal=await verify.call(this,rows,...args);verifiedBaselines.push({rows:rows.length,equal});return equal};let diskBuilds=0;const targetRuns=[];const create=BrowserCatalogLookup.create;BrowserCatalogLookup.create=async function(...args){diskBuilds++;const result=await create.apply(this,args);targetRuns.push(result.run);return result};
    const phases=[];
-   const instrument=(object,key,label)=>{const original=object[key];object[key]=async function(...args){const t=performance.now();try{return await original.apply(this,args)}finally{phases.push({phase:label,ms:Math.round(performance.now()-t)});}};};
+   const instrument=(object,key,label)=>{const original=object[key];object[key]=async function(...args){const t=performance.now();console.info('[E2E] start '+label);try{return await original.apply(this,args)}finally{const phase={phase:label,ms:Math.round(performance.now()-t)};phases.push(phase);console.info('[E2E] end '+JSON.stringify(phase));}};};
    instrument(BrowserApplyCheckpoint,'begin','checkpoint');instrument(BrowserApplyCheckpoint,'commit','checkpoint-commit');
    instrument(BrowserCatalogLookup,'create','target-index');instrument(BrowserImportSources,'prepareKeys','source-index');
    instrument(BrowserImportSources,'stage','source-stage');instrument(HVC,'save','HVC-save');instrument(StorageCtl,'saveVerifiedMetadata','baseline-verify');

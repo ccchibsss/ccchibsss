@@ -18,6 +18,9 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  const before=await readAll();
  let peak=0;const bulk=db.applyUndo.bulkAdd.bind(db.applyUndo);db.applyUndo.bulkAdd=async rows=>{peak=Math.max(peak,rows.length);return bulk(rows)};
  let owner=await C.begin();assert(peak<=1000);assert(await db.meta.get(C.KEY));assert.equal(C.owner,owner);
+ const marker=(await db.meta.get(C.KEY)).value;assert.equal(marker.storage,'pages-v1');assert.equal(marker.pageSize,1000);
+ const pages=await db.applyUndo.where('table').equals('products').sortBy('pos');assert.deepEqual(pages.map(p=>p.pos),[0,1000,2000]);assert.deepEqual(pages.map(p=>p.values.length),[1000,1000,503]);
+ assert((await db.applyUndo.toArray()).every(p=>p.values.length<=1000));
  await assert.rejects(()=>C.begin(),/уже используется/);
  // Guard rejects a second tab's writer and never changes its catalog token.
  C.owner=null;await assert.rejects(()=>C.assertWriter(),/другой вкладке/);C.owner=owner;await C.assertWriter();
@@ -55,6 +58,26 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  const preApply=await readAll();await assert.rejects(()=>c.Import.apply(),/injected apply failure/);
  assert.equal(reloads,1);assert.equal(c.S._bootReady,false);assert.equal(c.S.pending.body.length,1);
  assert.deepEqual(await readAll(),preApply);assert(!await db.meta.get(C.KEY));assert.equal(C.owner,null);C.restore=restoreMethod;
+ // Old row-per-record backups remain recoverable after upgrading the app.
+ owner=await C.begin();
+ await db.transaction('rw',db.applyUndo,db.meta,async()=>{
+  const pages=await db.applyUndo.toArray();await db.applyUndo.clear();
+  for(const page of pages)await db.applyUndo.bulkAdd(page.values.map((value,i)=>({table:page.table,pos:page.pos+i,value})));
+  const marker=await db.meta.get(C.KEY);delete marker.value.storage;delete marker.value.pageSize;await db.meta.put(marker);
+ });
+ await db.products.clear();C.owner=null;db.close();await db.open();await C.restore(owner);assert.deepEqual(await readAll(),preApply);
+ // Unknown formats and invalid page sizes cannot silently use legacy replay.
+ owner=await C.begin();let invalid=await db.meta.get(C.KEY);invalid.value.storage='future-v99';await db.meta.put(invalid);
+ const unknown=await readAll();await assert.rejects(()=>C.restore(owner),/Неизвестный формат/);assert.deepEqual(await readAll(),unknown);
+ invalid.value.storage='pages-v1';invalid.value.pageSize=0;await db.meta.put(invalid);await assert.rejects(()=>C.restore(owner),/размер страницы/);
+ invalid.value.pageSize=1000;await db.meta.put(invalid);await C.restore(owner);
+ // A shortened page has the correct record count, but must still fail closed.
+ owner=await C.begin();let page=await db.applyUndo.where('table').equals('products').first();const intact=plain(page);page.values.pop();await db.applyUndo.put(page);
+ const damagedPage=await readAll();await assert.rejects(()=>C.restore(owner),/Повреждена/);assert.deepEqual(await readAll(),damagedPage);assert(await db.meta.get(C.KEY));
+ await db.applyUndo.put(intact);await C.restore(owner);
+ // A shifted page also preserves record count; exact page positions are required.
+ owner=await C.begin();page=await db.applyUndo.where('table').equals('products').first();page.pos=1;await db.applyUndo.put(page);
+ const shifted=await readAll();await assert.rejects(()=>C.restore(owner),/Повреждена/);assert.deepEqual(await readAll(),shifted);page.pos=0;await db.applyUndo.put(page);await C.restore(owner);
  // Tampered/incomplete checkpoints fail closed without clearing live data.
  owner=await C.begin();await db.applyUndo.where('table').equals('products').first().then(r=>db.applyUndo.delete(r.id));
  const partial=await readAll();await assert.rejects(()=>C.restore(owner),/Неполная/);assert.deepEqual(await readAll(),partial);assert(await db.meta.get(C.KEY));

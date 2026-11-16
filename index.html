@@ -28745,12 +28745,12 @@ const BrowserApplyCheckpoint = {
             if(typeof UCCancel!=='undefined')UCCancel.check();
             const rows=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(this.BATCH).toArray();
             if(!rows.length)break;
-            await db.applyUndo.bulkAdd(rows.map((value,i)=>({table:name,pos:total+i,value})));
+            await db.applyUndo.bulkAdd([{table:name,pos:total,values:rows}]);
             total+=rows.length;last=rows[rows.length-1][key];
           }
           counts[name]=total;
         }
-        await db.meta.put({key:this.KEY,value:{owner,created:Date.now(),counts}});
+        await db.meta.put({key:this.KEY,value:{owner,created:Date.now(),counts,storage:'pages-v1',pageSize:this.BATCH}});
       });
       return owner;
     }catch(e){this.owner=null;throw e;}
@@ -28767,16 +28767,29 @@ const BrowserApplyCheckpoint = {
     // failed restore leaves both the pre-restore DB and the undo checkpoint.
     await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
       const m=await db.meta.get(this.KEY);if(!m||m.value.owner!==owner)throw new Error('Нет соответствующей контрольной точки');
+      const packed=m.value.storage==='pages-v1';
+      if(m.value.storage!==undefined&&!packed)throw new Error('Неизвестный формат контрольной точки');
+      const batch=packed?m.value.pageSize:this.BATCH;
+      if(!Number.isSafeInteger(batch)||batch<1||batch>1000)throw new Error('Повреждён размер страницы контрольной точки');
       for(const name of this.TABLES){
         const count=m.value.counts[name];
-        if(!Number.isSafeInteger(count)||count<0||await db.applyUndo.where('table').equals(name).count()!==count)throw new Error('Неполная контрольная точка: '+name);
+        if(!Number.isSafeInteger(count)||count<0||await db.applyUndo.where('table').equals(name).count()!==(packed?Math.ceil(count/batch):count))throw new Error('Неполная контрольная точка: '+name);
       }
       for(const name of this.TABLES){
         const table=db.table(name),count=m.value.counts[name];await table.clear();
-        for(let pos=0;pos<count;pos+=this.BATCH){
-          const rows=await db.applyUndo.where('[table+pos]').between([name,pos],[name,Math.min(pos+this.BATCH,count)],true,false).toArray();
-          if(rows.length!==Math.min(this.BATCH,count-pos)||rows.some((r,i)=>r.pos!==pos+i))throw new Error('Повреждена контрольная точка: '+name);
-          await table.bulkAdd(rows.map(r=>r.value));
+        for(let pos=0;pos<count;pos+=batch){
+          let values;
+          if(packed){
+            const page=await db.applyUndo.where('[table+pos]').equals([name,pos]).first();
+            if(!page||!Array.isArray(page.values)||page.values.length!==Math.min(batch,count-pos))throw new Error('Повреждена контрольная точка: '+name);
+            values=page.values;
+          }else{
+            // Crash recovery for checkpoints written before packed pages.
+            const rows=await db.applyUndo.where('[table+pos]').between([name,pos],[name,Math.min(pos+batch,count)],true,false).toArray();
+            if(rows.length!==Math.min(batch,count-pos)||rows.some((r,i)=>r.pos!==pos+i))throw new Error('Повреждена контрольная точка: '+name);
+            values=rows.map(r=>r.value);
+          }
+          await table.bulkAdd(values);
         }
       }
       await db.meta.delete(this.KEY);await db.applyUndo.clear();
