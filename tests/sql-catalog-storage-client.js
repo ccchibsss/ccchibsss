@@ -27,7 +27,7 @@ P._fetch=async(path,opts)=>{
  // Execute the actual persistence entry: neither the local writer nor its lock
  // may be touched when a selected SQL engine is offline.
  Object.assign(ctx,{PyEngine:P,_persistQueue:Promise.resolve(),_cancelPersistSoon:null});
- const start=h.indexOf('function persistNow(changedList)'),end=h.indexOf('async function storageFreeInfo',start);
+ const start=h.indexOf('function persistNow(changedList, options={})'),end=h.indexOf('async function storageFreeInfo',start);
  vm.runInContext(h.slice(start,end),ctx);
  await assert.rejects(()=>ctx.persistNow(),/offline/);
  assert(h.includes("if(!legacySqlMigration&&PyEngine.processingMode()==='sql')return PyEngine.loadSqlCatalog();"));

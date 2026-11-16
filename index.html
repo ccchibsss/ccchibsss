@@ -18116,6 +18116,31 @@ const StorageCtl = {
     if (!lsSet(this.KEY, this._mode)) Toast.warn('Режим только для этой вкладки', 'Браузер не разрешил сохранить настройку в localStorage.');
     this.refresh();
   },
+  async saveVerifiedMetadata(rows,withId) {
+    // Exact disk comparison, never trust a dirty flag or a probabilistic hash.
+    // A compact vector of references is sorted; product payloads stay batched.
+    if(rows.some(p=>typeof p.id!=='number'||!Number.isFinite(p.id)))return false;
+    const ordered=rows.slice().sort((a,b)=>a.id-b.id);
+    for(let i=1;i<ordered.length;i++)if(ordered[i-1].id===ordered[i].id)return false;
+    let catalog=null;
+    const equal=await db.transaction('rw',db.products,db.products_stage,db.meta,async()=>{
+      const current=await this.assertCatalogFresh();
+      if(await db.products.count()!==rows.length||await db.products_stage.count()||await db.meta.get('incomplete')||await db.meta.get('stageOwner'))return false;
+      for(let start=0;start<ordered.length;start+=1000){
+        if(typeof UCCancel!=='undefined')UCCancel.check();
+        const batch=ordered.slice(start,start+1000),stored=await db.products.bulkGet(batch.map(p=>p.id));
+        if(batch.some((p,i)=>!stored[i]||!this.same(withId(p),stored[i])))return false;
+      }
+      catalog=this.catalogValue(rows.length,current?.value?.fp||'');
+      await db.meta.put({key:'catalog',value:catalog});
+      await db.meta.put({key:'custom',value:S.custom});
+      await db.meta.put({key:'settings',value:{...S.settings,lastPersistError:''}});
+      await db.meta.put({key:'tariffs',value:S.tariffs});
+      return true;
+    });
+    if(equal){this.acceptCatalog(catalog);S._cacheLastWrite={written:0,verified:rows.length};}
+    return equal;
+  },
   async withWriteLock(task) {
     let locks; try { locks = navigator.locks; } catch (e) { locks = null; }
     if (!locks || typeof locks.request !== 'function') return task();
@@ -22737,13 +22762,13 @@ const Table = {
    продолжали работу ДО фактической записи, а тосты «сохранено» врали. */
 let _cancelPersistSoon = null, _persistQueue = Promise.resolve(), _persistPending = 0;
 let _persistDirty = false; /* v12.9.70: есть изменения, ещё не записанные на диск */
-function persistNow(changedList) {
+function persistNow(changedList, options={}) {
   /* До окончания запуска S.rows может быть пустым или прочитанным частично.
      pagehide и другие вызовы не должны принимать его за новую версию каталога. */
   if (S._bootReady !== true || S._bootError) return Promise.resolve(false);
   if (_cancelPersistSoon) _cancelPersistSoon();
   _persistPending++;
-  const call = _persistQueue.catch(() => {}).then(() => PyEngine.processingMode()==='sql' ? PyEngine.saveSqlCatalog() : StorageCtl.withWriteLock(() => _persistNowImpl(changedList)));
+  const call = _persistQueue.catch(() => {}).then(() => PyEngine.processingMode()==='sql' ? PyEngine.saveSqlCatalog() : StorageCtl.withWriteLock(() => _persistNowImpl(changedList,false,options.verifyUnchanged===true)));
   _persistQueue = call.catch(() => {}).finally(() => { _persistPending--; });
   return call;
 }
@@ -22817,7 +22842,7 @@ async function warnIfLowStorage(where) {
     console.warn('[UC] мало места:', info);
   }
 }
-async function _persistNowImpl(changedList, forceBrowserStorage=false) {
+async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnchanged=false) {
   if(!forceBrowserStorage&&PyEngine.processingMode()==='sql')return PyEngine.saveSqlCatalog();
   warnIfLowStorage('сохранения каталога');
   /* v12.9.19-mem: запись каталога — самый тяжёлый шаг по памяти (строка + копия
@@ -22857,11 +22882,12 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false) {
          OE-графе занимают секунды — показываем это в журнале, чтобы было видно
          вклад в общее время сохранения. */
       const _tHvc = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-      await HVC.save();
+      const hvcSaved=await HVC.save();
+      if(hvcSaved===false&&!S._hvcPersistError)S._hvcPersistError='Реестры Каталога V не подтвердили сохранение';
       const _hvcMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _tHvc);
       if (_hvcMs >= 1000) console.info('[UC] реестры Каталога V сохранены за ' + _hvcMs + ' мс');
       if (typeof S !== 'undefined') S._lastHvcSaveMs = _hvcMs;
-    } catch (e) { console.warn('[UC] HVC save:', e); }
+    } catch (e) { S._hvcPersistError=storageErrorText(e);console.warn('[UC] HVC save:', e); }
     StorageCtl.refresh();
   });
   /* v12.9.6-mem: строки каталога материализуются ПО ЧАНКАМ. Полный второй массив
@@ -22902,7 +22928,10 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false) {
        повторяет только повреждённую порцию. */
     const _bigWrite = rowCount > (num(CONST.CHUNKED_WRITE_ROWS) || 20000);
     writePhase='запись товаров и метаданных ('+StorageCtl.mode()+')';
-    if (StorageCtl.mode() === 'economy') {
+    if(verifyUnchanged&&await StorageCtl.saveVerifiedMetadata(S.rows,withId)){
+      // Metadata committed above; no product writes are needed. Aux tables
+      // still go through their own awaited saves below.
+    }else if (StorageCtl.mode() === 'economy') {
       const _writeArgs = { rowCount, chunk: CH, changedList, withId, slimChunk, fullWrite: _fullWrite };
       if (_fullWrite && _bigWrite) {
         /* v12.9.66: 1000 строк на транзакцию давало 123 фиксации IndexedDB на
@@ -23012,7 +23041,7 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false) {
       StorageCtl.refresh(); return false;
     }
     // Категории/правила и реестры имеют собственные транзакции и отдельный статус.
-    _auxPersist();
+    await _auxPersist();
   } catch (e) {
     console.error('[UC] persist error:', e && e.name, e && e.message, e && e.stack);
     const text = storageErrorText(e);
@@ -23024,7 +23053,7 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false) {
       'Часть изменений может быть только в памяти: не закрывайте вкладку, сначала сделайте экспорт. Откройте «Хранилище и квота».');
     /* Даже если каталог не записался, справочник и правила должны сохраниться:
        именно из них обогащаются следующие файлы. */
-    try { _auxPersist(); } catch (eAux) { console.warn('[UC] aux persist:', eAux); }
+    try { await _auxPersist(); } catch (eAux) { console.warn('[UC] aux persist:', eAux); }
     StorageCtl.refresh(); return false;
   }
   try {
@@ -24916,31 +24945,29 @@ const HVC = {
           /* oeNorm/key — уникальный ВТОРИЧНЫЙ индекс, а первичный ключ — ++id.
              Сопоставляем оба индекса, иначе bulkGet/Put создаст дубликаты или
              будет каждый раз переписывать весь реестр. */
-          const names = await table.orderBy(pk).keys(), ids = await table.orderBy(pk).primaryKeys(), byKey = new Map();
-          let doomed = [];
-          for (let i = 0; i < names.length; i++) {
-            if (source.has(names[i])) byKey.set(names[i], ids[i]); else doomed.push(ids[i]);
-            if (doomed.length >= 3000) { await table.bulkDelete(doomed); doomed = []; }
+          let last;
+          for(;;){
+            const stored=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(1000).toArray();
+            if(!stored.length)break;last=stored[stored.length-1].id;
+            const doomed=stored.filter(row=>!source.has(row[pk])).map(row=>row.id);
+            if(doomed.length)await table.bulkDelete(doomed);
           }
-          if (doomed.length) await table.bulkDelete(doomed);
-          let batch = [];
-          const flush = async () => {
-            const existing = batch.map(row => row.id).filter(id => id !== undefined && id !== null);
-            const prior = existing.length ? await table.bulkGet(existing) : [], changed = []; let cursor = 0;
-            for (const row of batch) {
-              const old = row.id === undefined || row.id === null ? null : prior[cursor++];
-              if (!old || !StorageCtl.same(row, old)) changed.push(row);
+          let batch=[];
+          const flush=async()=>{
+            const prior=await table.where(pk).anyOf(batch.map(item=>item.key)).toArray();
+            const byKey=new Map(prior.map(row=>[row[pk],row])),changed=[];
+            for(const {key,row} of batch){
+              const old=byKey.get(key);if(old)row.id=old.id;else delete row.id;
+              if(!old||!StorageCtl.same(row,old))changed.push(row);
             }
-            if (changed.length) await table.bulkPut(changed);
+            if(changed.length)await table.bulkPut(changed);
+            batch=[];
           };
-          for (const [key, val] of source) {
-            if (key === undefined || key === null || key === '') throw new Error('Пустой ключ в реестре Каталога V: запись остановлена.');
-            const row = make(key, val), id = byKey.get(key);
-            if (id === undefined) delete row.id; else row.id = id;
-            batch.push(row);
-            if (batch.length >= 3000) { await flush(); batch = []; }
+          for(const [key,val] of source){
+            if(key===undefined||key===null||key==='')throw new Error('Пустой ключ в реестре Каталога V: запись остановлена.');
+            batch.push({key,row:make(key,val)});if(batch.length>=1000)await flush();
           }
-          if (batch.length) await flush();
+          if(batch.length)await flush();
         };
         await sync(db.hvcOe, HVC.oe, (oeNorm, v) => ({ oeNorm, ...v }), 'oeNorm');
         await sync(db.hvcParts, HVC.parts, (key, v) => ({ key, ...v }), 'key');
@@ -28686,7 +28713,7 @@ const BrowserApplyCheckpoint = {
     if(S._volatileStorage)throw new Error('Без IndexedDB безопасное применение недоступно');
     if(this.owner)throw new Error('Контрольная точка уже используется');
     // Flush legitimate pre-existing edits before taking an undo checkpoint.
-    if(!await persistNow()||S._cacheAuxError||S._hvcPersistError)throw new Error('Не удалось сохранить исходное состояние перед импортом');
+    if(!await persistNow(undefined,{verifyUnchanged:true})||S._cacheAuxError||S._hvcPersistError)throw new Error('Не удалось сохранить исходное состояние перед импортом');
     const owner=uid('apply');this.owner=owner;
     try{
       await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
