@@ -44,5 +44,11 @@ const state=()=>JSON.stringify(names.map(name=>[name,[...H[name]].map(([k,v])=>[
  // Previously packed registries stay packed after shrinking, including empty.
  for(const name of ['oe','parts','cross','prices'])H[name].clear();vm.runInContext("HVC.oe.set('ONLY',{name:'one'});",c);
  assert(await H.save());assert.equal(await db.hvcOe.count(),1);for(const name of tables.slice(1))assert.equal(await db[name].count(),0);assert.equal(await H.load(),0);assert.equal(H.oe.get('ONLY').name,'one');assert.equal(c.S._hvcLoadError,'');
+ // Wide logical rows must shrink packed pageSize and reopen exactly.
+ vm.runInContext("for(let i=0;i<30;i++)HVC.oe.set('W'+i,{name:'Ж'.repeat(20000)});",c);
+ assert(await H.save());const wideFormat=(await db.meta.get('hvcStorage')).value.hvcOe;
+ assert(wideFormat.pageSize<1000);
+ for(const row of await db.hvcOe.toArray())assert(JSON.stringify(row).length*2<512*1024);
+ db.close();await db.open();await H.load();assert.equal(H.oe.size,31);assert.equal(H.oe.get('W29').name,'Ж'.repeat(20000));
  await db.delete();console.log('OK: HVC pages <=1000, legacy migration, exact reopen, unchanged/one-page delta, atomic rollback, corrupt/duplicate/missing pages and metadata fail closed, shrink/empty');
 })().catch(e=>{console.error(e);process.exitCode=1});
