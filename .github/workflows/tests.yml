@@ -30,6 +30,11 @@ jobs:
           node tests/console-log-regressions-client.js
           node tests/volatile-storage-client.js
           node tests/sql-memory-client.js
+          node tests/sql-memory-guards-client.js
+          node tests/browser-worker-memory-client.js
+          node tests/export-spool-client.js
+          node tests/enrichment-lifecycle-client.js
+          node tests/enrichment-rules-client.js
           node tests/import-enrichment-keys-client.js
           node tests/hvc-chunked-client.js
           node tests/ozon-concurrent-settings-client.js
@@ -49,6 +54,8 @@ jobs:
       - name: Браузерный импорт — Chromium smoke
         run: |
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
+          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-worker-memory-e2e.js
+          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-ozon-stream-xlsx-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-sql-paged-import-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-volatile-boot-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-key-index-perf-e2e.js

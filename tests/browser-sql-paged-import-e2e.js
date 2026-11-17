@@ -77,6 +77,16 @@ const {chromium:pw}=require('playwright-core'),chromiumModule=require('@sparticu
   assert(streamPeak<legacyGraph*.7,'streamed graph heap not reduced '+JSON.stringify({legacyGraph,streamPeak}));
   result.referenceRetainedHeapBytes={legacy:legacyGraph,streamPeak,entries:6000};
 
+  await page.evaluate(()=>{window.__guardRows=Array.from({length:5000},(_,i)=>({article:'P'+i,custom:{text:('Wide '+i+' ').repeat(180)}}));});
+  const guardBase=await heap();
+  await page.evaluate(()=>{window.__legacyGuards=window.__guardRows.map(p=>JSON.stringify(p));});
+  const legacyGuards=(await heap())-guardBase;
+  await page.evaluate(()=>{delete window.__legacyGuards;});const hashBase=await heap();
+  await page.evaluate(()=>{window.__compactGuard=SqlMemory.rowsGuard(window.__guardRows);if(!window.__compactGuard.matches(window.__guardRows))throw Error('guard mismatched');});
+  const compactGuards=(await heap())-hashBase;
+  assert(compactGuards<legacyGuards*.7,'guard heap not reduced '+JSON.stringify({legacyGuards,compactGuards}));
+  result.guardRetainedHeapBytes={legacy:legacyGuards,compact:compactGuards,rows:5000};
+  await page.evaluate(()=>{delete window.__compactGuard;delete window.__guardRows;});
   assert.equal(errors.length,0,errors.join('\n'));console.log(JSON.stringify(result));
  }finally{if(browser)await browser.close();if(child){child.kill('SIGTERM');await new Promise(resolve=>{if(child.exitCode!==null)return resolve();child.once('exit',resolve);setTimeout(()=>{child.kill('SIGKILL');resolve();},3000).unref()});}fs.rmSync(tmp,{recursive:true,force:true});}
 })().catch(e=>{console.error(e);process.exitCode=1});

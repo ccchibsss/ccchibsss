@@ -1,7 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
 const a=h.indexOf('  prepareOzonTyping('),b=h.indexOf('  dimensionOeSnapshot(',a);
 const ctx={S:{catalogVersion:1},OzonReference:{version:()=> 'tree:1:auto'},CategoryTnved:{revision:'rev'}};
-vm.createContext(ctx);vm.runInContext('globalThis.P={'+h.slice(a,b)+'};',ctx);
+ctx.TextEncoder=TextEncoder;vm.createContext(ctx);vm.runInContext(h.slice(h.indexOf('const SqlMemory = {'),h.indexOf('const PyEngine = {')),ctx);vm.runInContext('globalThis.P={'+h.slice(a,b)+'};',ctx);
 const P=ctx.P;let mode='sql',calls=0;P.processingMode=()=>mode;
 (async()=>{
  const row={article:'A',brand:'B',name:'Filter'},manual={article:'M',ozon_type:'Manual',ozon_type_src:'manual'};
