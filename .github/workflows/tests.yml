@@ -28,6 +28,7 @@ jobs:
         run: |
           node tests/run-tests.js
           node tests/console-log-regressions-client.js
+          node tests/volatile-storage-client.js
       - name: IndexedDB источники — встроенный Dexie
         run: |
           npm install --prefix .arena/idb-tests fake-indexeddb@6.2.8 --no-save --no-audit --no-fund
@@ -42,6 +43,7 @@ jobs:
       - name: Браузерный импорт — Chromium smoke
         run: |
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
+          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-volatile-boot-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-key-index-perf-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-enrichment-parity-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-wide-values-e2e.js
