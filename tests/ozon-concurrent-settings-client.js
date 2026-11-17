@@ -1,7 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const h=fs.readFileSync(__dirname+'/../index.html','utf8');
 const a=h.indexOf('  async enrichOzonPreferred('),b=h.indexOf('  prepareOzonTyping(',a);
-const c={S:{rows:[],settings:{}}};vm.createContext(c);vm.runInContext('this.P={'+h.slice(a,b)+'};',c);
+const c={S:{rows:[],settings:{}}};c.TextEncoder=TextEncoder;vm.createContext(c);vm.runInContext(h.slice(h.indexOf('const SqlMemory = {'),h.indexOf('const PyEngine = {')),c);vm.runInContext('this.P={'+h.slice(a,b)+'};',c);
 const P=c.P;let mode='sql',hook=()=>{},uploadHook=()=>{};
 P.processingAvailable=async()=>{};P.processingMode=()=>mode;P.ozonProcessingReference=()=>({});
 P.acquireOzonReference=async()=>{uploadHook();return 'ozon:test'};P.releaseOzonReference=async()=>{};

@@ -1,7 +1,8 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const h=fs.readFileSync(__dirname+'/../index.html','utf8');
 const c={console,S:{rows:[]},HVC:{parts:new Map(),oe:new Map(),byArt:new Map(),byOe:new Map(),identityScope:()=>({}),keyOf:p=>p.article+'|'+p.brand,identityUnsafeKey:()=>false,identityUnsafe:()=>false,identityUnsafeOe:()=>false,EN_COLS:['name'],enCol:()=>true,enrichMode:()=> 'auto',enrichCatMode:()=> 'artbrand'},AnomalyDetector:{limits:[]},OE_DELIMITERS:{slash:{join:' / '}},oeMode:()=> 'slash'};
-vm.createContext(c);
+c.TextEncoder=TextEncoder;vm.createContext(c);
+vm.runInContext(h.slice(h.indexOf('const SqlMemory = {'),h.indexOf('const PyEngine = {')),c);
 const a=h.indexOf('  async uploadHvcReference('),b=h.indexOf('  async enrichFull(',a);
 vm.runInContext('this.P={'+h.slice(a,b)+'};',c);const P=c.P;
 P.processingAvailable=async()=>true;P.processingMode=()=> 'sql';P.decodeRuleFields=f=>f;
