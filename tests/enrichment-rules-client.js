@@ -1,6 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSync(__dirname+'/../index.html','utf8');
 const a=h.indexOf('  encodeRuleRows('),b=h.indexOf('  async enrichCategoryKinds(',a),ctx={S:{rows:[],catalogVersion:1}};
-vm.createContext(ctx);vm.runInContext('this.client={'+h.slice(a,b)+'};',ctx);
+ctx.TextEncoder=TextEncoder;vm.createContext(ctx);vm.runInContext(h.slice(h.indexOf('const SqlMemory = {'),h.indexOf('const PyEngine = {')),ctx);vm.runInContext('this.client={'+h.slice(a,b)+'};',ctx);
 const c=ctx.client;c.processingAvailable=async()=>true;c.processingMode=()=>'sql';
 const rules=['result','cloned'].map(target_val=>({kind:'enrich',enabled:true,target_val}));
 (async()=>{

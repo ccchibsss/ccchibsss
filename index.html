@@ -13633,7 +13633,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.165-client+sql-paged-import';
+const APP_VERSION = '12.9.166-client+sql-memory-guards';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -19668,7 +19668,7 @@ function billableWeight(p, volumeL) {
 async function scenarioProfit(dPricePct, dSalesPct, boostPct, cofinPct) {
   if (typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql') {
     await PyEngine.processingAvailable();
-    const stamp = JSON.stringify(S.rows), settingsStamp = JSON.stringify(S.settings);
+    const stamp = SqlMemory.rowsGuard(S.rows), settingsStamp = JSON.stringify(S.settings);
     await PyEngine._syncCatalog('app-price-sales-scenario');
     const settings = PyEngine._settingsSnapshot();
     const result = await PyEngine._fetch('/catalog/whatif', { method:'POST', timeout:600000,
@@ -19677,7 +19677,7 @@ async function scenarioProfit(dPricePct, dSalesPct, boostPct, cofinPct) {
           price:num(p.effPrice || p.price) * (1 + num(dPricePct) / 100),
           eff_price:num(p.effPrice || p.price) * (1 + num(dPricePct) / 100),
           sales:Math.max(0, num(p.sales) * (1 + num(dSalesPct) / 100)) })) }) });
-    if (JSON.stringify(S.rows) !== stamp || JSON.stringify(S.settings) !== settingsStamp)
+    if (!stamp.matches(S.rows) || JSON.stringify(S.settings) !== settingsStamp)
       throw new Error('Данные изменились во время расчёта сценария. Повторите расчёт.');
     return { ...result, marketplace:economicScope() };
   }
@@ -22512,7 +22512,7 @@ const FWorker = (function () {
     '  if(f.status==="нет цены" && num(p.price)>0) return false;',
     '  if(f.status==="нет себестоимости" && num(p.cost)>0) return false;',
     '  if(f.status==="нет веса/габаритов" && !(num(p.weight)<=0 && !(num(p.length)>0&&num(p.width)>0&&num(p.height)>0))) return false;',
-    '  if(f.status==="нет OE" && (String(p.oe_numbers||"").trim() || String(p.oe_list||"").trim())) return false;',
+    '  if(f.status==="нет OE" && p._hasOe) return false;',
     '  if(f.status==="нет продаж" && num(p.sales)>0) return false;',
     '  return true;',
     '}',
@@ -22521,8 +22521,8 @@ const FWorker = (function () {
     /* v12.9.19-mem: каталог приходит кусками — пик памяти ограничен одним куском,
        а не копией всего каталога в виде объектов + JSON-строки. */
     '  if(d.type==="rowsChunk"){ const arr=JSON.parse(new TextDecoder().decode(new Uint8Array(d.buf))); PART_N++;',
-    '    for(let i=0;i<arr.length;i++){ const r=arr[i]; r._srch=(r.article+" "+(r.article_norm||"")+" "+(r.originalArticle||"")+" "+(r.brand||"")+" "+(r.oe_numbers||"")+" "+(r.oe_norm||"")+" "+(r.oe_list||"")+" "+(r.group_articles||"")+" "+(r.name||"")).toUpperCase(); ROWS.push(r); }',
-    '    if(d.last){ VER=d.v; PART_N=0; } return; }',
+    '    for(let i=0;i<arr.length;i++){ const r=arr[i]; r._srch=(r.article+" "+(r.article_norm||"")+" "+(r.originalArticle||"")+" "+(r.brand||"")+" "+(r.oe_numbers||"")+" "+(r.oe_norm||"")+" "+(r.oe_list||"")+" "+(r.group_articles||"")+" "+(r.name||"")).toUpperCase(); r._hasOe=!!(String(r.oe_numbers||"").trim()||String(r.oe_list||"").trim()); for(const key of ["article","article_norm","originalArticle","name","oe_numbers","oe_norm","oe_list","group_articles"])if(key!==d.sortKey)delete r[key]; ROWS.push(r); }',
+    '    if(d.last){ VER=d.v; PART_N=0; } self.postMessage({type:"rowsAck",upload:d.upload,part:d.part,ver:d.v,last:d.last}); return; }',
     '  if(d.type==="filter"){ const f=d.filter, sort=d.sort; const idx=[];',
     '    for(let i=0;i<ROWS.length;i++){ if(match(ROWS[i],f)) idx.push(i); }',
     '    if(sort && sort.k){ const k=sort.k, dir=sort.dir||1, numeric=!!sort.numeric;',
@@ -22532,71 +22532,102 @@ const FWorker = (function () {
     '    const out=new Int32Array(idx); self.postMessage({type:"filter", id:d.id, ver:d.ver, idx:out}, [out.buffer]); }',
     '};'
   ].join('\n');
-  let worker = null, lastVer = -1, lastSortKey = '', seq = 0; const pend = new Map(); const pendTimers = new Map(); /* v10.8.6 (миноp #4): явная отмена watchdog по ответу */
-  function ensure() {
-    if (worker) return worker;
-    try { worker = new Worker(URL.createObjectURL(new Blob([SRC], { type: 'application/javascript' }))); }
-    catch (e) { worker = null; return null; }
-    worker.onmessage = ev => { const d = ev.data; if (d.type === 'filter') { const cb = pend.get(d.id); pend.delete(d.id); const wt = pendTimers.get(d.id); if (wt) { clearTimeout(wt); pendTimers.delete(d.id); } if (cb) cb(d.idx, d.ver); } };
-    worker.onerror = () => { worker = null; lastVer = -1; };
+  let worker=null,lastVer=-1,lastSortKey='',seq=0,upload=null;
+  const pend=new Map(),pendTimers=new Map(),queued=new Map();
+  function dispose(){
+    if(worker)try{worker.terminate();}catch(e){}
+    worker=null;lastVer=-1;lastSortKey='';upload=null;
+    for(const t of pendTimers.values())clearTimeout(t);
+    pendTimers.clear();pend.clear();queued.clear();
+  }
+  function failed(){dispose();try{syncApplyFilter();}catch(e){}}
+  function watch(key){
+    const old=pendTimers.get(key);if(old)clearTimeout(old);
+    pendTimers.set(key,setTimeout(()=>{if(pendTimers.has(key))failed();},12000));
+  }
+  function sendFilter(message){worker.postMessage(message);watch(message.id);}
+  function pump(){
+    const u=upload;
+    if(!u||u.waiting)return;
+    if(u.rows.length!==u.count||S.catalogVersion!==u.catalogVersion)throw Error('Каталог изменился при передаче Worker');
+    const texts=[];let bytes=2;
+    while(u.offset<u.count&&texts.length<2000){
+      const r=u.rows[u.offset],o={};
+      for(const k of u.keys){
+        if(k==='category_type')o[k]=CategoryTnved.typeInfo(r).value;
+        else if(k==='tnved')o[k]=CategoryTnved.code(r);
+        else if(r[k]!==undefined)o[k]=r[k];
+      }
+      const text=JSON.stringify(o),size=text.length*3+1;
+      if(size>1048576)throw Error('Строка слишком велика для Worker');
+      if(texts.length&&bytes+size>1048576)break;
+      texts.push(text);bytes+=size;u.offset++;
+    }
+    const encoded=new TextEncoder().encode('['+texts.join(',')+']');
+    u.waiting=true;u.last=u.offset===u.count;
+    watch('upload');
+    worker.postMessage({type:'rowsChunk',buf:encoded.buffer,v:u.ver,upload:u.id,part:u.part,last:u.last,sortKey:u.sortKey},[encoded.buffer]);
+  }
+  function ensure(){
+    if(worker)return worker;
+    let url;
+    try{url=URL.createObjectURL(new Blob([SRC],{type:'application/javascript'}));worker=new Worker(url);}
+    catch(e){dispose();return null;}finally{if(url)URL.revokeObjectURL(url);}
+    const current=worker;
+    worker.onmessage=ev=>{
+      if(worker!==current)return;
+      const d=ev.data;
+      if(d.type==='rowsAck'){
+        const u=upload;
+        if(!u||!u.waiting||d.upload!==u.id||d.part!==u.part||d.ver!==u.ver||d.last!==u.last)return;
+        clearTimeout(pendTimers.get('upload'));pendTimers.delete('upload');
+        u.waiting=false;u.part++;
+        try{
+          if(u.last){
+            if(u.rows.length!==u.count||S.catalogVersion!==u.catalogVersion)throw Error('Каталог изменился при передаче Worker');
+            lastVer=u.ver;lastSortKey=u.sortKey;upload=null;
+            for(const message of queued.values())sendFilter(message);queued.clear();
+          }else pump();
+        }catch(e){failed();}
+      }else if(d.type==='filter'){
+        const cb=pend.get(d.id);pend.delete(d.id);
+        clearTimeout(pendTimers.get(d.id));pendTimers.delete(d.id);
+        if(cb)cb(d.idx,d.ver);
+      }
+    };
+    worker.onerror=()=>{if(worker===current)failed();};
     return worker;
   }
   return {
-    release() {
-      if (worker) { try { worker.terminate(); } catch (e) { } }
-      worker = null; lastVer = -1; lastSortKey = '';
-      for (const t of pendTimers.values()) clearTimeout(t);
-      pendTimers.clear(); pend.clear();
+    release(){dispose();},
+    available(){return typeof Worker!=='undefined';},
+    setRowsIfNeeded(rows,ver){
+      if(typeof MemGuard!=='undefined'&&MemGuard.check('фильтр каталога')>=2){dispose();return false;}
+      const sortKey=S.sort.k;
+      if(worker&&((upload&&upload.rows===rows&&upload.ver===ver&&upload.sortKey===sortKey)||(!upload&&ver===lastVer&&sortKey===lastSortKey)))return true;
+      dispose();if(!ensure())return false;
+      const keys=Array.from(new Set(['article','article_norm','originalArticle','brand','oe_numbers','oe_norm','oe_list','group_articles','name','category','bestMp','tariffMissing','stock','price','cost','sales','weight','length','width','height','excluded','dimensionAnomalyBlocked','systemBlocked','deletePending','markCompliant','markRequired','visible','visibleReason','deficit','shipReady',sortKey]));
+      upload={id:++seq,rows,count:rows.length,ver,catalogVersion:S.catalogVersion,sortKey,keys,offset:0,part:0,waiting:false};
+      try{worker.postMessage({type:'rowsReset'});pump();return true;}catch(e){dispose();return false;}
     },
-    available() { return typeof Worker !== 'undefined'; },
-    setRowsIfNeeded(rows, ver) {
-      if (typeof MemGuard !== 'undefined' && MemGuard.check('фильтр каталога') >= 2) return false;
-      const w = ensure(); if (!w) return false; if (ver === lastVer && lastSortKey === S.sort.k) return true; lastVer = ver; lastSortKey = S.sort.k;
-      try {
-        /* JSON is used only as a compact wire format; the large payload travels
-           as a transferable Uint8Array buffer, never as a structured-cloned rows
-           object. The worker reconstructs only its filter/sort projection. */
-        const keys = Array.from(new Set(['article','article_norm','originalArticle','brand','oe_numbers','oe_norm','oe_list','group_articles','name','category','bestMp','tariffMissing','stock','price','cost','sales','weight','length','width','height','excluded','dimensionAnomalyBlocked','systemBlocked','deletePending','markCompliant','markRequired','visible','visibleReason','deficit','shipReady',S.sort.k]));
-        /* v12.9.19-mem: каталог отправляется кусками по 15 000 SKU. Раньше на пике
-           одновременно жили копия каталога (объекты-проекции), её JSON-строка и её
-           байты — на 126 000 SKU это ~3 копии каталога и падение вкладки по памяти.
-           Теперь пик = один кусок. */
-        w.postMessage({ type: 'rowsReset' });
-        const CHUNK = 15000;
-        for (let start = 0; start < rows.length; start += CHUNK) {
-          const end = Math.min(start + CHUNK, rows.length);
-          const packed = new Array(end - start);
-          for (let i = start; i < end; i++) {
-            const r = rows[i], o = {};
-            for (const k of keys) {
-              if (k === 'category_type') o[k] = CategoryTnved.typeInfo(r).value;
-              else if (k === 'tnved') o[k] = CategoryTnved.code(r);
-              else if (r[k] !== undefined) o[k] = r[k];
-            }
-            packed[i - start] = o;
-          }
-          const bytes = new TextEncoder().encode(JSON.stringify(packed));
-          w.postMessage({ type: 'rowsChunk', buf: bytes.buffer, v: ver, last: end >= rows.length }, [bytes.buffer]);
-        }
-      } catch (e) { worker = null; lastVer = -1; return false; }
-      return true;
-    },
-    transferableInput: true,
-    filter(f, sort, ver, cb) { const w = ensure(); if (!w) return false; const id = ++seq; pend.set(id, cb);
-      try { w.postMessage({ type: 'filter', id, ver, filter: f, sort }); }
-      catch (e) { pend.delete(id); worker = null; lastVer = -1; return false; }
-      /* v11-аудит: watchdog — если воркер умер после отправки, через 12 с
-         снимаем зависший коллбэк и уходим на синхронный путь фильтрации. */
-      const wt = setTimeout(() => { pendTimers.delete(id); if (pend.has(id)) { pend.delete(id); worker = null; lastVer = -1; try { syncApplyFilter(); } catch (e2) {} } }, 12000);
-      pendTimers.set(id, wt);
-      return true; }
+    transferableInput:true,
+    acknowledgedInput:true,
+    filter(f,sort,ver,cb){
+      if(!worker)return false;
+      const id=++seq,message={type:'filter',id,ver,filter:f,sort};
+      // Only the latest UI filter matters while an upload is pending.
+      for(const old of queued.keys())pend.delete(old);queued.clear();
+      pend.set(id,cb);
+      try{if(upload)queued.set(id,message);else sendFilter(message);return true;}
+      catch(e){dispose();return false;}
+    }
   };
 })();
 /* Диспетчер: малые каталоги — синхронно (быстро), большие — асинхронно в Worker,
    чтобы не замораживать вкладку. */
 function applyFilter() {
-  if (!workerFits(S.rows.length)) { syncApplyFilter(); return; }
-  FWorker.setRowsIfNeeded(S.rows, S.catalogVersion || 0);
+  if (!workerFits(S.rows.length)) { FWorker.release();syncApplyFilter(); return; }
+  if(!FWorker.setRowsIfNeeded(S.rows, S.catalogVersion || 0)){syncApplyFilter();return;}
   const numeric = !!((TCOLS.find(c => c.k === S.sort.k) || {}).r);
   const fspec = Object.assign({}, S.filter, { showExcluded: !!S.settings.showExcluded });
   const verAtRequest = S.catalogVersion || 0;
@@ -26947,6 +26978,14 @@ const SqlMemory = {
     }
     return h.map(x=>x.toString(16).padStart(8,'0')).join('');
   },
+  rowsGuard(rows) {
+    const count=rows.length,digests=Array.from(rows,p=>this.digest(p));
+    return {matches:current=>{
+      if(current!==rows||current.length!==count)return false;
+      for(let i=0;i<count;i++)if(this.digest(current[i])!==digests[i])return false;
+      return true;
+    }};
+  },
   *jsonTokens(value,key='',ancestors=new Set(),prepared=false) {
     if(!prepared&&value&&typeof value.toJSON==='function')value=value.toJSON(key);
     if(!value||typeof value!=='object'){yield JSON.stringify(value)??'null';return;}
@@ -26994,6 +27033,36 @@ const SqlMemory = {
   },
   view(map,convert) {
     return {get length(){return map.size;},*[Symbol.iterator](){for(const item of map)yield convert?convert(item):item;}};
+  }
+};
+
+// Temporary export bytes only, never a catalog/checkpoint replacement.
+const BrowserExportSpool = {
+  async create(){
+    let dir,handle,name,writer;
+    try{
+      if(!navigator.storage?.getDirectory)throw Error('OPFS unavailable');
+      const root=await navigator.storage.getDirectory();dir=await root.getDirectoryHandle('uc-export-temp-v1',{create:true});
+      // Recover only our own expired export files after an interrupted session.
+      for await(const [key] of dir.entries()){
+        const stamp=Number(key.split('-')[0]);
+        if(Number.isFinite(stamp)&&stamp>0&&Date.now()-stamp>86400000)try{await dir.removeEntry(key);}catch(e){}
+      }
+      name=Date.now()+'-'+crypto.randomUUID()+'.xlsx';handle=await dir.getFileHandle(name,{create:true});writer=await handle.createWritable();
+    }catch(e){
+      if(dir&&name)try{await dir.removeEntry(name);}catch(ignore){}
+      const parts=[];
+      return {disk:false,async write(blobs){parts.push(...blobs);},async finish(type){const blob=new Blob(parts,{type});parts.length=0;return blob;},async abort(){parts.length=0;}};
+    }
+    const remove=async()=>{try{await dir.removeEntry(name);}catch(e){}};
+    return {disk:true,
+      async write(blobs){for(const blob of blobs)await writer.write(blob);},
+      async finish(){await writer.close();const file=await handle.getFile();
+        // Matches the portable download retry URL lifetime. On browser crash,
+        // the next export also sweeps our own stale temporary files.
+        setTimeout(remove,600000);return file;},
+      async abort(){try{await writer.abort();}catch(e){}await remove();}
+    };
   }
 };
 
@@ -27436,7 +27505,8 @@ const PyEngine = {
     return out;
   },
   _mergeProducts(products, onlyEmpty, enrichmentLists) {
-    const byKey = new Map(S.rows.map(p => [normArticle(p.article) + '|' + normArticle(p.brand || ''), p]));
+    const byKey = new Map();
+    for(const p of S.rows)byKey.set(normArticle(p.article) + '|' + normArticle(p.brand || ''),p);
     let touched = 0, added = 0;
     for (const r of products) {
       const p = byKey.get(normArticle(r.article) + '|' + normArticle(r.brand || ''));
@@ -27917,9 +27987,13 @@ const PyEngine = {
     const transient=new Set(['_t','_bw','mp','_stdDimsCalc']);
     const fingerprint=p=>JSON.stringify(Object.fromEntries(Object.keys(p).filter(k=>!k.startsWith('_calc')&&!transient.has(k)).map(k=>[k,p[k]])),
       (k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(key=>[key,v[key]])):v);
-    const enabled=S.settings?.autoCategoryByName!==false,before=pending.map(fingerprint),drafts=before.map(text=>JSON.parse(text));
+    // Deep drafts remain isolated, but retaining their serialized originals
+    // as well would duplicate every large custom/OE field for the full export.
+    const before=[],drafts=[];
+    for(const p of pending){const text=fingerprint(p);before.push(SqlMemory.digest(text));drafts.push(JSON.parse(text));}
+    const enabled=S.settings?.autoCategoryByName!==false;
     await this.enrichOzonPreferred(drafts);
-    if(S.rows!==catalogRows||(typeof HVC==='undefined'?0:HVC.ozonRevision||0)!==hvcRevision||this.processingMode()!=='sql'||(S.settings?.autoCategoryByName!==false)!==enabled||(S.catalogVersion||0)!==version||OzonReference.version()!==treeVersion||CategoryTnved.revision!==categoryRevision||pending.some((p,i)=>fingerprint(p)!==before[i]))throw new Error('Данные изменились во время подготовки Ozon; повторите выгрузку');
+    if(S.rows!==catalogRows||(typeof HVC==='undefined'?0:HVC.ozonRevision||0)!==hvcRevision||this.processingMode()!=='sql'||(S.settings?.autoCategoryByName!==false)!==enabled||(S.catalogVersion||0)!==version||OzonReference.version()!==treeVersion||CategoryTnved.revision!==categoryRevision||pending.some((p,i)=>SqlMemory.digest(fingerprint(p))!==before[i]))throw new Error('Данные изменились во время подготовки Ozon; повторите выгрузку');
     drafts.forEach((p,i)=>{for(const k of Object.keys(pending[i]))if((k.startsWith('ozon_')||k.startsWith('_ozonName'))&&!(k in p))delete pending[i][k];for(const [k,v] of Object.entries(p))if(k.startsWith('ozon_')||k.startsWith('_ozonName'))pending[i][k]=v;});
   },
   dimensionOeSnapshot(found, automatic) {
@@ -28048,8 +28122,8 @@ const PyEngine = {
   },
   async enrichRules(rows,rules,context) {
     await this.processingAvailable();
-    const staged=[],fingerprint=p=>JSON.stringify(this.encodeRuleRows([p]));
-    const before=rows.map(fingerprint),catalogRows=S.rows,version=S.catalogVersion||0;
+    const staged=[],fingerprint=p=>SqlMemory.digest(this.encodeRuleRows([p]));
+    const before=rows.map(fingerprint),catalogRows=S.rows,rowCount=rows.length,catalogCount=catalogRows.length,version=S.catalogVersion||0;
     const config=JSON.stringify([rules,context?.version,S.settings]),mode=this.processingMode();
     const allowed=new Set(rules.filter(r=>r.kind==='enrich'&&r.enabled&&typeof r.target_val==='string').map(r=>r.target_val));
     for(const k of ['_categoryNameAutoValue','_categoryNameStatus','_categoryNameMethod','_categoryNameSource','_categoryNameBrand','_categoryNameRevision','_categoryNameChoices'])allowed.add(k);
@@ -28064,10 +28138,11 @@ const PyEngine = {
         if(!r||p.article!==r.article||(p.brand||'')!==r.brand||!r.fields||typeof r.fields!=='object'||Array.isArray(r.fields)||!Array.isArray(r.removed)||[...Object.keys(r.fields),...r.removed].some(k=>!validKey(k)))throw new Error('Неверный ответ правил обогащения SQLite');
         const specials=r.special_values ?? Object.entries(r.nonfinite||{}).map(([k,kind])=>({path:[k],kind}));
         if(!Array.isArray(specials)||specials.some(e=>!Array.isArray(e?.path)||!validKey(e.path[0])))throw new Error('Неверные типы чисел правил обогащения');
-        staged.push({p,fields:this.decodeRuleFields(r.fields,specials),removed:r.removed});
+        const fields=this.decodeRuleFields(r.fields,specials);
+        if(Object.keys(fields).length||r.removed.length)staged.push({p,fields,removed:r.removed});
       }
     }
-    if(this.processingMode()!==mode||JSON.stringify([rules,context?.version,S.settings])!==config||S.rows!==catalogRows||(S.catalogVersion||0)!==version||rows.some((p,i)=>fingerprint(p)!==before[i]))throw new Error('Данные изменились во время правил обогащения');
+    if(this.processingMode()!==mode||JSON.stringify([rules,context?.version,S.settings])!==config||S.rows!==catalogRows||catalogRows.length!==catalogCount||rows.length!==rowCount||(S.catalogVersion||0)!==version||rows.some((p,i)=>fingerprint(p)!==before[i]))throw new Error('Данные изменились во время правил обогащения');
     for(const {p,fields,removed} of staged){for(const k of removed)delete p[k];Object.assign(p,fields);}
   },
   async enrichCategoryKinds(context, enabled, rows, operation='apply', categoryConfirmed=false) {
@@ -35674,6 +35749,69 @@ const OzonExport = {
   /* Формирование XLSX */
   async generateXlsx(rows, opts, prog) {
     await PyEngine.prepareOzonTyping(rows);
+    if(!window.fflate)throw new Error('Встроенный ZIP-модуль недоступен');
+    const hdr=this.HEADERS.length,last=hdr+rows.length;
+    if(last>1048576)throw new Error('Превышен лимит строк XLSX; разделите выгрузку');
+    opts=Object.assign({},opts,{_chzRules:(opts&&opts._chzRules)||ChzTnved.rules()});
+    // SheetJS builds only the tiny, unchanged template/header, never product cells.
+    const template=await this._generateXlsxLegacy([],opts,null);
+    this._resetTruncated();
+    const yel={bg:'FFFFFF00',bold:true,fg:'FF000000'},headers=this.HEADERS.map((r,i)=>[...r,i===hdr-1?'ТН ВЭД: автоподстановка':'']);
+    let raw=new Uint8Array(await template.arrayBuffer());
+    if(rows.length)raw=Exp._patchSimpleXlsx(raw,[{name:'Шаблон',aoa:headers,conditionalFormatting:[
+      {range:`M${hdr+1}:P${last}`,type:'expression',formula:`$AX${hdr+1}<>""`,style:yel},
+      {range:`AX${hdr+1}:AX${last}`,type:'containsText',text:'СТАНДАРТ',style:yel},
+      {range:`L${hdr+1}:L${last}`,type:'expression',formula:`$AY${hdr+1}<>""`,style:yel},
+      {range:`AY${hdr+1}:AY${last}`,type:'containsText',text:'АВТО',style:yel}
+    ]}]);
+    const files=fflate.unzipSync(raw),path='xl/worksheets/sheet1.xml';
+    let xml=new TextDecoder().decode(files[path]);delete files[path];
+    const at=xml.indexOf('</sheetData>');if(at<0)throw new Error('Повреждён шаблон XLSX');
+    let prefix=xml.slice(0,at),suffix=xml.slice(at);
+    const endCol=COL_LET(Math.max(...headers.map(r=>r.length))-1);
+    prefix=prefix.replace(/<dimension ref="[^"]*"\/>/,`<dimension ref="A1:${endCol}${last}"/>`);
+    suffix=suffix.replace(/<autoFilter ref="[^"]*"\/>/,`<autoFilter ref="A1:${endCol}${last}"/>`);
+    xml='';raw=null;
+    // Synchronous incremental deflate has no unacknowledged compression-worker queue.
+    // Blob parts retain compressed output, not worksheets, ZIP trees or cell objects.
+    const sink=await BrowserExportSpool.create();
+    if(!sink.disk&&prog)prog('Временное файловое хранилище недоступно: архив XLSX хранится сжатым в памяти; для очень больших выгрузок используйте CSV');
+    const chunks=[];let failure=null,finished=false;
+    const flush=async()=>{if(failure)throw failure;const batch=chunks.splice(0);await sink.write(batch);};
+    const zip=new fflate.Zip((err,data,final)=>{if(err)failure=err;else if(data.length)chunks.push(new Blob([data]));if(final)finished=true;});
+    try{
+      for(const [name,data] of Object.entries(files)){
+        const f=new fflate.ZipDeflate(name,{level:6});zip.add(f);f.push(data,true);delete files[name];if(failure)throw failure;
+      }
+      const sheet=new fflate.ZipDeflate(path,{level:6});zip.add(sheet);
+      const write=text=>{sheet.push(fflate.strToU8(text),false);if(failure)throw failure;};
+      write(prefix);prefix='';
+      const esc=v=>Exp._xE(clampCellText(String(v),XLSX_CELL_MAX));
+      for(let start=0;start<rows.length;start+=100){
+        if(typeof UCCancel!=='undefined')UCCancel.check();
+        for(let i=start;i<Math.min(start+100,rows.length);i++){
+          const row=this._xlsxNumericRow(this.rowToOzon(rows[i],i,opts));
+          row.push(CategoryTnved.isCurrentAuto(rows[i])?'АВТО — проверьте код':'');
+          const r=hdr+i+1;
+          const cells=row.map((v,c)=>{
+            if(v===null||v===undefined)return '';
+            const ref=COL_LET(c)+r;
+            if(typeof v==='number'&&Number.isFinite(v))return `<c r="${ref}"><v>${v}</v></c>`;
+            if(typeof v==='boolean')return `<c r="${ref}" t="b"><v>${v?1:0}</v></c>`;
+            return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${esc(v)}</t></is></c>`;
+          }).join('');
+          write(`<row r="${r}">${cells}</row>`);
+        }
+        if(prog)prog(`Ozon XLSX: строки ${Math.min(start+100,rows.length)} из ${rows.length}`);
+        await flush();await Exp._yield();
+      }
+      write(suffix);sheet.push(new Uint8Array(0),true);zip.end();
+      if(failure)throw failure;if(!finished)throw new Error('Архив XLSX не завершён');
+      await flush();return await sink.finish('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    }catch(e){zip.terminate();chunks.length=0;await sink.abort();throw e;}
+  },
+  async _generateXlsxLegacy(rows, opts, prog) {
+    await PyEngine.prepareOzonTyping(rows);
     opts=Object.assign({},opts,{_chzRules:(opts && opts._chzRules) || ChzTnved.rules()});
     if (prog) prog('Ozon XLSX: построение листа по шаблону…');
     this._resetTruncated();
@@ -35698,18 +35836,17 @@ const OzonExport = {
       for (let j = 0; j < rows.length; j++) allData[hdrN + j].push(CategoryTnved.isCurrentAuto(rows[j]) ? 'АВТО — проверьте код' : '');
     } catch (e) { }
     /* v12.9.68: стандартные ОВХ при выгрузке — жёлтая заливка. */
+    const stdRows = [];
     try {
-      const stdRows = [];
       for (let j = 0; j < rows.length; j++) {
         const ed = typeof exportDimsFor === 'function' ? exportDimsFor(rows[j]) : null;
         if (ed && ed.stdFields && ed.stdFields.length) stdRows.push([j, ed.stdFields]);
       }
-      if (stdRows.length) OzonExport._stdExportRows = stdRows;
     } catch (e) { }
     const ws = XLSX.utils.aoa_to_sheet(allData);
     try {
       const hdrRows = OzonExport.HEADERS.length;
-      for (const [j, fields] of (OzonExport._stdExportRows || [])) {
+      for (const [j, fields] of stdRows) {
         const cols = [];
         if (fields.includes('weight')) cols.push(12);
         if (fields.some(k => k !== 'weight')) cols.push(13, 14, 15);
@@ -45805,7 +45942,7 @@ const AnomalyOE = {
     const runToken=(this._token||0)+1;this._token=runToken;
     const rows=S.rows,revision=S.catalogVersion||0,hvcRevision=HVC.ozonRevision||0;
     try {
-      const indices=new Map(rows.map((p,i)=>[p,i]));
+      const indices=new Map();for(let i=0;i<rows.length;i++)indices.set(rows[i],i);
       const found=AnomalyDetector.found.filter(f=>indices.has(f.p)).map(f=>({index:indices.get(f.p),selected:!!f._sel}));
       const snapshot=PyEngine.dimensionOeSnapshot(found,automatic);
       const result=await PyEngine.dimensionOeRequest(snapshot);
@@ -46579,8 +46716,7 @@ const WhatIf = {
     const shadow=WhatIf.shadow, sh=shadow.settings._wi, originalSettings=S.settings, rows=S.rows,
       rowCount=rows.length, version=S.catalogVersion || 0, settingsStamp=JSON.stringify(originalSettings), tariffRef=S.tariffs,
       listRef=S.tariffs.list, listLength=(listRef || []).length, catsRef=S.cats,
-      tariffStamp=JSON.stringify(tariffRef), catsStamp=JSON.stringify(catsRef || []),
-      tariffSnapshot=JSON.parse(tariffStamp), catsSnapshot=JSON.parse(catsStamp), marks=new Uint32Array(rowCount*3);
+      tariffStamp=JSON.stringify(tariffRef), catsStamp=JSON.stringify(catsRef || []);
     if (shadow.settings._wiMarket !== economicScope()) throw new Error('Выбранная площадка изменилась. Подготовьте сценарий заново.');
     const scenarioSettings=Object.assign({}, originalSettings);
     if (sh.tax !== null) { scenarioSettings.taxRegime='custom'; scenarioSettings.taxPct=sh.tax; }
@@ -46590,7 +46726,7 @@ const WhatIf = {
     if (sh.unred !== null) scenarioSettings.fbsUnred=sh.unred;
     const scenarioOv={ logisticsFactor:sh.logCoeff, ymCommissionPct:sh.comm };
     if (typeof PyEngine !== 'undefined' && PyEngine.processingMode() === 'sql') {
-      const rowStamp = JSON.stringify(rows);
+      const rowStamp = SqlMemory.rowsGuard(rows);
       await PyEngine.processingAvailable();
       await PyEngine._syncCatalog('app-whatif');
       const result = await PyEngine._fetch('/catalog/whatif', { method:'POST', timeout:600000,
@@ -46599,12 +46735,14 @@ const WhatIf = {
           scenario_inputs: rows.map(p => ({ article:p.article, brand:p.brand || '',
             no_buy_pct:forecastNoBuyRateInfo(p, null, scenarioSettings).rate,
             ym_return_pct:forecastNoBuyRateInfo(p, tariffFor(p), scenarioSettings).rate })) }) });
-      if (WhatIf.shadow !== shadow || S.rows !== rows || (S.catalogVersion || 0) !== version || JSON.stringify(S.settings) !== settingsStamp || JSON.stringify(rows) !== rowStamp || JSON.stringify(S.tariffs) !== tariffStamp || JSON.stringify(S.cats || []) !== catsStamp)
+      if (WhatIf.shadow !== shadow || S.rows !== rows || (S.catalogVersion || 0) !== version || JSON.stringify(S.settings) !== settingsStamp || !rowStamp.matches(rows) || JSON.stringify(S.tariffs) !== tariffStamp || JSON.stringify(S.cats || []) !== catsStamp)
         throw new Error('Данные изменились во время SQLite-расчёта; запустите сценарий повторно.');
       Object.assign(shadow, { base:result.base, scen:result.scen, delta:result.delta, pct:result.pct,
         included:result.included, skipped:result.skipped, byCat:result.byCat });
       WhatIf.renderDelta(); WhatIf.renderChart(); return shadow;
     }
+    // These buffers belong only to the browser calculation, not SQL.
+    const tariffSnapshot=JSON.parse(tariffStamp),catsSnapshot=JSON.parse(catsStamp),marks=new Uint32Array(rowCount*3);
     let base=0, scen=0, included=0, skipped=0; const byCat=Object.create(null);
     const unavailable = p => p.dimensionAnomalyBlocked || p.noBuyInconsistent || p.modelReviewRequired || p.missingTariffBlocked;
     const changed = () => new Error('Каталог, настройки или тарифы изменились во время расчёта. Запустите сценарий снова.');
