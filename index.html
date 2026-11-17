@@ -13633,7 +13633,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.163-client+checkpoint-error-context';
+const APP_VERSION = '12.9.164-client+volatile-storage-guard';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13909,6 +13909,19 @@ function createVolatileDB() {
       if (typeof key === 'number' && key >= next) next = Math.floor(key) + 1;
       return { row, key };
     };
+    const fieldValue=(entry,field)=>field===':id'?entry[0]:entry[1][field];
+    const collection=(select,max=Infinity,keyField=':id')=>{
+      const entries=()=>select().slice(0,max);
+      return {
+        limit:n=>collection(select,Math.min(max,Math.max(0,Math.floor(n))),keyField),
+        toArray:async()=>entries().map(([,row])=>clone(row)),
+        keys:async()=>entries().map(entry=>fieldValue(entry,keyField)),
+        primaryKeys:async()=>entries().map(([key])=>key),
+        count:async()=>entries().length,
+        first:async()=>{const entry=entries()[0];return entry?clone(entry[1]):undefined;},
+        delete:async()=>{const found=entries();for(const [key] of found)rows.delete(key);return found.length;}
+      };
+    };
     const table = {
       name,
       async toArray() { return Array.from(rows.values(), clone); },
@@ -13920,24 +13933,19 @@ function createVolatileDB() {
       async bulkAdd(values) { const out = []; for (const v of values || []) out.push(await table.add(v)); return out; },
       async bulkPut(values) { const out = []; for (const v of values || []) out.push(await table.put(v)); return out; },
       async bulkGet(keys) { return Promise.all((keys || []).map(k => table.get(k))); },
-      toCollection() { return { primaryKeys: async () => Array.from(rows.keys()) }; },
+      toCollection() { return collection(()=>Array.from(rows.entries())); },
       orderBy(field) {
-        const sorted = () => Array.from(rows.entries()).filter(([, row]) => row[field] !== undefined && row[field] !== null)
-          .sort((a, b) => String(a[1][field]).localeCompare(String(b[1][field])));
-        return { keys: async () => sorted().map(([, row]) => row[field]), primaryKeys: async () => sorted().map(([id]) => id) };
+        return collection(()=>Array.from(rows.entries()).filter(entry=>fieldValue(entry,field)!=null)
+          .sort((a,b)=>{const x=fieldValue(a,field),y=fieldValue(b,field);return x<y?-1:x>y?1:0;}),Infinity,field);
       },
       async delete(key) { rows.delete(key); },
       async bulkDelete(keys) { for (const key of keys || []) rows.delete(key); },
       limit(n) { return { toArray: async () => (await table.toArray()).slice(0, Math.max(0, n)) }; },
       where(field) {
-        const select = predicate => {
-          const found = () => Array.from(rows.values()).filter(predicate);
-          return { keys: async () => found().map(v => v[keyPath]), toArray: async () => found().map(clone),
-            first: async () => { const v = found()[0]; return v === undefined ? undefined : clone(v); },
-            delete: async () => { const keys = found().map(v => v[keyPath]); keys.forEach(k => rows.delete(k)); return keys.length; } };
-        };
-        return { startsWith: prefix => select(v => String(v[field] == null ? '' : v[field]).startsWith(String(prefix))),
-          equals: value => select(v => v[field] === value || String(v[field]) === String(value)) };
+        const select=predicate=>collection(()=>Array.from(rows.entries()).filter(entry=>predicate(fieldValue(entry,field))).sort((a,b)=>{const x=fieldValue(a,field),y=fieldValue(b,field);return x<y?-1:x>y?1:a[0]<b[0]?-1:a[0]>b[0]?1:0;}));
+        return { startsWith:prefix=>select(v=>String(v??'').startsWith(String(prefix))),
+          equals:value=>select(v=>v===value||String(v)===String(value)),
+          above:value=>select(v=>v>value) };
       }
     };
     return table;
@@ -13972,15 +13980,15 @@ async function checkAppDatabase(timeoutMs = 30000) {
      помогает в большинстве таких случаев, поэтому пробуем трижды. */
   let last = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
-    let timer;
+    let timer,phase='open';
     try {
       const result = await Promise.race([
-        Promise.resolve().then(() => mainDb.open()).then(() => mainDb.products.count()),
-        new Promise((_, reject) => { timer = setTimeout(() => { const e = new Error('База не открылась за ' + Math.round(timeoutMs/1000) + ' сек. Другая вкладка или браузер могут блокировать доступ.'); e.name = 'TimeoutError'; reject(e); }, timeoutMs); })
+        Promise.resolve().then(() => mainDb.open()).then(() => {phase='count-products';return mainDb.products.count();}),
+        new Promise((_, reject) => { timer = setTimeout(() => { const e = new Error((phase==='open'?'Открытие базы не завершилось':'Подсчёт товаров в открытой базе не завершён')+' за ' + Math.round(timeoutMs/1000) + ' сек. Причина задержки не установлена.'); e.name = 'TimeoutError'; reject(e); }, timeoutMs); })
       ]);
       return { ok:true, count:result, attempt };
     } catch (e) {
-      last = idbOpenError(e);
+      last = {...idbOpenError(e),phase,attempt};
       console.warn('[UC] IndexedDB: попытка ' + attempt + ' из 3 не удалась — ' + last.name + ': ' + last.message);
       try { mainDb.close(); } catch (e2) { }
       if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
@@ -13993,8 +14001,8 @@ let db = new Dexie('UC_YM_UnitEconomics');
 const mainDb = db; // сохраняем ссылку для диагностики, даже если включился режим памяти
 /* v12.9.48 · ПЕРЕСОЗДАНИЕ БАЗЫ.
    Если Chrome не может открыть базу источника (UnknownError Internal error),
-   вкладка навсегда остаётся в режиме памяти и ничего не сохраняет. Единственный
-   выход — удалить повреждённую базу и начать чистую. Вызывается только вручную
+   вкладка остаётся в режиме памяти и ничего не сохраняет в эту базу. Удаление
+   базы — разрушительная последняя мера, не диагноз и не автоматическое лечение. Вызывается только вручную
    из раздела «Хранилище и квота», после подтверждения; перед удалением
    предлагается скачать товары из памяти. */
 async function recreateAppDatabase(onBlocked) {
@@ -26424,11 +26432,12 @@ const UI = {
         try { mainDb.close(); } catch (e) {}
         db = createVolatileDB();
         S._volatileStorage = true;
+        const applyButton=document.getElementById('impApply');if(applyButton)applyButton.disabled=true;
         console.warn('[UC] База не открылась — временный режим в памяти:', dbStatus.name, dbStatus.message);
         /* v12.9.48: молчать нельзя — в этом режиме импорт не сохраняется вообще. */
         Toast.push('warn', 'База не открылась — работа только в памяти',
           'Сохранённый каталог не читается, импорт не запишется (' + String(dbStatus.name || 'ошибка') + '). ' +
-          'Экспортируйте данные и откройте «Хранилище и квота» → «Пересоздать базу».', 12000);
+          'Не очищайте и не пересоздавайте базу без резервной копии. Откройте «Хранилище и квота» для диагностики.', 12000);
       }
       /* Это не ограничение SKU: перед потенциально тяжёлым пересчётом дать шанс
          сохранить уже записанные товары, не загружая весь каталог в память. */
@@ -28818,6 +28827,12 @@ const DiskImport = {
 /* Retry only idempotent reads or a WHOLE aborted atomic restore transaction.
    Never retry Apply or a portion of a write that may already have committed. */
 const BrowserImportIO = {
+  assertStorage() {
+    if(PyEngine.processingMode()!=='browser'||!S._volatileStorage)return;
+    const status=S._dbOpenInfo||{};
+    const error=new Error('Импорт не начат: основная IndexedDB недоступна, включён режим памяти. '+String(status.name||'')+' '+String(status.message||'')+' Не очищайте базу. Проверьте «Хранилище и квота».');
+    error.name='BrowserStorageUnavailable';error._ucImportNotStarted=true;throw error;
+  },
   transient(error) {
     const todo=[error],seen=new Set();let retry=false;
     while(todo.length){
@@ -29635,6 +29650,7 @@ const Import = {
   },
   async read(file, savedSourceId) {
     return BrowserImportSources.exclusive(()=>withProgress('Чтение файла', file.name, async () => {
+      BrowserImportIO.assertStorage();
       Prog.step(35);
       let table = [],source=null;
       if(typeof savedSourceId!=='undefined'&&savedSourceId){
@@ -29748,6 +29764,11 @@ const Import = {
     }));
   },
   render() {
+    if(S._volatileStorage)$('#impApply').disabled=PyEngine.processingMode()==='browser';
+    if(PyEngine.processingMode()==='browser'&&S._volatileStorage){
+      const status=$('#impApplyStatus');status.hidden=false;
+      status.textContent='Импорт заблокирован: основная база не открыта, включён режим памяти. Данные не применялись. Не очищайте базу; откройте «Хранилище и квота».';
+    }
     const { headers, map, body } = S.pending;
     $('#mapRows').innerHTML = map.map((m, i) => {
       const sample = body.slice(0, 3).map(r => String(r[headers.indexOf(m.src)] ?? '')).join(' · ');
@@ -29791,6 +29812,7 @@ const Import = {
   },
   /* v10.4: явный API программного импорта (почта) — вместо скрытой сборки S.pending снаружи модуля. */
   applyRows({ file, headers, body, map, keyMode, mode, keepVisibility }) {
+    BrowserImportIO.assertStorage();
     S.pending = { file, headers, body, map: map.map(m => Object.assign({}, m)) };
     if (keyMode) { S.settings.keyMode = keyMode; const ks = $('#impKey'); if (ks) ks.value = keyMode; }
     const ms=$('#impMode'); if (ms) ms.value=['upsert','replace','newonly'].includes(mode) ? mode : 'upsert';
@@ -29798,6 +29820,7 @@ const Import = {
     return Import.apply();
   },
   apply() {
+    BrowserImportIO.assertStorage();
     if (!S.pending || !S.pending.body || !S.pending.body.length) { Toast.err('Нет данных импорта', 'Файл не загружен или пуст'); return; }
     /* v11-аудит: artCol мог устареть после ручных правок маппинга — пересчитываем. */
     Import.normalize();
@@ -48003,11 +48026,11 @@ function bindAll() {
       const reason = storageErrorText(err);
       if (status) {
         status.hidden = false;
-        status.textContent = err?._ucRollbackFailed?reason:err?._ucCheckpointBeginFailed?'Обогащение не началось: подготовка контрольной копии не завершена. '+reason+' Не очищайте базу. Сначала сохраните копию каталога экспортом без экономики.':conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
+        status.textContent = err?._ucRollbackFailed?reason:err?._ucImportNotStarted?reason:err?._ucCheckpointBeginFailed?'Обогащение не началось: подготовка контрольной копии не завершена. '+reason+' Не очищайте базу. Сначала сохраните копию каталога экспортом без экономики.':conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
       }
       if (!err || !err._ucShown) Toast.err('Ошибка импорта', reason.slice(0, 400));
     } finally {
-      button.disabled = S._bootReady!==true||!!S._bootError;
+      button.disabled = S._bootReady!==true||!!S._bootError||(PyEngine.processingMode()==='browser'&&!!S._volatileStorage);
     }
   });
   on('#impRestoreRetry','onclick',async()=>{

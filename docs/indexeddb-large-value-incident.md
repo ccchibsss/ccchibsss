@@ -194,3 +194,51 @@ JSON.stringify({version:APP_VERSION,sourceFailure:BrowserImportSources.lastFailu
 
 Preserve the old profile and export RAM catalog if possible. Do not conclude
 that quota, antivirus or disk corruption is the cause without further evidence.
+
+## 12.9.164: confirmed timeout and broken RAM fallback
+
+The next log confirms three 30-second checkAppDatabase timeouts on 12.9.163,
+then fallback to createVolatileDB, followed by HVC.load TypeError:
+`.limit is not a function`. First-file staging still took ~90 seconds; Apply
+then refused because safe IndexedDB checkpointing was unavailable.
+
+These are separate issues:
+- The boot probe did not finish in time. It races BOTH open and product count;
+  the old wording "database did not open" did not prove which operation stalled.
+  No evidence establishes that another tab, quota, disk or corruption caused it.
+- The in-memory table shim lacked orderBy(':id').limit().toArray() and
+  where(':id').above(last).limit().toArray(), now used by HVC's bounded loader.
+  This is a confirmed application compatibility bug, not a browser diagnosis.
+
+Fixes:
+- Add bounded collection operations to the existing RAM tables, including
+  numeric primary-key ordering, above(), immutable limits and primaryKeys.
+  This is not a full transactional Dexie replacement; browser Apply stays blocked.
+- Block browser read/apply/applyRows BEFORE parsing/staging/mapping when main
+  storage is volatile. Keep SQL executor guard behavior independent.
+- Disable Apply in RAM browser mode; show an import-not-started explanation
+  rather than the generic "some rows may have been processed" message.
+- Remove the boot toast's premature suggestion to recreate/delete the database.
+- Record boot failure phase open vs count-products and retry attempt. Timeout
+  text no longer claims another tab must be responsible. Timeout/retry duration
+  is not increased and no auto-reset/reopen loop or relaxed safety is introduced.
+
+Verification:
+- New stdlib Node VM suite uses ACTUAL RAM tables and ACTUAL HVC.load, empty
+  and 2003 records inserted in reverse ID order; exact last SKU/OE confirmed.
+  Tests browser read/apply guards, SQL guard exemption, separate open/count
+  timeout contexts, healthy probe and non-mutating bounded queries.
+- New real Chromium fixture denies opening ONLY the main DB: actual fallback
+  boots with no HVC/page errors, Apply is disabled, direct read/apply blocked,
+  RAM/pending unchanged and UC_BrowserImportSources is not created. This
+  simulates denied access, NOT the original physical 30-second timeout.
+- Node/console, all eight IndexedDB suites PASS; real Chromium pre-enriched CSV
+  import/reopen, abort/atomic rollback/manual restore and conflict suites PASS.
+- Both new suites added to CI. No new million-row performance claim.
+
+This fixes the secondary fallback/UI errors, NOT the cause of the user's main
+DB timeout or earlier blob IO error. Preserve original data/profile. Export
+available RAM before exiting. Then fully close other app tabs/browser processes
+and try one app tab; this is an isolation step, not a guaranteed cure. Keep any
+separate-profile test non-destructive to the original profile. A visible empty
+RAM catalog is not evidence that saved IndexedDB products were deleted.
