@@ -146,3 +146,51 @@ profile from a genuinely separate clean browser profile. Preserve old storage
 and original inputs; make a data-only export if RAM data exists. Try a separate
 profile only without deleting the old one. The earlier page-size mitigation
 cannot be presented as a cure for an unreadable existing profile.
+
+## 12.9.163: sourceFailure=null and persistFailure=null
+
+The user confirmed APP_VERSION 12.9.162 and both recorded failure slots null.
+Their preceding log shows first-price commit completed and second Apply baseline
+verification completed, but no checkpoint-stage completion. This narrows the
+suspected path to checkpoint preparation; null slots do NOT prove absence of an
+error, a healthy disk or an exact failing store. The reported message is now
+`AbortError: DataError Failed to write blobs (IOError)`.
+
+Added a separate RAM-only `BrowserApplyCheckpoint.lastFailure` descriptor for
+checkpoint begin: database, operation, source table, logical position, current
+page row count, cumulative successful backup write requests, build and error
+text. `completedRows` means requests completed before failure, NOT durable rows:
+the backup is still a single transaction. The failure retains its original
+cause/type, and logs before being passed to the import UI. Typed revision
+conflicts retain the existing conflict flow. Cancellation behavior is unchanged.
+
+Operations distinguish freshness, baseline persistence, transaction opening,
+marker read, old-backup clearing, source-table reading, writing applyUndo,
+marker publication and transaction commit. During write-backup, `table` names
+the SOURCE; destination is applyUndo. The descriptor includes no product values
+or record keys. A successful new begin clears stale failure diagnostics. Active
+checkpoint/volatile-storage entry guards remain outside this diagnostic scope.
+
+The wizard now distinguishes checkpoint-begin failure from failure after
+catalog enrichment: it states that enrichment did not start rather than saying
+some rows might have been processed. No retry, DB reset, relaxed revision check,
+backup format change or automatic overwriting was introduced. This is NOT a
+claimed remedy for Chromium disk/blob IO failure.
+
+Verification: Node/console and all eight IndexedDB suites PASS. New injected
+write-blob IO failure on product backup page 2 leaves catalog, prior metadata
+and undo state intact; preserves source table=products, position=1000, original
+cause (including Dexie's wrapper). Injected source-table read and marker-write
+failures have separate contexts and atomically roll back. Existing legacy
+restore, atomic rollback/corruption/fault suites PASS. Real Chromium
+pre-enriched-first-CSV/second-CSV/reopen, abort/recovery and cross-tab-conflict
+suites PASS. These injections do not reproduce a physical disk/browser fault.
+
+On 12.9.163+, read-only diagnostic command:
+
+```
+JSON.stringify({version:APP_VERSION,sourceFailure:BrowserImportSources.lastFailure??null,persistFailure:S._lastPersistFailure??null,checkpointFailure:BrowserApplyCheckpoint.lastFailure??null},null,2)
+```
+
+Preserve the old profile and export RAM catalog if possible. Do not conclude
+that quota, antivirus or disk corruption is the cause without further evidence.

@@ -13633,7 +13633,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.162-client+source-error-context';
+const APP_VERSION = '12.9.163-client+checkpoint-error-context';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -28866,37 +28866,61 @@ const BrowserApplyCheckpoint = {
   async begin() {
     if(S._volatileStorage)throw new Error('Без IndexedDB безопасное применение недоступно');
     if(this.owner)throw new Error('Контрольная точка уже используется');
-    // Fail before attempting a save; keep the typed conflict for the recovery UI.
-    await db.transaction('r',db.meta,()=>StorageCtl.assertCatalogFresh());
-    // Flush legitimate pre-existing edits before taking an undo checkpoint.
-    if(!await persistNow(undefined,{verifyUnchanged:true})||S._cacheAuxError||S._hvcPersistError){
-      const e=new Error(S._catalogConflict?'Импорт не начат: сохранённая ревизия каталога отличается от этой вкладки. Откройте актуальную копию в новой вкладке.':'Не удалось сохранить исходное состояние перед импортом');
-      if(S._catalogConflict)e.name='CatalogConflictError';throw e;
-    }
-    const owner=uid('apply');this.owner=owner;
+    // Diagnostics are RAM-only. Do not write to the failing database, retry
+    // checkpoint creation, or publish an incomplete backup.
+    const context={database:db.name||'catalog',operation:'freshness',table:'meta',position:0,pageRows:0,completedRows:0,appVersion:typeof APP_VERSION==='undefined'?'unknown':APP_VERSION};
+    const step=(operation,table,position=0,pageRows=0)=>Object.assign(context,{operation,table,position,pageRows});
+    this.lastFailure=null;
     try{
+      await db.transaction('r',db.meta,()=>StorageCtl.assertCatalogFresh());
+      step('persist-baseline','products');
+      if(!await persistNow(undefined,{verifyUnchanged:true})||S._cacheAuxError||S._hvcPersistError){
+        const e=new Error(S._catalogConflict?'Импорт не начат: сохранённая ревизия каталога отличается от этой вкладки. Откройте актуальную копию в новой вкладке.':'Не удалось сохранить исходное состояние перед импортом');
+        if(S._catalogConflict)e.name='CatalogConflictError';throw e;
+      }
+      const owner=uid('apply');this.owner=owner;
+      step('transaction-open','applyUndo');
       await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
+        step('check-marker','meta');
         if(await db.meta.get(this.KEY))throw new Error('Сначала восстановите незавершённый импорт');
-        await StorageCtl.assertCatalogFresh();await db.applyUndo.clear();
+        step('freshness','meta');await StorageCtl.assertCatalogFresh();
+        step('clear-backup','applyUndo');await db.applyUndo.clear();
         const counts={},pageCounts={};
         for(const name of this.TABLES){
           const table=db.table(name),key=table.schema.primKey.keyPath;let last,total=0,pages=0;
           for(;;){
             if(typeof UCCancel!=='undefined')UCCancel.check();
+            step('read',name,total);
             const rows=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(this.BATCH).toArray();
             if(!rows.length)break;
             for(const values of this.pages(rows)){
+              // table identifies the source; destination is always applyUndo.
+              step('write-backup',name,total,values.length);
               await db.applyUndo.bulkAdd([{table:name,pos:total,values}]);
-              total+=values.length;pages++;
+              total+=values.length;pages++;context.completedRows+=values.length;
             }
             last=rows[rows.length-1][key];
           }
           counts[name]=total;pageCounts[name]=pages;
         }
+        step('publish-marker','meta');
         await db.meta.put({key:this.KEY,value:{owner,created:Date.now(),counts,pageCounts,storage:'pages-v2',pageSize:this.BATCH}});
+        step('transaction-commit','applyUndo');
       });
       return owner;
-    }catch(e){this.owner=null;throw e;}
+    }catch(e){
+      this.owner=null;
+      if(e?._ucCancelled)throw e;
+      const message=typeof storageErrorText==='function'?storageErrorText(e):String(e?.message||e);
+      this.lastFailure={...context,message};
+      console.error('[UC] контрольная точка: создание не завершено',this.lastFailure,e);
+      // Preserve typed conflicts for their existing recovery UI.
+      if(e?.name==='CatalogConflictError')throw e;
+      const failure=new Error('Контрольная копия: '+context.operation+' / '+context.table+' / позиция '+context.position+'. '+message);
+      failure.name=e?.name||'Error';failure.cause=e;
+      failure._ucCheckpointBeginFailed=true;failure._ucCheckpointContext={...context};
+      throw failure;
+    }
   },
   async commit(owner) {
     await db.transaction('rw',db.meta,db.applyUndo,async()=>{
@@ -47979,7 +48003,7 @@ function bindAll() {
       const reason = storageErrorText(err);
       if (status) {
         status.hidden = false;
-        status.textContent = err?._ucRollbackFailed?reason:conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
+        status.textContent = err?._ucRollbackFailed?reason:err?._ucCheckpointBeginFailed?'Обогащение не началось: подготовка контрольной копии не завершена. '+reason+' Не очищайте базу. Сначала сохраните копию каталога экспортом без экономики.':conflict?'Импорт не начат: сохранённый каталог изменился. Используйте кнопку продолжения в новой вкладке ниже. Старая вкладка и загруженный файл сохранены.':'Импорт не завершён: ' + reason + '\nПовторное появление этого окна не означает повторное чтение файла. Часть данных могла быть обработана; не очищайте базу. Скопируйте эту ошибку для диагностики.';
       }
       if (!err || !err._ucShown) Toast.err('Ошибка импорта', reason.slice(0, 400));
     } finally {
