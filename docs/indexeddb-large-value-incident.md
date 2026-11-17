@@ -103,3 +103,46 @@ Both local Chromium cases passed (pre-enriched fixture: 42 source pages and
 42 product undo pages; original fixture: 24 source pages and 28 undo pages).
 This does not reproduce or repair a damaged browser profile, nor substitute
 for testing the user's unavailable complete files. Application code unchanged.
+
+## 12.9.162: report of failure on the first file
+
+A later screenshot still reports DatabaseClosedError / AbortError / DataError:
+Failed to read large IndexedDB value, now during the first file selection.
+It does not show the running APP_VERSION or the failing IndexedDB operation.
+Do not infer that 12.9.161 is confirmed in use, that the CSV is invalid, that a
+specific old record is corrupt, or that an empty product catalog means a clean
+browser origin. No original user-profile failure has been reproduced.
+
+Inspection: fresh browser file selection opens UC_BrowserImportSources and
+writes sources.add BEFORE CSV parsing; rowPages.add stores row blocks and
+sources.put publishes the ready descriptor. The initial sources.add used to
+be outside the stage error handler. No existing source page is intentionally
+read by this fresh staging path, so a generic "reading file" title does not
+identify a read of CSV data or a particular old record.
+
+Changes are diagnostic/error-handling, NOT a repair or a new storage fallback:
+- Track operation sources.add / parse / rowPages.add / sources.put.
+- Surface storage operation and written row count with original cause retained.
+- Record lastFailure with database, operation, input byte count, parsed/written
+  row counts and app version. It contains no CSV values or file name.
+- Log the original failure before best-effort cleanup, which cannot replace it.
+- Skip cleanup if initial source registration never succeeded; never delete
+  unrelated sources/catalogs, bypass revision checks or retry the whole import.
+- Clear stale diagnostics on successful source staging. Parsing/cancellation
+  errors retain their normal behavior.
+
+Verification: Node/console and eight IndexedDB suites PASS. Injected initial
+sources.add and final sources.put failures retain correct context/cause and do
+not remove earlier inputs. Real Chromium wide/pre-enriched-price fixture PASS;
+a deliberately injected first-file sources.add failure leaves RAM/pending/locks
+unchanged and is displayed by the existing error UI; subsequent two real CSV
+imports still pass exact product/HVC reopen checks. This injection does NOT
+simulate missing backing files at the browser engine level. Real Chromium
+AbortError/rollback/manual recovery suite also PASS.
+
+For the next incident obtain the console APP_VERSION and, on 12.9.162+,
+JSON.stringify(BrowserImportSources.lastFailure). Also distinguish the same old
+profile from a genuinely separate clean browser profile. Preserve old storage
+and original inputs; make a data-only export if RAM data exists. Try a separate
+profile only without deleting the old one. The earlier page-size mitigation
+cannot be presented as a cure for an unreadable existing profile.

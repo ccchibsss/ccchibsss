@@ -13633,7 +13633,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.161-client+bounded-storage-pages';
+const APP_VERSION = '12.9.162-client+source-error-context';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -29176,8 +29176,7 @@ const BrowserImportSources = {
   async stage(file) {
     if(PyEngine.processingMode()!=='browser')throw new Error('Таблицы источников IndexedDB доступны только в браузерном режиме');
     const d=this.database(),id=uid('source'),created=Date.now();
-    await d.sources.add({id,file:file.name,status:'loading',created,total:0});
-    this.active.add(id);
+    let phase='sources.add',registered=false;
     const prefix=[],preview=[],numericCounts=[];let headers=null,buffer=[],total=0,written=0;
     const consume=row=>{
       if(!row.some(v=>String(v??'').trim()!==''))return;
@@ -29207,11 +29206,13 @@ const BrowserImportSources = {
           if(count&&(size+bytes>512*1024||count>=this.BATCH))break;
           size+=bytes;count++;
         }
-        const batch=buffer.splice(0,count);await d.rowPages.add({source:id,start:written,cells:batch});written+=batch.length;this.check();
+        const batch=buffer.splice(0,count);phase='rowPages.add';await d.rowPages.add({source:id,start:written,cells:batch});written+=batch.length;phase='parse';this.check();
       }
       if(typeof Prog!=='undefined')Prog.msg('IndexedDB: сохранено '+total+' строк источника');
     };
     try{
+      await d.sources.add({id,file:file.name,status:'loading',created,total:0});registered=true;
+      this.active.add(id);phase='parse';
       if(/\.csv$/i.test(file.name)){
         await CsvStream.rows(file,row=>{consume(row);if(!headers&&prefix.length>=9)header();},{chunkBytes:256*1024,onChunk:flush,onProgress:(n,t)=>{if(typeof Prog!=='undefined')Prog.step(5+60*n/Math.max(1,t));}});
       }else{
@@ -29221,11 +29222,21 @@ const BrowserImportSources = {
       }
       header();await flush();
       const s={id,file:file.name,status:'ready',created,total,headers,numericCounts,storage:'pages-v1'};
-      await d.sources.put(s);return {...s,preview};
+      phase='sources.put';await d.sources.put(s);this.lastFailure=null;return {...s,preview};
     }catch(e){
+      // Record the failing operation BEFORE cleanup; never blame the CSV for
+      // a database-open/write failure or replace it with a cleanup exception.
+      const context={database:'UC_BrowserImportSources',operation:phase,fileBytes:Number.isFinite(file.size)?file.size:null,parsedRows:total,writtenRows:written,appVersion:typeof APP_VERSION==='undefined'?'unknown':APP_VERSION};
+      if(!e?._ucCancelled){
+        this.lastFailure=context;
+        console.error('[UC] чтение файла: этап отказа',context,e);
+      }
       this.active.delete(id);
-      try{await this._remove(id);}catch(cleanup){console.warn('[UC] очистка источника:',cleanup);}
-      throw e;
+      if(registered)try{await this._remove(id);}catch(cleanup){console.warn('[UC] очистка источника:',cleanup);}
+      if(e?._ucCancelled||phase==='parse')throw e;
+      const failure=new Error('Хранилище источников · '+phase+' · записано строк '+written+'. '+String(e?.message||e));
+      failure.name=e?.name||'Error';failure.cause=e;failure._ucImportStorage=context;
+      throw failure;
     }finally{this.active.delete(id);}
   },
   async xlsx(file,onBatch) {

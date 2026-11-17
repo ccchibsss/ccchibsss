@@ -115,9 +115,28 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  assert.equal(await B.database().sources.count(),before);
  await assert.rejects(()=>B.stage(file('broken.csv','article;brand\nA;"broken')),/незакрытая/);assert.equal(await B.database().sources.count(),before);
  await assert.rejects(()=>B.stage(file('duplicate.csv','article;article\nA;B\n')),/Повторяющиеся/);
+ // A first-file failure may happen before even one CSV byte is parsed.
+ // Retain exact DB operation/cause; do not run cleanup on an uncreated source.
+ const sourceAdd=B.database().sources.add.bind(B.database().sources),remove=B._remove;
+ let removed=0;B._remove=async()=>{removed++};
+ const unavailable=Object.assign(Error('AbortError DataError Failed to read large IndexedDB value'),{name:'DatabaseClosedError'});
+ B.database().sources.add=async()=>{throw unavailable};
+ await assert.rejects(()=>B.stage(file('first.csv','article;brand\nA;B\n')),e=>e.name==='DatabaseClosedError'&&e.cause===unavailable&&e._ucImportStorage.operation==='sources.add'&&e._ucImportStorage.writtenRows===0&&/sources.add/.test(e.message));
+ assert.equal(removed,0);assert.equal(B.active.size,0);assert.equal(B.lastFailure.database,'UC_BrowserImportSources');
+ assert.equal(B.lastFailure.parsedRows,0);assert(!JSON.stringify(B.lastFailure).includes('article;brand'));
+ B.database().sources.add=sourceAdd;B._remove=remove;
+ assert.equal(await B.database().sources.count(),before);
+ // A failure publishing the ready descriptor retains its cause and cleans
+ // only the newly staged source, not earlier inputs.
+ const sourcePut=B.database().sources.put.bind(B.database().sources);
+ B.database().sources.put=async()=>{throw unavailable};
+ const beforePublishPages=await B.database().rowPages.count();
+ await assert.rejects(()=>B.stage(file('publish.csv','article;brand\nA;B\n')),e=>e.cause===unavailable&&e._ucImportStorage.operation==='sources.put'&&e._ucImportStorage.writtenRows===1);
+ B.database().sources.put=sourcePut;
+ assert.equal(await B.database().sources.count(),before);assert.equal(await B.database().rowPages.count(),beforePublishPages);
  // Storage failure cannot silently fall back to a million-element array.
  const bulk=B.database().rowPages.add.bind(B.database().rowPages);B.database().rowPages.add=async()=>{throw Error('QuotaExceededError')};
- await assert.rejects(()=>B.stage(file('full.csv','article;brand\nA;B\n')),/QuotaExceeded/);B.database().rowPages.add=bulk;
+ await assert.rejects(()=>B.stage(file('full.csv','article;brand\nA;B\n')),e=>e._ucImportStorage.operation==='rowPages.add'&&e._ucImportStorage.writtenRows===0&&/QuotaExceeded/.test(e.message));B.database().rowPages.add=bulk;
  assert.equal(await B.database().sources.count(),before);
  const pageCount=await B.database().rowPages.count();let pageWrites=0;
  B.database().rowPages.add=async value=>{if(++pageWrites===2)throw Error('QuotaExceededAfterPage');return bulk(value)};
@@ -126,6 +145,7 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  sql=true;await assert.rejects(()=>B.stage(file('sql.csv','article;brand\nA;B\n')),/браузерном/);sql=false;
  await B.remove(first.id);assert.equal(await B.database().rows.where('source').equals(first.id).count(),0);assert.equal(await B.database().rowPages.where('source').equals(first.id).count(),0);assert.equal((await B.source(second.id)).total,1);
  const wideText='Ж'.repeat(20000),wide=await B.stage(file('wide.csv','article;brand;name\n'+Array.from({length:40},(_,i)=>'W'+i+';B;'+wideText).join('\n')));
+ assert.equal(B.lastFailure,null,'successful stage clears stale diagnostics');
  const widePages=await B.database().rowPages.where('source').equals(wide.id).sortBy('start');
  assert(widePages.length>1);assert(widePages.every(p=>JSON.stringify(p.cells).length*2<=512*1024));
  B.database().close();await B.database().open();

@@ -15,6 +15,16 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
    if(S._bootError)throw Error(String(S._bootError));
    const n=1200,wide='Длинное название '.repeat(150);S.rows=[];
    S.settings.autoStdDims=false;S.settings.autoOeAnomalyOnImport=false;S.settings.enrichRelatedOnImport=false;
+   // Fault injection, NOT reproduction of a corrupt Chromium profile: a
+   // first-file storage failure must surface before CSV parsing or mutation.
+   const sourceTable=BrowserImportSources.database().sources,addSource=sourceTable.add.bind(sourceTable),priorPending=S.pending;
+   const unavailable=Object.assign(Error('AbortError DataError Failed to read large IndexedDB value'),{name:'DatabaseClosedError'});
+   sourceTable.add=async()=>{throw unavailable};let diagnosed=false;
+   try{await Import.read(new File(['Артикул;Бренд\nA;B\n'],'first-fails.csv',{type:'text/csv'}));}
+   catch(error){diagnosed=error.cause===unavailable&&error._ucImportStorage?.operation==='sources.add'&&error._ucImportStorage?.parsedRows===0&&error._ucImportStorage?.writtenRows===0&&error._ucShown===true;}
+   finally{sourceTable.add=addSource;}
+   if(!diagnosed||S.pending!==priorPending||S.rows.length||BrowserImportSources.busy||BrowserImportSources.active.size)throw Error('initial storage failure not isolated/diagnosed');
+
    async function apply(text,name,fields){
     await Import.read(new File([text],name,{type:'text/csv'}));
     const source=S.pending.sourceId;
@@ -53,7 +63,7 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
    for(const row of saved){const i=Number(row.article.slice(1)),links=HVC.byArt.get(HVC.keyOf(row));if(!links?.has('OE'+i)||(preenriched&&!links.has('PRE'+i)))throw Error('HVC lost OE '+i);}
    if(await db.meta.get(BrowserApplyCheckpoint.KEY)||await db.applyUndo.count())throw Error('undo leaked');
    if(!S._econPending)throw Error('unexpected economics');
-   return {rows:n,preenrichedPrice:preenriched,sourcePages:pages.length,checkpointPages,exactReopen:true,economicsPending:true};
+   return {rows:n,initialStorageFailureHandled:true,preenrichedPrice:preenriched,sourcePages:pages.length,checkpointPages,exactReopen:true,economicsPending:true};
   },process.env.E2E_PRICE_ENRICHED==='1');
   assert.equal(errors.length,0,errors.join('\n'));console.log(JSON.stringify(result));
  }finally{if(browser)await browser.close();await new Promise(r=>server.close(r));}
