@@ -68,3 +68,17 @@ no other app tabs, import the saved catalog as first price, then enrichment.
 This isolates the old storage; it does not recover unexported data. Check free
 system disk space as well as browser quota. If export fails, do not clear the
 old storage: preserve originals and collect the full error for diagnosis.
+
+## PR #98 CI follow-up
+
+The full local Chromium CI sequence reproduced the red app check in the
+30000-SKU partial-write scenario: `HVC page count mismatch`. The end-to-end
+assertion still assumed `ceil(count / 1000)` after the writer switched to
+adaptive page sizes. This was not a new observed field-loss or restore failure.
+The assertion now validates pageSize (integer 1..1000), derives the page count
+from stored metadata and checks every page's marker and exact length, including
+the tail. The 30000-SKU partial-write/reopen scenario passes with these checks.
+All preceding Chromium cases (index performance, enrichment parity, wide
+values, repeat memory, abort/recovery, conflict, export, 1000-SKU smoke) and
+Node/console regressions passed on this recheck. The million-row preflight is
+rerun separately; its outcome and the new remote CI must be checked before merge.
