@@ -40,8 +40,23 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  await assert.rejects(()=>C.begin(),e=>e.name==='CatalogConflictError');
  assert.equal(C.owner,null);assert.deepEqual(await readAll(),before);c.S._catalogConflict=false;c.persistNow=persist;
 
+ // Reproduce the REPORTED error type by injection, not a real disk fault.
+ // A failed second backup page must leave the entire saved catalog intact.
+ const backupAdd=db.applyUndo.bulkAdd.bind(db.applyUndo);
+ const io=Object.assign(Error('DataError Failed to write blobs (IOError)'),{name:'AbortError'});
+ db.applyUndo.bulkAdd=async rows=>{if(rows[0].table==='products'&&rows[0].pos===1000)throw io;return backupAdd(rows)};
+ await assert.rejects(()=>C.begin(),e=>(e.cause===io||e.cause?.inner===io)&&e.name==='AbortError'&&e._ucCheckpointBeginFailed&&e._ucCheckpointContext.operation==='write-backup'&&e._ucCheckpointContext.table==='products'&&e._ucCheckpointContext.position===1000);
+ assert.equal(C.lastFailure.completedRows,1000);assert.equal(C.lastFailure.pageRows,1000);assert(/Failed to write blobs/.test(C.lastFailure.message));
+ assert.equal(C.owner,null);assert.equal(await db.applyUndo.count(),0);assert(!await db.meta.get(C.KEY));assert.deepEqual(await readAll(),before);
+ db.applyUndo.bulkAdd=backupAdd;
+ const failRead=()=>{throw io};db.products.hook('reading',failRead);
+ await assert.rejects(()=>C.begin(),e=>e._ucCheckpointContext.operation==='read'&&e._ucCheckpointContext.table==='products'&&e._ucCheckpointContext.position===0);
+ db.products.hook('reading').unsubscribe(failRead);assert.deepEqual(await readAll(),before);assert.equal(await db.applyUndo.count(),0);
+ const failMarker=(key,obj)=>{if(key===C.KEY)throw io};db.meta.hook('creating',failMarker);
+ await assert.rejects(()=>C.begin(),e=>e._ucCheckpointContext.operation==='publish-marker'&&e._ucCheckpointContext.table==='meta');
+ db.meta.hook('creating').unsubscribe(failMarker);assert.deepEqual(await readAll(),before);assert.equal(await db.applyUndo.count(),0);assert(!await db.meta.get(C.KEY));
  let peak=0;const bulk=db.applyUndo.bulkAdd.bind(db.applyUndo);db.applyUndo.bulkAdd=async rows=>{peak=Math.max(peak,rows.length);return bulk(rows)};
- let owner=await C.begin();assert(peak<=1000);assert(await db.meta.get(C.KEY));assert.equal(C.owner,owner);
+ let owner=await C.begin();assert.equal(C.lastFailure,null);assert(peak<=1000);assert(await db.meta.get(C.KEY));assert.equal(C.owner,owner);
  const marker=(await db.meta.get(C.KEY)).value;assert.equal(marker.storage,'pages-v2');assert.equal(marker.pageSize,1000);
  const pages=await db.applyUndo.where('table').equals('products').sortBy('pos');assert.deepEqual(pages.map(p=>p.pos),[0,1000,2000]);assert.deepEqual(pages.map(p=>p.values.length),[1000,1000,503]);
  assert((await db.applyUndo.toArray()).every(p=>p.values.length<=1000));
