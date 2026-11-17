@@ -57,6 +57,7 @@ jobs:
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-worker-memory-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-ozon-stream-xlsx-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-sql-paged-import-e2e.js
+          E2E_ROWS=60000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-first-price-boot-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-volatile-boot-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-key-index-perf-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-enrichment-parity-e2e.js

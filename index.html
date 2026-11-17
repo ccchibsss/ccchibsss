@@ -13633,7 +13633,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.166-client+sql-memory-guards';
+const APP_VERSION = '12.9.167-client+read-only-boot';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -26425,7 +26425,7 @@ const CompetitorIntel = {
 
 const UI = {
   current() { return location.hash.slice(1) || 'dashboard'; },
-  go(v) {
+  go(v, options = {}) {
     document.body.classList.remove('nav-open'); // v10.4: закрываем мобильное меню при переходе
     $$('#nav .navitem').forEach(n => n.classList.toggle('on', n.dataset.v === v));
     $$('#mobileQuickNav [data-v]').forEach(n => {
@@ -26440,7 +26440,11 @@ const UI = {
     /* v12.9.86: после лёгкого импорта расчётные разделы сначала досчитывают
        экономику, иначе таблица/дашборд показали бы пустые прибыли. */
     if (fn) {
-      if (S._econPending && ['data','dashboard','unit','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(v)) {
+      const needsEconomics=['dashboard','unit','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(v);
+      if(options.restore&&S._econPending&&needsEconomics){
+        Toast.info('Каталог открыт без расчёта','Показаны исходные данные. Расчёт доступен при явном переходе в расчётный раздел.');
+        return UI.go('data',{restore:true});
+      }else if (!options.restore && S._econPending && needsEconomics) {
         Toast.info('Считаю юнит-экономику', 'Каталог был загружен в лёгком режиме — выполняю отложенный расчёт…');
         ensureEconomics().then(() => setTimeout(fn, 30)).catch(() => setTimeout(fn, 30));
       } else setTimeout(fn, 30);
@@ -26518,20 +26522,17 @@ const UI = {
          чтобы «Группа артикулов» была актуальна сразу после загрузки.
          Тяжёлое обогащение полей остаётся ручным («Обогатить сейчас»). */
       try { if (typeof HVC !== 'undefined' && S.rows.length) HVC.rebuildIndex(S.rows); } catch (e) { console.warn('[UC] HVC index:', e); }
-      /* На старте считаем производные поля только в памяти. Полная перезапись
-         десятков/сотен тысяч уже загруженных SKU не должна блокировать запуск. */
-      /* v12.9.88: каталог, импортированный в лёгком режиме, при старте не
-         пересчитываем: экономика досчитается при входе в расчётный раздел или
-         при экспорте. Если стартовый экран сам расчётный — считаем сразу. */
+      /* v12.9.167: старт — восстановление сохранённых данных, не обработка.
+         Полный пайплайн с skipEconomics всё равно запускал Ozon/категории
+         для каждой строки. Расчётные разделы и экспорт запускают расчёт
+         только по явному действию, а не при восстановлении hash-маршрута. */
       try { S._econPending = lsGet('uc.econPending') === '1'; } catch (e) { }
-      await runPipeline(true, { persist: false, skipEconomics: S._econPending === true, suppressSummaryToast: S._econPending === true, onProgress: bootProgress, persistMessage: 'пересчёт завершён — кэш при старте не переписываем' });
-      if (S._econPending) {
-        const startView = (typeof UI !== 'undefined' && UI.current) ? UI.current() : 'dashboard';
-        if (['data','dashboard','unit','pl','supply','whatif','lifecycle','ozon-advisor','price-limiter'].includes(startView)) {
-          await ensureEconomics();
-          Dash.render();
-        }
-      } else Dash.render();
+      // Opening saved data is not an enrichment operation. In particular,
+      // skipEconomics alone did NOT disable Ozon/category/rule passes.
+      // Keep the saved pending marker; explicit calculations remain available.
+      if(bootProgress)bootProgress('Каталог восстановлен: подготовка таблицы без обогащения и расчёта');
+      applyFilter();
+      if(!S._econPending&&UI.current()==='dashboard')Dash.render();
       UI.fillFilters();
       $('#companyLbl').textContent = S.settings.cid || '—';
       StorageCtl.refresh();
@@ -49720,7 +49721,8 @@ window.addEventListener('DOMContentLoaded', () => {
       }
       /* v10.7.2: восстановление раздела — после перезагрузки возвращаемся в тот же раздел */
       const hv = (location.hash || '').replace(/^#/, '');
-      if (hv && hv !== 'dashboard' && document.querySelector('#v-' + hv)) UI.go(hv);
+      if(S._econPending&&(!hv||hv==='dashboard'))UI.go('data',{restore:true});
+      else if (hv && hv !== 'dashboard' && document.querySelector('#v-' + hv)) UI.go(hv, {restore:true});
       /* v10.7.2: стартный «доктор» — ограничения окружения одним тостом вместо
          молчаливого деградирования + предупреждение о квоте IndexedDB (>70%). */
       try {
