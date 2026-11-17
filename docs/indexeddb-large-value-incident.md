@@ -82,3 +82,24 @@ All preceding Chromium cases (index performance, enrichment parity, wide
 values, repeat memory, abort/recovery, conflict, export, 1000-SKU smoke) and
 Node/console regressions passed on this recheck. The million-row preflight is
 rerun separately; its outcome and the new remote CI must be checked before merge.
+
+## Post-merge scenario coverage: pre-enriched first CSV
+
+The user clarified that both inputs were CSV and the first, already enriched
+price was imported into an empty catalog. Added a separate CI invocation:
+
+```
+E2E_PRICE_ENRICHED=1 NODE_PATH=.arena/browser-tests/node_modules \
+  node tests/browser-wide-values-e2e.js
+```
+
+This fixture uses 1200 products with long Cyrillic names and applicability,
+existing OE, barcode leading zeroes, dimensions, category, TN VED and a custom
+column in the FIRST CSV. It verifies that first-price values are not enriched
+or calculated, then applies a SECOND CSV with additional OE. Exact original
+fields, accumulated old+new OE and HVC links are checked after reopening the DB.
+The regular narrow-column wide-value fixture remains as a separate CI case.
+Both local Chromium cases passed (pre-enriched fixture: 42 source pages and
+42 product undo pages; original fixture: 24 source pages and 28 undo pages).
+This does not reproduce or repair a damaged browser profile, nor substitute
+for testing the user's unavailable complete files. Application code unchanged.
