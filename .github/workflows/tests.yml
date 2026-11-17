@@ -45,6 +45,7 @@ jobs:
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-key-index-perf-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-enrichment-parity-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-wide-values-e2e.js
+          E2E_PRICE_ENRICHED=1 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-wide-values-e2e.js
           REPEAT_ROWS=1000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-repeat-memory-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-abort-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-conflict-e2e.js
