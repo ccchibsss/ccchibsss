@@ -2,12 +2,12 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync(__dirname+'/../index.html','utf8');
 const start=html.indexOf("  on('#impApply', 'onclick', async (e) => {"),end=html.indexOf("  on('#expRun'",start);
 assert(start>0&&end>start);assert(html.includes('id="impApplyStatus" role="status"'));
-// Diagnostic is a sibling of the scrollable body, directly before the footer.
-assert(/<\/div>\s*<div id="impApplyStatus"[^>]*><\/div>\s*<div class="mfoot"><span class="hint mono" id="impMeta"/.test(html));
+// Diagnostic remains outside the scrollable body; recovery actions may precede the footer.
+assert(/<\/div>\s*<div id="impApplyStatus"[^>]*><\/div>\s*(?:<div id="imp(?:Restore|Conflict)Actions"[^\n]*<\/div>\s*)*<div class="mfoot"><span class="hint mono" id="impMeta"/.test(html));
 assert(html.includes('#mImport .mbody{min-height:0}'));
 assert(html.includes('#mImport .mhead,#mImport .mfoot{flex-shrink:0}'));
 let run,apply,toasts=0,open=true;const logs=[];const button={disabled:false},status={hidden:true,textContent:''};
-const ctx={console:{error(){},info(...args){logs.push(args)}},S:{pending:{file:"cross.xlsx",body:[{}]}},$:s=>({'#impApply':button,'#impApplyStatus':status,'#mImport':{classList:{contains:()=>open}}}[s]),Import:{apply:()=>apply()},storageErrorText:e=>String(e?.message||e),Toast:{err(){toasts++}},on:(s,event,fn)=>run=fn};
+const ctx={console:{error(){},info(...args){logs.push(args)}},PyEngine:{processingMode:()=> 'sql'},S:{_bootReady:true,pending:{file:"cross.xlsx",body:[{}]}},$:s=>({'#impApply':button,'#impApplyStatus':status,'#impRestoreActions':{},'#impConflictActions':{},'#mImport':{classList:{contains:()=>open}}}[s]),Import:{apply:()=>apply()},storageErrorText:e=>String(e?.message||e),Toast:{err(){toasts++}},on:(s,event,fn)=>{if(s==='#impApply')run=fn}};
 vm.createContext(ctx);vm.runInContext(html.slice(start,end),ctx);
 (async()=>{
  let reject,calls=0;apply=()=>{calls++;return new Promise((_,r)=>reject=r)};

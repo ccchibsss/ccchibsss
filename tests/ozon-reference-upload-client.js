@@ -1,6 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const h=fs.readFileSync(__dirname+'/../index.html','utf8'),c={console,S:{settings:{},rows:[]}};
-vm.createContext(c);const a=h.indexOf('  async acquireOzonReference('),b=h.indexOf('  prepareOzonTyping(',a);
+c.TextEncoder=TextEncoder;vm.createContext(c);vm.runInContext(h.slice(h.indexOf('const SqlMemory = {'),h.indexOf('const PyEngine = {')),c);const a=h.indexOf('  async acquireOzonReference('),b=h.indexOf('  prepareOzonTyping(',a);
 vm.runInContext('this.P={'+h.slice(a,b)+'};',c);const P=c.P;P.processingAvailable=async()=>{};P.processingMode=()=> 'sql';
 let begins=0,commits=0,releases=0,maxBytes=0,rowCalls=0,failRow=-1,failUpload=false,text='';
 P._fetch=async(path,opts)=>{
@@ -27,5 +27,9 @@ P._fetch=async(path,opts)=>{
  rowCalls=0;failRow=2;await assert.rejects(()=>P.enrichOzonPreferred(rows),/row failed/);assert(rows.every(r=>r.ozon_type==='OLD'));
  failRow=-1;await P.enrichOzonPreferred(rows,{reference:small});const sharedBegins=begins;
  await P.enrichOzonPreferred(rows,{reference:small});assert.equal(begins,sharedBegins);assert(rows.every(r=>r.ozon_type==='NEW'));await P.releaseOzonReference(small);
+ const fetchBefore=P._fetch;let mutated=false;
+ P._fetch=async(path,opts)=>{const result=await fetchBefore(path,opts);if(path==='/catalog/ozon-reference'&&JSON.parse(opts.body).action==='chunk'&&!mutated){mutated=true;c.S.catalogVersion=(c.S.catalogVersion||0)+1;}return result;};
+ await assert.rejects(()=>P.acquireOzonReference({pairs:[],category_rows:[],identity:{rows:[]}}),/изменился во время передачи/);
+ P._fetch=fetchBefore;
  console.log('OK: chunked Ozon reference, Unicode roundtrip, session reuse, cleanup and whole-call staging; max request bytes',maxBytes);
 })().catch(e=>{console.error(e);process.exitCode=1});
