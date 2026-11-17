@@ -13633,7 +13633,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.160-client+bulk-key-indexes';
+const APP_VERSION = '12.9.161-client+bounded-storage-pages';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -23095,7 +23095,7 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnc
       'Часть изменений может быть только в памяти: не закрывайте вкладку, сначала сделайте экспорт. Откройте «Хранилище и квота».');
     /* Даже если каталог не записался, справочник и правила должны сохраниться:
        именно из них обогащаются следующие файлы. */
-    try { if(!conflict&&!quota)await _auxPersist(); } catch (eAux) { console.warn('[UC] aux persist:', eAux); }
+    try { if(!conflict&&!quota&&!/Failed to read large IndexedDB value|Connection is closing|DatabaseClosedError/i.test(text))await _auxPersist(); } catch (eAux) { console.warn('[UC] aux persist:', eAux); }
     StorageCtl.refresh(); return false;
   }
   try {
@@ -24984,6 +24984,11 @@ const HVC = {
             // the primary page ID is indexed; logical keys live in values.
             const packed=!!storage[table.name];
             if(!packed)await table.clear();
+            // Fixed rows-per-page remains compatible with v1, but the size
+            // is selected from the widest record, not blindly set to 1000.
+            let largest=1;
+            for(const [key,val] of source)largest=Math.max(largest,JSON.stringify(make(key,val)).length*2+64);
+            const pageSize=Math.max(1,Math.min(1000,Math.floor((512*1024-256)/largest)));
             let page=0,values=[];
             const flush=async()=>{
               const row={id:++page,__ucHvcPage:'v1',values},old=packed?await table.get(page):null;
@@ -24994,11 +24999,11 @@ const HVC = {
               if(key===undefined||key===null||key==='')throw new Error('Пустой ключ в реестре Каталога V: запись остановлена.');
               const row=make(key,val);
               if(row[pk]!==key)throw new Error('Ключ записи реестра Каталога V не совпадает с индексом.');
-              values.push(row);if(values.length>=1000)await flush();
+              values.push(row);if(values.length>=pageSize)await flush();
             }
             if(values.length)await flush();
             await table.where(':id').above(page).delete();
-            storage[table.name]={format:'pages-v1',count:source.size,pageSize:1000};
+            storage[table.name]={format:'pages-v1',count:source.size,pageSize};
             return;
           }
 
@@ -25062,7 +25067,7 @@ const HVC = {
     if(!storage||typeof storage!=='object'||Array.isArray(storage))throw new Error('Повреждён формат хранения реестров Каталога V');
     const names=['hvcOe','hvcParts','hvcCross','hvcPrices'];
     for(const [name,value] of Object.entries(storage)){
-      if(!names.includes(name)||!value||value.format!=='pages-v1'||value.pageSize!==1000||!Number.isSafeInteger(value.count)||value.count<0)throw new Error('Неизвестный или повреждённый формат реестра Каталога V');
+      if(!names.includes(name)||!value||value.format!=='pages-v1'||(!Number.isSafeInteger(value.pageSize)||value.pageSize<1||value.pageSize>1000)||!Number.isSafeInteger(value.count)||value.count<0)throw new Error('Неизвестный или повреждённый формат реестра Каталога V');
     }
     return {...storage};
   },
@@ -25077,11 +25082,11 @@ const HVC = {
       const read=async(table,accept)=>{
         const format=storage[table.name];
         if(format){
-          const count=format.count,pages=Math.ceil(count/1000);
+          const count=format.count,pageSize=format.pageSize,pages=Math.ceil(count/pageSize);
           if(await table.count()!==pages)throw new Error('Неполный реестр Каталога V: '+table.name);
           const pk=table.name==='hvcOe'?'oeNorm':'key',seen=new Set();
           for(let page=1;page<=pages;page++){
-            const row=await table.get(page),length=Math.min(1000,count-(page-1)*1000);
+            const row=await table.get(page),length=Math.min(pageSize,count-(page-1)*pageSize);
             if(!row||row.__ucHvcPage!=='v1'||!Array.isArray(row.values)||row.values.length!==length)throw new Error('Повреждена страница реестра Каталога V: '+table.name);
             for(const value of row.values){
               const key=value&&value[pk];
@@ -28817,6 +28822,7 @@ const BrowserImportIO = {
     const todo=[error],seen=new Set();let retry=false;
     while(todo.length){
       const e=todo.shift();if(!e||seen.has(e))continue;seen.add(e);
+      if(/Failed to read large IndexedDB value/i.test(String(e.message||'')))return false;
       if(e._ucCancelled||/^(QuotaExceededError|CatalogConflictError|DataError|DataCloneError|ConstraintError|VersionError|SecurityError)$/.test(e.name||''))return false;
       if(/^(AbortError|DatabaseClosedError|InvalidStateError)$/.test(e.name||''))retry=true;
       if(e.inner)todo.push(e.inner);if(e.cause)todo.push(e.cause);
@@ -28842,7 +28848,16 @@ const BrowserImportIO = {
 };
 
 const BrowserApplyCheckpoint = {
-  KEY:'browserApplyCheckpoint', owner:null, BATCH:1000,
+  KEY:'browserApplyCheckpoint', owner:null, BATCH:1000, PAGE_BYTES:512*1024,
+  *pages(rows) {
+    let values=[],bytes=64;
+    for(const row of rows){
+      const size=JSON.stringify(row).length*2+64;
+      if(values.length&&(bytes+size>this.PAGE_BYTES||values.length>=this.BATCH)){yield values;values=[];bytes=64;}
+      values.push(row);bytes+=size;
+    }
+    if(values.length)yield values;
+  },
   TABLES:['products','products_stage','meta','cats','rules','excs','imports','hvcOe','hvcParts','hvcCross','hvcPrices'],
   async assertWriter() {
     const marker=await db.meta.get(this.KEY);
@@ -28863,19 +28878,22 @@ const BrowserApplyCheckpoint = {
       await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
         if(await db.meta.get(this.KEY))throw new Error('Сначала восстановите незавершённый импорт');
         await StorageCtl.assertCatalogFresh();await db.applyUndo.clear();
-        const counts={};
+        const counts={},pageCounts={};
         for(const name of this.TABLES){
-          const table=db.table(name),key=table.schema.primKey.keyPath;let last,total=0;
+          const table=db.table(name),key=table.schema.primKey.keyPath;let last,total=0,pages=0;
           for(;;){
             if(typeof UCCancel!=='undefined')UCCancel.check();
             const rows=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(this.BATCH).toArray();
             if(!rows.length)break;
-            await db.applyUndo.bulkAdd([{table:name,pos:total,values:rows}]);
-            total+=rows.length;last=rows[rows.length-1][key];
+            for(const values of this.pages(rows)){
+              await db.applyUndo.bulkAdd([{table:name,pos:total,values}]);
+              total+=values.length;pages++;
+            }
+            last=rows[rows.length-1][key];
           }
-          counts[name]=total;
+          counts[name]=total;pageCounts[name]=pages;
         }
-        await db.meta.put({key:this.KEY,value:{owner,created:Date.now(),counts,storage:'pages-v1',pageSize:this.BATCH}});
+        await db.meta.put({key:this.KEY,value:{owner,created:Date.now(),counts,pageCounts,storage:'pages-v2',pageSize:this.BATCH}});
       });
       return owner;
     }catch(e){this.owner=null;throw e;}
@@ -28896,21 +28914,21 @@ const BrowserApplyCheckpoint = {
     // failed restore leaves both the pre-restore DB and the undo checkpoint.
     await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
       const m=await db.meta.get(this.KEY);if(!m||m.value.owner!==owner)throw new Error('Нет соответствующей контрольной точки');
-      const packed=m.value.storage==='pages-v1';
+      const variable=m.value.storage==='pages-v2',packed=variable||m.value.storage==='pages-v1';
       if(m.value.storage!==undefined&&!packed)throw new Error('Неизвестный формат контрольной точки');
       const batch=packed?m.value.pageSize:this.BATCH;
       if(!Number.isSafeInteger(batch)||batch<1||batch>1000)throw new Error('Повреждён размер страницы контрольной точки');
       for(const name of this.TABLES){
         const count=m.value.counts[name];
-        if(!Number.isSafeInteger(count)||count<0||await db.applyUndo.where('table').equals(name).count()!==(packed?Math.ceil(count/batch):count))throw new Error('Неполная контрольная точка: '+name);
+        if(!Number.isSafeInteger(count)||count<0||await db.applyUndo.where('table').equals(name).count()!==(variable?m.value.pageCounts?.[name]:packed?Math.ceil(count/batch):count))throw new Error('Неполная контрольная точка: '+name);
       }
       for(const name of this.TABLES){
         const table=db.table(name),count=m.value.counts[name];await table.clear();
-        for(let pos=0;pos<count;pos+=batch){
+        for(let pos=0;pos<count;){
           let values;
           if(packed){
             const page=await db.applyUndo.where('[table+pos]').equals([name,pos]).first();
-            if(!page||!Array.isArray(page.values)||page.values.length!==Math.min(batch,count-pos))throw new Error('Повреждена контрольная точка: '+name);
+            if(!page||!Array.isArray(page.values)||(variable?(!page.values.length||page.values.length>Math.min(batch,count-pos)):page.values.length!==Math.min(batch,count-pos)))throw new Error('Повреждена контрольная точка: '+name);
             values=page.values;
           }else{
             // Crash recovery for checkpoints written before packed pages.
@@ -28918,7 +28936,7 @@ const BrowserApplyCheckpoint = {
             if(rows.length!==Math.min(batch,count-pos)||rows.some((r,i)=>r.pos!==pos+i))throw new Error('Повреждена контрольная точка: '+name);
             values=rows.map(r=>r.value);
           }
-          await table.bulkAdd(values);
+          await table.bulkAdd(values);pos+=values.length;
         }
       }
       await db.meta.delete(this.KEY);await db.applyUndo.clear();
@@ -29182,7 +29200,15 @@ const BrowserImportSources = {
     };
     const flush=async()=>{
       this.check();if(!headers&&prefix.length>=9)header();
-      while(buffer.length){const batch=buffer.splice(0,this.BATCH);await d.rowPages.add({source:id,start:written,cells:batch});written+=batch.length;this.check();}
+      while(buffer.length){
+        let size=64,count=0;
+        for(const row of buffer){
+          const bytes=JSON.stringify(row).length*2+64;
+          if(count&&(size+bytes>512*1024||count>=this.BATCH))break;
+          size+=bytes;count++;
+        }
+        const batch=buffer.splice(0,count);await d.rowPages.add({source:id,start:written,cells:batch});written+=batch.length;this.check();
+      }
       if(typeof Prog!=='undefined')Prog.msg('IndexedDB: сохранено '+total+' строк источника');
     };
     try{
@@ -29564,7 +29590,7 @@ const Import = {
   pick() {
     const inp = document.createElement('input');
     inp.type = 'file'; inp.accept = PyEngine.processingMode()==='sql'?'.xlsx,.csv,.zip':'.xlsx,.xls,.csv,.ods'; inp.multiple = false;
-    inp.onchange = async () => { const f=inp.files && inp.files[0]; if (f) await Import.read(f); };
+    inp.onchange = async () => { const f=inp.files && inp.files[0]; if (f) try{await Import.read(f);}catch(error){if(!error?._ucShown)Toast.err('Чтение файла',storageErrorText(error));} };
     inp.click();
   },
   demo() {

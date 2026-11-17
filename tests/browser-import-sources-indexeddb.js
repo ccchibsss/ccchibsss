@@ -125,6 +125,12 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  assert.equal(await B.database().rowPages.count(),pageCount);assert.equal(await B.database().sources.count(),before);
  sql=true;await assert.rejects(()=>B.stage(file('sql.csv','article;brand\nA;B\n')),/браузерном/);sql=false;
  await B.remove(first.id);assert.equal(await B.database().rows.where('source').equals(first.id).count(),0);assert.equal(await B.database().rowPages.where('source').equals(first.id).count(),0);assert.equal((await B.source(second.id)).total,1);
+ const wideText='Ж'.repeat(20000),wide=await B.stage(file('wide.csv','article;brand;name\n'+Array.from({length:40},(_,i)=>'W'+i+';B;'+wideText).join('\n')));
+ const widePages=await B.database().rowPages.where('source').equals(wide.id).sortBy('start');
+ assert(widePages.length>1);assert(widePages.every(p=>JSON.stringify(p.cells).length*2<=512*1024));
+ B.database().close();await B.database().open();
+ const wideRows=await B.page(wide.id,3,35);assert.equal(wideRows.length,35);assert.equal(wideRows[34][0],'W37');assert(wideRows.every(row=>row[2]===wideText));
+ await B.remove(wide.id);
  await B.remove(second.id);await B.database().delete();
  // Execute the production unique-touched membership check for repeated OE rows.
  const markStart=h.indexOf('          const firstChange=rowChanged&&!changedRows.has(p);'),markEnd=h.indexOf('          if (!keepVisibility',markStart);

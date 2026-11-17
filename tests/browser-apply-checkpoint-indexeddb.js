@@ -16,7 +16,17 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  await db.hvcOe.add({id:70,oeNorm:'OE1',article:'00001'});await db.hvcParts.add({id:4,key:'A|B',name:'part'});
  await db.hvcCross.add({id:9,key:'A|OE1'});await db.hvcPrices.add({id:12,key:'A|B',cost:123});
  await db.products_stage.add({id:3,article:'prior-draft'});await db.imports.add({id:10,name:'old'});await db.cats.add({id:5,name:'category'});
+ // Wide catalogue: count-only 1000-row pages would exceed the read budget.
+ const wide='Ж'.repeat(20000);
+ await db.products.bulkPut(Array.from({length:30},(_,i)=>({id:i+1,article:'W'+i,custom:{wide}})));
+ const wideBefore=await readAll();const wideOwner=await C.begin();
+ const widePages=await db.applyUndo.where('table').equals('products').sortBy('pos');
+ assert(widePages.length>3,'wide rows must split by estimated bytes');
+ assert(widePages.every(p=>JSON.stringify(p.values).length*2<=C.PAGE_BYTES),'bounded checkpoint values');
+ await db.products.clear();await C.restore(wideOwner);assert.deepEqual(await readAll(),wideBefore);
+ await db.products.bulkPut(Array.from({length:30},(_,i)=>({id:i+1,article:String(i).padStart(8,'0'),custom:{value:'text'},oe_numbers:'A / B'})));
  const before=await readAll();
+ vm.runInContext("if(BrowserImportIO.transient({name:'DatabaseClosedError',message:'AbortError DataError: Failed to read large IndexedDB value'}))throw Error('permanent large-value error retried');",c);
  // A stale baseline must fail BEFORE persist or backup writes and retain the
  // typed conflict (no generic "could not save original state" dead end).
  const freshGuard=c.StorageCtl.assertCatalogFresh,persist=c.persistNow;let saves=0;
@@ -32,7 +42,7 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
 
  let peak=0;const bulk=db.applyUndo.bulkAdd.bind(db.applyUndo);db.applyUndo.bulkAdd=async rows=>{peak=Math.max(peak,rows.length);return bulk(rows)};
  let owner=await C.begin();assert(peak<=1000);assert(await db.meta.get(C.KEY));assert.equal(C.owner,owner);
- const marker=(await db.meta.get(C.KEY)).value;assert.equal(marker.storage,'pages-v1');assert.equal(marker.pageSize,1000);
+ const marker=(await db.meta.get(C.KEY)).value;assert.equal(marker.storage,'pages-v2');assert.equal(marker.pageSize,1000);
  const pages=await db.applyUndo.where('table').equals('products').sortBy('pos');assert.deepEqual(pages.map(p=>p.pos),[0,1000,2000]);assert.deepEqual(pages.map(p=>p.values.length),[1000,1000,503]);
  assert((await db.applyUndo.toArray()).every(p=>p.values.length<=1000));
  await assert.rejects(()=>C.begin(),/уже используется/);
