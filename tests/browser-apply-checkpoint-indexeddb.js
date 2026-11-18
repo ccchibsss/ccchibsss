@@ -44,9 +44,22 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain((awai
  // A failed second backup page must leave the entire saved catalog intact.
  const backupAdd=db.applyUndo.bulkAdd.bind(db.applyUndo);
  const io=Object.assign(Error('DataError Failed to write blobs (IOError)'),{name:'AbortError'});
- db.applyUndo.bulkAdd=async rows=>{if(rows[0].table==='products'&&rows[0].pos===32)throw io;return backupAdd(rows)};
- await assert.rejects(()=>C.begin(),e=>(e.cause===io||e.cause?.inner===io)&&e.name==='AbortError'&&e._ucCheckpointBeginFailed&&e._ucCheckpointContext.operation==='write-backup'&&e._ucCheckpointContext.table==='products'&&e._ucCheckpointContext.position===32);
- assert.equal(C.lastFailure.completedRows,32);assert.equal(C.lastFailure.pageRows,32);assert(/Failed to write blobs/.test(C.lastFailure.message));
+ // Fail on the SECOND backup page of products. Pages are byte/BATCH bounded
+ // (not a fixed 32-row read window), so the failing position and page size are
+ // taken from the real first page instead of being hard-coded.
+ let firstPageLen=0,failedPos=0,failedPageRows=0;
+ const failingAdd=async rows=>{
+   if(rows[0].table==='products'&&rows[0].values){
+     const len=rows[0].values.length;
+     if(!firstPageLen){firstPageLen=len;failedPos=len;}
+     else if(rows[0].pos===failedPos){failedPageRows=len;throw io;}
+   }
+   return backupAdd(rows);
+ };
+ db.applyUndo.bulkAdd=failingAdd;
+ await assert.rejects(()=>C.begin(),e=>(e.cause===io||e.cause?.inner===io)&&e.name==='AbortError'&&e._ucCheckpointBeginFailed&&e._ucCheckpointContext.operation==='write-backup'&&e._ucCheckpointContext.table==='products'&&e._ucCheckpointContext.position===failedPos);
+ assert(firstPageLen>0&&failedPageRows>0);
+ assert.equal(C.lastFailure.completedRows,failedPos);assert.equal(C.lastFailure.pageRows,failedPageRows);assert(/Failed to write blobs/.test(C.lastFailure.message));
  assert.equal(C.owner,null);assert.equal(await db.applyUndo.count(),0);assert(!await db.meta.get(C.KEY));assert.deepEqual(await readAll(),before);
  db.applyUndo.bulkAdd=backupAdd;
  const failRead=()=>{throw io};db.products.hook('reading',failRead);
@@ -58,7 +71,12 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain((awai
  let peak=0;const bulk=db.applyUndo.bulkAdd.bind(db.applyUndo);db.applyUndo.bulkAdd=async rows=>{peak=Math.max(peak,rows.length);return bulk(rows)};
  let owner=await C.begin();assert.equal(C.lastFailure,null);assert(peak<=1000);assert(await db.meta.get(C.KEY));assert.equal(C.owner,owner);
  const marker=(await db.meta.get(C.KEY)).value;assert.equal(marker.storage,'pages-v2');assert.equal(marker.pageSize,1000);
- const pages=await db.applyUndo.where('table').equals('products').sortBy('pos');assert.deepEqual(pages.map(p=>p.pos),Array.from({length:Math.ceil(2503/32)},(_,i)=>i*32));assert.equal(pages.reduce((n,p)=>n+p.values.length,0),2503);assert(pages.every(p=>p.values.length<=32));
+ const pages=await db.applyUndo.where('table').equals('products').sortBy('pos');
+ // Page boundaries are byte/`BATCH` bounded, not a fixed 32-row read window.
+ assert.equal(pages.reduce((n,p)=>n+p.values.length,0),2503);
+ assert(pages.every(p=>p.values.length<=C.BATCH));
+ // Positions are cumulative offsets of the real page sizes.
+ let expectPos=0;for(const page of pages){assert.equal(page.pos,expectPos);expectPos+=page.values.length;}
  assert((await db.applyUndo.toArray()).every(p=>p.values.length<=1000));
  await assert.rejects(()=>C.begin(),/уже используется/);
  // Guard rejects a second tab's writer and never changes its catalog token.

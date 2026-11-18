@@ -41,6 +41,7 @@ jobs:
           node tests/ozon-reference-upload-client.js
           node tests/import-apply-status-client.js
           node tests/product-byte-batches-client.js
+          node tests/csv-encoding-and-identity-bulk-client.js
       - name: IndexedDB источники — встроенный Dexie
         run: |
           npm install --prefix .arena/idb-tests fake-indexeddb@6.2.8 --no-save --no-audit --no-fund
@@ -52,6 +53,7 @@ jobs:
           NODE_PATH=.arena/idb-tests/node_modules node tests/browser-catalog-lookup-indexeddb.js
           NODE_PATH=.arena/idb-tests/node_modules node tests/persist-indexeddb-probe.js
           NODE_PATH=.arena/idb-tests/node_modules node tests/product-key-reconcile-indexeddb.js
+          NODE_PATH=.arena/idb-tests/node_modules node tests/source-registry-indexeddb.js
       - name: Браузерный импорт — Chromium smoke
         run: |
           mkdir -p .arena

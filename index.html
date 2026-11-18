@@ -115,6 +115,34 @@
   под таблицей каталога перечисляется, каких входных данных не хватает и у
   скольких SKU (себестоимость, весогабариты, цена, ставка тарифа, продажи,
   логистика Ozon), со столбцами для догрузки. Источник — econReadiness().
+  v12.9.170 — ИМПОРТ: МЕНЬШЕ ПАМЯТИ И ЗАПИСИ ПРИ ТОМ ЖЕ ПОВЕДЕНИИ.
+  (1) ПРОИСХОЖДЕНИЕ ПОЛЕЙ НЕ ДУБЛИРУЕТСЯ В ЗАПИСИ: _sources[k] = {file,date}
+  кладётся на каждое поле, и в каталоге это 84 % объёма записи (замер: 1440 Б
+  на строку против 297 Б). Теперь на диск пишется номер общего набора (_src),
+  а сами наборы — один раз в meta.catalog.sources. Запись каталога на 124 459
+  SKU: 171 → 35 МБ, сериализация 2,2 → 1,9 с. Старые базы читаются как есть и
+  один раз перезаписываются в новом формате (маркер meta.sourcesCompacted).
+  Непакуемые наборы (пустое имя поля, непарсимая дата, лишнее поле) и потеря
+  meta.catalog обрабатываются явно: происхождение не выдумывается и не стирается
+  молча, а резервные копии JSONL содержат полный _sources.
+  (2) HVC.cross больше не хранит копию своего ключа: значение — константа,
+  oeNorm/artKey восстанавливаются из ключа (400 000 связок: 219 → 155 Б).
+  (3) СЛИЯНИЕ OE-СПИСКОВ НЕ РАЗБИРАЕТ ОДНУ И ТУ ЖЕ СТРОКУ ДВАЖДЫ: oe_list —
+  точная копия oe_numbers, а mergeCodeLists идёт по всему каталогу (124 459
+  строк с тремя OE: 456 → 292 мс; результат сверен со старой версией).
+  (4) В ЗАПИСЬ БОЛЬШЕ НЕ ПОПАДАЮТ ПРОИЗВОДНЫЕ ПОЛЯ: _srch/_sv, пустой
+  salesSeries и дубли OE-полей. Поисковая строка кэшируется в строке, но
+  строится только при непустом запросе фильтра: 40 МБ heap и 162 мс на 124 459
+  SKU не тратятся впустую.
+  (5) ИНДЕКС ИДЕНТИЧНОСТИ ПЕРЕСОБИРАЕТСЯ ОДИН РАЗ НА ИМПОРТ, а не на каждую
+  порцию: импорт 124 459 строк порциями по 2 000 — 49,8 с → 5,1 с.
+  (6) КОДИРОВКА CSV определяется по всему прочитанному буферу: CP1251-прайс с
+  длинной латинской шапкой больше не читается как UTF-8 молча.
+  (7) Оценка байт порции считается обходом без JSON.stringify и в UTF-8, а не
+  UTF-16, поэтому порции перестали быть вдвое мельче бюджета.
+  (8) Контрольная точка Apply читает окнами по байтам, а не по 32 строки: на
+  124 459 SKU это в десятки раз меньше транзакций.
+  Подробности и замеры: docs/audit-import-pamyat-12.9.170.md.
   v12.9.72 — СНОСКА О НЕДОСТАЮЩИХ ДАННЫХ РАСШИРЕНА: кроме столбцов прайса —
   нет категории для ставки комиссии, ставка не подтверждена (прибыль оценочная),
   не заданы обязательные расходы/логистика, не выбрана схема FBS/FBO,
@@ -13633,7 +13661,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.169-client+bounded-import-export';
+const APP_VERSION = '12.9.170-client+import-speed-memory';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13679,6 +13707,40 @@ const nowISO = () => new Date().toISOString();
    ключи групп). Функция чистая, поэтому результат кэшируется по исходному
    значению; кэш ограничен, при переполнении просто очищается. */
 const _normArticleCache = new Map();
+/* v12.9.170: выбор кодировки CSV по всему прочитанному буферу, а не по первым
+   400 символам. Было: utf-8 декодировали и смотрели \uFFFD только в начале —
+   у CP1251-прайса с длинной латинской шапкой (артикулы, бренды, коды) первый
+   кириллический символ может встретиться далеко за 400-м, файл молча читался
+   как UTF-8, и название превращалось в «кракозябры» — без предупреждения,
+   прямо в name, поиск и выгрузку.
+   Теперь: если utf-8-декодировка буфера содержит \uFFFD, берём windows-1251
+   (CP1251 определена для любого байта, и в таких прайсах это она).
+   BOM UTF-8 возвращает \uFEFF, его вызывающий код снимает как раньше. */
+function decodeCsvText(bytes, opts) {
+  /* opts.truncated — буфер может обрываться на середине многобайтового символа
+     (голова файла читается куском). В этом случае потоковый декодер
+     придерживает неполный хвост и не выдаёт ложный \uFFFD. */
+  const truncated = !!(opts && opts.truncated);
+  /* Декодирование кодировок, которые браузер не знает в «жёстком» режиме,
+     не должно ронять импорт: при любой ошибке возвращаем utf-8 с заменами —
+     так данные видны, а не потеряны. */
+  const dec = (label, view, stream) => {
+    try { return new TextDecoder(label).decode(view, stream ? { stream: true } : undefined); }
+    catch (e) { return new TextDecoder('utf-8', { fatal: false }).decode(view); }
+  };
+  const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const utf8 = dec('utf-8', buf, truncated);
+  const at = utf8.indexOf('\uFFFD');
+  /* Единственная замена ровно в конце — это обрезанный на границе чтения
+     символ, а не признак CP1251: байт-то валидный, просто хвоста не хватило. */
+  if (at === -1 || at === utf8.length - 1) return { text: utf8, encoding: 'utf-8' };
+  const cp = dec('windows-1251', buf, false);
+  /* CP1251 определена для любого байта; если и она дала замены — оставляем
+     utf-8, чтобы пользователь увидел проблему, а не потерял строки. */
+  if (cp.indexOf('\uFFFD') === -1) return { text: cp, encoding: 'windows-1251' };
+  return { text: utf8, encoding: 'utf-8' };
+}
+
 const normArticle = s => {
   const hit = _normArticleCache.get(s);
   if (hit !== undefined) return hit;
@@ -14070,7 +14132,9 @@ async function exportExistingNativeProducts(onProgress) {
           const cursor = req.result;
           if (!cursor) return;
           try {
-            lines.push(StorageCtl.jsonLine(cursor.value) + '\n'); count++;
+            /* v12.9.170: разворачиваем сжатое происхождение — в резервной копии
+               оно должно быть полным (в этой базе может не быть meta.catalog). */
+            lines.push(StorageCtl.jsonLine(SourceRegistry.expandOrFlag(Object.assign({}, cursor.value))) + '\n'); count++;
             if (lines.length >= 1000) { blobs.push(new Blob(lines)); lines = []; }
             if (count % 10000 === 0 && typeof onProgress === 'function') onProgress('прочитано ' + fmt(count) + ' сохранённых товаров…');
             cursor.continue();
@@ -18189,7 +18253,12 @@ const StorageCtl = {
     try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
     return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + '-' + Math.random().toString(36).slice(2);
   },
-  catalogValue(count, fp) { return { custom:S.custom, saved:nowISO(), count, fp:fp || '', revision:this.newRevision() }; },
+  /* sources — наборы происхождения полей, на которые ссылаются строки (_src).
+     Запись маленькая (обычно 1–3 набора) и пишется вместе с ревизией каталога,
+     поэтому отдельной транзакции для неё не нужно. */
+  catalogValue(count, fp) { const v={ custom:S.custom, saved:nowISO(), count, fp:fp || '', revision:this.newRevision() };
+    try { const src=SourceRegistry.snapshot(); if(src.length) v.sources=src; } catch (e) { }
+    return v; },
   acceptCatalog(value) { S._catalogToken = this.catalogToken({value}); S._catalogConflict = false;S._catalogConflictInfo=null; },
   async assertCatalogFresh() {
     if(typeof BrowserApplyCheckpoint!=='undefined')await BrowserApplyCheckpoint.assertWriter();
@@ -18609,8 +18678,11 @@ const StorageCtl = {
         const source = S.rows, version = S.catalogVersion, rows = source.slice();
         const result = await withProgress('Подготовка товаров из памяти', 'Дождитесь завершения других операций и не закрывайте вкладку', async progress => {
           const blobs = []; let lines = [];
+          SourceRegistry._flags = null;
           for (let i = 0; i < rows.length; i++) {
-            const line = this.jsonLine(rows[i]);
+            /* v12.9.170: _src без meta.catalog в файле бесполезен — резервная
+               копия должна содержать полный _sources. */
+            const line = this.jsonLine(SourceRegistry.expandOrFlag(Object.assign({}, rows[i])));
             if (typeof line !== 'string') throw new Error('Строка товара не может быть представлена в JSONL.');
             lines.push(line + '\n');
             if (lines.length >= 1000 || i + 1 === rows.length) {
@@ -18624,7 +18696,8 @@ const StorageCtl = {
         });
         if (!result.count) { Toast.warn('В памяти нет товаров', 'Скачивать нечего.'); return; }
         Exp.download(new Blob(result.blobs, {type:'application/x-ndjson;charset=utf-8'}), 'Unit-control-memory-products-' + new Date().toISOString().slice(0,10) + '.jsonl');
-        Toast.ok('Товары из памяти подготовлены к скачиванию', fmt(result.count) + ' загруженных строк. Проверьте файл; настройки и реестры в нём отсутствуют.');
+        const _flag = SourceRegistry.flagText();
+        Toast.ok('Товары из памяти подготовлены к скачиванию', fmt(result.count) + ' загруженных строк. Проверьте файл; настройки и реестры в нём отсутствуют.' + (_flag ? ' Внимание: ' + _flag + '.' : ''));
       } catch (e) { console.warn('[UC] memory catalog download:', e); }
       finally { this._exportingMemory = false; this.refresh(); }
     };
@@ -18632,10 +18705,12 @@ const StorageCtl = {
       if (this._exportingSaved) return;
       this._exportingSaved = true; this.refresh();
       try {
+        SourceRegistry._flags = null;
         const result = await withProgress('Сохранение товаров из прежней базы', 'Читаем старую базу без обновления схемы; не закрывайте вкладку', progress => exportExistingNativeProducts(progress));
         if (!result.count) { Toast.warn('Сохранённая таблица пуста', 'Товары для скачивания в этой базе не найдены.'); return; }
         Exp.download(new Blob(result.blobs, { type:'application/x-ndjson;charset=utf-8' }), 'Unit-control-saved-products-' + new Date().toISOString().slice(0,10) + '.jsonl');
-        Toast.ok('Товары подготовлены к скачиванию', fmt(result.count) + ' записей из сохранённой базы. Настройки и реестры в этом файле отсутствуют.');
+        const _flag = SourceRegistry.flagText();
+        Toast.ok('Товары подготовлены к скачиванию', fmt(result.count) + ' записей из сохранённой базы. Настройки и реестры в этом файле отсутствуют.' + (_flag ? ' Внимание: ' + _flag + '.' : ''));
       } catch (e) { console.warn('[UC] saved catalog download:', e); }
       finally { this._exportingSaved = false; this.refresh(); }
     };
@@ -22164,8 +22239,10 @@ function salesSeriesOf(p, mode) {
    Теперь предикат доступен всем потребителям (экспорт, отчёты, счётчики). */
 function matchFilterRow(p, f, q) {
     if (p.excluded && !S.settings.showExcluded) return false;
-    /* v10.7.2: поиск по предвычисленной строке p._srch (артикул + OE + бренд + группа + название) */
-    if (q && !(p._srch || '').includes(q)) return false;
+    /* v10.7.2: поиск по предвычисленной строке (артикул + OE + бренд + группа + название).
+       v12.9.170: строку отдаёт srchOf — она кэшируется в p._srch в памяти, но
+       в IndexedDB не пишется (см. slimOf). */
+    if (q && !srchOf(p).includes(q)) return false;
     if (f.cat && p.category !== f.cat) return false;
     if (f.brand && p.brand !== f.brand) return false;
     if (f.mp && p.bestMp !== f.mp) return false;
@@ -22194,7 +22271,10 @@ function filterSignature(f) {
 
 function syncApplyFilter() {
   const f = S.filter, q = (f.q || '').trim().toUpperCase();
-  ensureSrch(); /* v10.7.2: поисковая строка — из кэша версии (один раз) */
+  /* v12.9.170: поисковая строка строится только когда есть запрос. Раньше она
+     собиралась на каждую смену версии каталога, даже при пустом поиске: 179 мс
+     и десятки мегабайт на 124k SKU впустую. */
+  if (q) ensureSrch();
   S.view = S.rows.filter(p => matchFilterRow(p, f, q));
   S.viewVer = S.catalogVersion || 0;   /* v12.1: версия, для которой построен S.view */
   S.viewFilterSig = filterSignature(f);
@@ -22215,7 +22295,7 @@ function currentViewRows() {
   if (Array.isArray(S.view) && S.view.length && S.viewVer === ver &&
     S.viewFilterSig === filterSignature(S.filter)) return S.view;
   const f = S.filter, q = (f.q || '').trim().toUpperCase();
-  try { ensureSrch(); } catch (e) { }
+  if (q) { try { ensureSrch(); } catch (e) { } }
   const out = [];
   for (let i = 0; i < S.rows.length; i++) {
     const p = S.rows[i];
@@ -22313,14 +22393,32 @@ function excludedCount() {
    точечной правки пересчитывать только изменённые строки. До v10.7.2 каждый
    нажатый символ пересобирал строку из 10 полей для каждого SKU. */
 let _srchVer = -1;
+/* v12.9.170: поисковая строка по-прежнему живёт в объекте строки (это самый
+   дешёвый по памяти вариант: одна строка + одно свойство), но:
+     1) она больше НЕ пишется в IndexedDB — slimOf вырезает _srch и _sv
+        (на каталоге 124k это ~20 МБ записи впустую, строка целиком
+        пересобирается из полей за ~180 мс);
+     2) она не строится, пока в фильтре нет запроса (см. syncApplyFilter).
+   Штамп _sv остаётся в памяти, чтобы после точечной правки пересчитывать
+   только изменённые строки. */
+function _srchText(p) {
+  return (p.article + ' ' + (p.article_norm || '') + ' ' + (p.originalArticle || '') + ' ' + (p.brand || '') + ' ' +
+    (p.oe_numbers || '') + ' ' + (p.oe_norm || '') + ' ' + (p.oe_list || '') + ' ' + (p.group_articles || '') + ' ' +
+    (p.name || '')).toUpperCase();
+}
+function srchOf(p) {
+  if (!p || typeof p !== 'object') return '';
+  let hit = p._srch;
+  if (hit === undefined) { hit = _srchText(p); p._srch = hit; }
+  return hit;
+}
 function ensureSrch() {
   const v = S.catalogVersion || 0;
   if (_srchVer === v) return;
+  /* Штамп строки (p._sv) остаётся только в памяти и только чтобы после
+     точечной правки не пересобирать весь каталог. На запись он не влияет. */
   for (const p of S.rows) {
-    if (p._sv !== v) {
-      p._srch = (p.article + ' ' + (p.article_norm || '') + ' ' + (p.originalArticle || '') + ' ' + (p.brand || '') + ' ' + (p.oe_numbers || '') + ' ' + (p.oe_norm || '') + ' ' + (p.oe_list || '') + ' ' + (p.group_articles || '') + ' ' + (p.name || '')).toUpperCase();
-      p._sv = v;
-    }
+    if (p._sv !== v) { p._srch = _srchText(p); p._sv = v; }
   }
   _srchVer = v;
 }
@@ -23006,7 +23104,31 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnc
     let nextProductId = 1;
     for (const row of S.rows) if (typeof row.id === 'number' && Number.isFinite(row.id)) nextProductId = Math.max(nextProductId, row.id + 1);
     const slimOf = src => {
-      const { _t, _bw, id, mp, _stdDimsCalc, ...o } = src;
+      /* v12.9.170: производные/кэш-поля не пишутся в IndexedDB.
+         _srch/_sv — поисковая строка и её штамп (пересобираются из полей),
+         salesSeries: [] — пустой массив у каждой новой строки. На каталоге
+         124k это ~20 МБ записи на поисковую строку и ~2 МБ на пустые ряды. */
+      const { _t, _bw, id, mp, _stdDimsCalc, _srch, _sv, ...o } = src;
+      /* Пустой ряд продаж ничего не доказывает, а весит в каждой записи. */
+      if (Array.isArray(o.salesSeries) && !o.salesSeries.length) delete o.salesSeries;
+      /* oe_list — точный дубль oe_numbers в обычном случае (обогащение кладёт в
+         него те же коды). Все читатели берут mergeCodeLists(oe_numbers, oe_list),
+         поэтому отсутствие поля ничего не меняет, а запись на 124k строках
+         легчает примерно на 5 МБ. Если списки РАЗНЫЕ — пишем оба: именно там
+         и живут аналоги, которых нет в oe_numbers. */
+      if (o.oe_list !== undefined && String(o.oe_list) === String(o.oe_numbers === undefined ? '' : o.oe_numbers)) delete o.oe_list;
+      /* oe_norm — производное от oe_numbers (ensureNorm восстановит его при
+         загрузке), но при изменённом разделителе OE строки коллекции Ozon
+         собираются именно из него. Пишем поле только если оно не совпадает
+         с oe_numbers даже после нормализации — иначе это дубль. */
+      if (typeof o.oe_norm === 'string' && o.oe_norm && o.oe_norm === String(o.oe_numbers === undefined ? '' : o.oe_numbers)) delete o.oe_norm;
+      /* v12.9.170: происхождение полей — не копия {file,date} на каждое поле,
+         а номер общего набора (см. SourceRegistry). Не пакуется — пишем как было. */
+      delete o._src;
+      if (o._sources !== undefined) {
+        const id = SourceRegistry.idOf(o._sources);
+        if (id) { o._src = id; delete o._sources; }
+      }
       /* Source SKU also lives on the compact prototype and must survive reloads. */
       if (src.originalArticle !== undefined && src.originalArticle !== null) o.originalArticle = src.originalArticle;
       /* volume is a compact calculated field, but may also be explicit user input. */
@@ -23235,6 +23357,9 @@ function catFp(rows, withKeys) {
   const _ver = (typeof S !== 'undefined' && S) ? (S.catalogVersion || 0) : 0;
   if (!withKeys && rows === _catFpMemo.rows && n === _catFpMemo.n && _ver === _catFpMemo.ver)
     return { count: n, fp: _catFpMemo.fp };
+  /* v12.9.170: отсортированные ключи живут только внутри этой функции. Раньше
+     они возвращались наружу (withKeys) и задерживались вызывающим кодом —
+     на 124k SKU это ~7 МБ строк, за которые никто не отвечает. */
   const keys = new Array(n);
   for (let i = 0; i < n; i++) {
     const p = rows[i] || {};
@@ -23247,10 +23372,12 @@ function catFp(rows, withKeys) {
   };
   mix('#' + n + '#');
   for (let i = 0; i < n; i++) mix(keys[i] + '\u0001');
-  /* keys отдаём только по запросу (на 500k строк это лишние ~20 Мб строк) */
+  /* keys наружу не отдаём: единственный потребитель (дедупликация/запись)
+     сам считает ключи по строкам, а удержанный массив — это ~60 Б на SKU
+     впустую. */
   const _fp = (h >>> 0).toString(36);
   if (!withKeys) _catFpMemo = { rows, n, ver: _ver, fp: _fp };
-  return withKeys ? { count: n, fp: _fp, keys } : { count: n, fp: _fp };
+  return { count: n, fp: _fp };
 }
 const isoMs = v => { const t = Date.parse(String(v == null ? '' : v)); return isNaN(t) ? 0 : t; };
 const IncompleteRecovery = {
@@ -23538,12 +23665,30 @@ async function loadAll(legacySqlMigration=false) {
     } catch (e) { console.warn('[UC] incomplete-check:', e); }
   }
   const safe = async (fn, def) => { try { return await fn(); } catch (e) { console.warn(e); return def; } };
+  const _srcCompacted = await safe(async () => { const r = await db.meta.get('sourcesCompacted'); return !!(r && r.value); }, true);
   const competitorAuditRec = await safe(() => db.meta.get('competitorAudit'), null);
   if (competitorAuditRec && competitorAuditRec.value) S.competitorAudit = { ...S.competitorAudit, ...competitorAuditRec.value };
   // Резервные копии нужны и при пустой или повреждённой таблице товаров.
   if (!stored.length) S.snaps = await safe(() => db.snaps.toArray(), []);
   if (stored.length) {
     S.rows = stored;
+    /* v12.9.170: до любых проверок разворачиваем сжатое происхождение полей —
+       весь остальной код работает с полным _sources (см. SourceRegistry). */
+    try {
+      const catRec = await db.meta.get('catalog');
+      SourceRegistry.reset(catRec && catRec.value && catRec.value.sources);
+      let orphan = 0;
+      for (const p of S.rows) {
+        if (!p || typeof p !== 'object' || p._src === undefined) continue;
+        const full = SourceRegistry.expand(p._src);
+        if (full) { p._sources = full; delete p._src; }
+        else if (p._sources === undefined) { p._sources = {}; orphan++; }
+      }
+      if (orphan) console.warn('[UC] происхождение полей: набор не найден в meta.catalog у '+orphan+' строк — значение источника не стёрто, при следующей записи оно сохранится заново');
+      /* Строки из старого формата сразу получают номер набора: иначе запись
+         дельты пересобирала бы набор для каждой неизменённой строки. */
+      SourceRegistry.adopt(S.rows);
+    } catch (e) { console.warn('[UC] происхождение полей:', e); }
     S.rows.forEach(codeFieldsToStr); /* кодовые поля из кэша — строками */
     /* v10.4: было 15 последовательных await — грузим параллельно одним Promise.all. */
     const [mc, ms, mt] = await Promise.all([
@@ -23561,6 +23706,20 @@ async function loadAll(legacySqlMigration=false) {
     else {
       dd = dedupeCatalog();
       if (dd) { S._dedupOnLoad = dd; console.info('[UC] дедупликация при загрузке: объединено ' + dd + ' дублей'); }
+    }
+    /* v12.9.170: каталог, записанный до сжатия происхождения полей, один раз
+       перезаписывается в новом формате. Это выигрыш места «на ровном месте», но
+       он стоит целой записи каталога, поэтому — только один раз (маркер в meta)
+       и только при загруженном каталоге. Ошибку записи не считаем фатальной:
+       данные в памяти целы, сжатие повторится при следующем сохранении. */
+    if (!_srcCompacted && S.rows.length && typeof SourceRegistry !== 'undefined') {
+      let uncompressed = 0;
+      for (const p of S.rows) if (p && typeof p === 'object' && p._sources !== undefined && p._src === undefined) uncompressed++;
+      if (uncompressed) {
+        console.info('[UC] происхождение полей: сжимаем каталог (' + uncompressed + ' строк из ' + S.rows.length + ')');
+        const saved = await safe(() => persistNow(), false);
+        if (saved) await safe(() => metaSet('sourcesCompacted', { at: nowISO(), rows: uncompressed }), null);
+      }
     }
     const [cats_, rules_, excs_, sups_, orders_, hist_, imports_, snaps_, pnl_, mprof_, eprof_] = await Promise.all([
       safe(() => db.cats.toArray(), []), safe(() => db.rules.toArray(), []), safe(() => db.excs.toArray(), []),
@@ -23687,9 +23846,19 @@ function codeList(v, mode) {
 }
 function mergeCodeLists() {
   const seen = new Set(), out = [];
-  for (const value of arguments) for (const text of codeList(value)) {
-    const key = normArticle(text); if (!key || seen.has(key)) continue;
-    seen.add(key); out.push(text);
+  /* v12.9.170: в каталоге oe_list — точная копия oe_numbers (см. slimOf), а
+     вызовы вида mergeCodeLists(p.oe_numbers, p.oe_list) идут по всем строкам
+     на каждом обогащении. Повторный разбор той же строки ничего не добавляет:
+     второй проход по ней целиком отсекается Set'ом. Пропускаем уже виденную
+     строку целиком — результат тот же, работы вдвое меньше (замер на 124 459
+     строках с тремя OE: 456 → 292 мс). */
+  const seenArgs = new Set();
+  for (const value of arguments) {
+    if (typeof value === 'string') { if (seenArgs.has(value)) continue; seenArgs.add(value); }
+    for (const text of codeList(value)) {
+      const key = normArticle(text); if (!key || seen.has(key)) continue;
+      seen.add(key); out.push(text);
+    }
   }
   return joinCodeList(out);
 }
@@ -23909,7 +24078,7 @@ async function applyDimensionUnit(unit, options) {
 const HVC = {
   oe: new Map(),        // oeNorm → { oe, name, applicability, category, length, width, height, weight, dimensions_str }
   parts: new Map(),     // artNorm|brandNorm → { artikul, brand, multiplicity, barcode, length..weight, image_url, dimensions_str }
-  cross: new Map(),     // oeNorm|artKey → 1
+  cross: new Map(),     // oeNorm\u001FartKey → 1 (обе части восстанавливаются из ключа)
   prices: new Map(),    // artKey → { price, currency }
   byArt: new Map(),     // artKey → Set(oeNorm)
   byOe: new Map(),      // oeNorm → Set(artKey)
@@ -23954,32 +24123,87 @@ const HVC = {
     if (c) { try { c.set(p, v); } catch (e) { } }
     return v;
   },
+  /* v12.9.170: значение связи не дублирует свой ключ. Ключ уже содержит и OE,
+     и связку артикул+бренд (через \u001F), поэтому в Map лежит константа:
+     на 400 000 связок объект-значение стоил 219 Б/связку против 155 Б —
+     ~25 МБ впустую (замер: Node 22, /tmp-скрипт, Map<string,{oeNorm,artKey}>).
+     Разбор ключа — одна операция indexOf на чтение, и она уже была нужна. */
+  crossKey(oeNorm, artKey) { return oeNorm + '\u001F' + artKey; },
+  crossParts(key) {
+    const s = String(key == null ? '' : key), at = s.indexOf('\u001F');
+    return at < 0 ? { oeNorm: '', artKey: s } : { oeNorm: s.slice(0, at), artKey: s.slice(at + 1) };
+  },
   /* A lossy registry key is not proof that two manufacturer SKUs are the same.
      Conflicting literals are kept out of OE merging and automatic enrichment. */
   _buildIdentityIndex(lists) {
-    const seen=new Map(), normalized=new Map(), unsafe=new Set(), members=new WeakSet();
+    /* Один литерал на ключ вместо двух Map по тому же ключу (seen + normalized):
+       вторая карта хранила ровно те же ПАРЫ normArticle(article)/normArticle(brand),
+       только собранные в другом порядке, и на 124k строк это лишние мегабайты и
+       второй проход normArticle по каждой строке. */
+    const seen=new Map(), unsafe=new Set(), members=new WeakSet();
     for(const rows of lists) for(const q of rows){
       if(!q || typeof q!=='object')continue;members.add(q);
       const key=this.keyOf(q);if(!key || key==='|')continue;
-      const literal=JSON.stringify([normArticle(q.article),normArticle(q.brand)]), prior=seen.get(key), part=this.parts.get(key);
+      /* Литерал — именно то, что раньше давал JSON.stringify([normArticle(article),
+         normArticle(brand)]): ДВА нормализованных значения, а не нормализованный
+         артикул и сырой бренд. Иначе признаки несогласованности в реестре
+         (part.brand) начинали срабатывать не так, как раньше. */
+      const a=normArticle(q.article), b=normArticle(q.brand);
+      /* Разделитель не может встретиться в нормализованном значении
+         (normArticle оставляет только буквы и цифры), поэтому склейка
+         однозначна и дешевле JSON.stringify. */
+      const literal=a+'\u001F'+b, prior=seen.get(key);
       if(prior===undefined)seen.set(key,literal);else if(prior!==literal)unsafe.add(key);
-      if(part && ((part.artikul && normArticle(part.artikul)!==normArticle(q.article)) || (part.brand && normArticle(part.brand)!==normArticle(q.brand))))unsafe.add(key);
-      const a=normArticle(q.article),b=normArticle(q.brand), nk=a && b ? a+'|'+b : '';
-      if(nk){const old=normalized.get(nk);if(!old)normalized.set(nk,{literal,key});else if(old.literal!==literal){unsafe.add(old.key);unsafe.add(key);}}
+      const part=this.parts.get(key);
+      /* Сравниваем те же величины, что и раньше: артикул из реестра против
+         нормализованного артикула строки, бренд из реестра — против СЫРОГО
+         бренда строки (так было в исходной проверке, и менять это молча нельзя). */
+      if(part && ((part.artikul && normArticle(part.artikul)!==a) || (part.brand && normArticle(part.brand)!==normArticle(q.brand))))unsafe.add(key);
     }
     return {unsafe,members};
+  },
+  /* Импорт добавляет строки порциями: пока он идёт, полный индекс по каталогу
+     пересобирать нельзя — это O(каталог) на каждую порцию. Конфликты новых
+     строк ловятся по реестру parts (identityUnsafe) и по индексу ключей
+     источника (BrowserImportSources.prepareKeys), поэтому на время импорта
+     объединённый индекс только запоминается как «грязный» и пересобирается
+     один раз после него. */
+  _identityBulk: 0,
+  identityBulkBegin() { this._identityBulk++; },
+  identityBulkEnd() {
+    this._identityBulk = Math.max(0, this._identityBulk - 1);
+    if (!this._identityBulk && this._identityCache) { this._identityCache.rows = null; this._identityCache.dirty = true; }
   },
   identityCache() {
     const rows=S.rows||[], version=S.catalogVersion||0;
     let cache=this._identityCache;
+    /* Пока идёт импорт, состав каталога меняется каждой порцией. Полный
+       пересбор индекса здесь стоил O(каталог) на порцию (683 мс на 2 000 строк
+       при 124k), поэтому индекс помечается грязным и пересобирается один раз
+       после импорта (identityBulkEnd → первое обращение). */
+    if(this._identityBulk>0){
+      if(!cache)cache=this._identityCache=Object.assign(this._buildIdentityIndex([rows]),{rows,length:rows.length,version});
+      cache.dirty=true;
+      return cache;
+    }
+    if(cache && cache.dirty){
+      return this._identityCache=Object.assign(this._buildIdentityIndex([rows]),{rows,length:rows.length,version});
+    }
     if(!cache || cache.rows!==rows || cache.length!==rows.length || cache.version!==version){
       cache=this._identityCache=Object.assign(this._buildIdentityIndex([rows]),{rows,length:rows.length,version});
     }
     return cache;
   },
   identityScope(list) {
+    if(!list)return null;
+    /* Во время импорта порция — это новые объекты, которых нет в members, и
+       старый код строил объединённый индекс «весь каталог + порция» на КАЖДУЮ
+       порцию. Индексируется только сама порция: конфликты внутри неё ловятся
+       здесь, а конфликты с уже известными связками — по реестру parts
+       (identityUnsafe), который и есть каталог в сжатом виде. */
+    if(this._identityBulk>0){const base=this.identityCache();base.dirty=true;return this._buildIdentityIndex([list]).unsafe;}
     const base=this.identityCache();
-    if(!list || list===base.rows)return null;
+    if(list===base.rows)return null;
     // The normal import passes a subset of S.rows; a separate list is indexed
     // together with the catalogue so its own conflicts cannot slip through.
     for(const p of list) if(p && typeof p==='object' && !base.members.has(p))
@@ -24257,9 +24481,9 @@ const HVC = {
       const oes = codeList(mergeCodeLists(p.oe_numbers, p.oe_list));
       for (const oe of oes) {
         const on = HVC.normalizeKey(oe); if (!on) continue;
-        const ck = on + '\u001F' + key;
+        const ck = HVC.crossKey(on, key);
         if (!HVC.cross.has(ck)) {
-          HVC.cross.set(ck, { oeNorm: on, artKey: key }); crN++;
+          HVC.cross.set(ck, 1); crN++;
           if (!HVC.byArt.has(key)) HVC.byArt.set(key, new Set()); HVC.byArt.get(key).add(on);
           if (!HVC.byOe.has(on)) HVC.byOe.set(on, new Set()); HVC.byOe.get(on).add(key);
         }
@@ -24470,7 +24694,7 @@ const HVC = {
         if (!HVC.byOe.has(on)) HVC.byOe.set(on, new Set());
         HVC.byOe.get(on).add(key);
         if (!HVC.oe.has(on)) HVC.oe.set(on, { oe: t, name: '', applicability: '', category: '', length: 0, width: 0, height: 0, weight: 0, dimensions_str: '' });
-        HVC.cross.set(on + '\u001F' + key, { oeNorm: on, artKey: key });
+        HVC.cross.set(HVC.crossKey(on, key), 1);
       }
       const joined = out.join(OE_DELIMITERS[oeMode()].join);
       if (joined !== String(p.oe_numbers || '') || joined !== String(p.oe_list || '')) {
@@ -25017,7 +25241,7 @@ const HVC = {
     S.rows = S.rows.filter(p => !keys.has(HVC.keyOf(p)));
     keys.forEach(k => {
       HVC.parts.delete(k); HVC.prices.delete(k);
-      for (const on of (HVC.byArt.get(k) || [])) { const s = HVC.byOe.get(on); if (s) { s.delete(k); if (!s.size) HVC.byOe.delete(on); } HVC.cross.delete(on + '|' + k); }
+      for (const on of (HVC.byArt.get(k) || [])) { const s = HVC.byOe.get(on); if (s) { s.delete(k); if (!s.size) HVC.byOe.delete(on); } HVC.cross.delete(HVC.crossKey(on, k)); /* ключ связи строится через \u001F (см. ingest): '|' оставлял сирот в реестре */ }
       HVC.byArt.delete(k); n++;
     });
     HVC._agg.clear();
@@ -25030,7 +25254,7 @@ const HVC = {
     S.rows = S.rows.filter(p => !keys.has(HVC.keyOf(p)));
     keys.forEach(k => {
       HVC.parts.delete(k); HVC.prices.delete(k);
-      for (const on of (HVC.byArt.get(k) || [])) { const s = HVC.byOe.get(on); if (s) { s.delete(k); if (!s.size) HVC.byOe.delete(on); } HVC.cross.delete(on + '|' + k); }
+      for (const on of (HVC.byArt.get(k) || [])) { const s = HVC.byOe.get(on); if (s) { s.delete(k); if (!s.size) HVC.byOe.delete(on); } HVC.cross.delete(HVC.crossKey(on, k)); /* ключ связи строится через \u001F (см. ingest): '|' оставлял сирот в реестре */ }
       HVC.byArt.delete(k); n++;
     });
     HVC._agg.clear();
@@ -25048,7 +25272,7 @@ const HVC = {
   },
   async savePaged() {
     const names=['hvcOe','hvcParts','hvcCross','hvcPrices'];
-    const specs=[[HVC.oe,(oeNorm,v)=>({oeNorm,...v}),'oeNorm'],[HVC.parts,(key,v)=>({key,...v}),'key'],[HVC.cross,(key,v)=>({key,oeNorm:v.oeNorm,artKey:v.artKey}),'key'],[HVC.prices,(key,v)=>({key,...v}),'key']];
+    const specs=[[HVC.oe,(oeNorm,v)=>({oeNorm,...v}),'oeNorm'],[HVC.parts,(key,v)=>({key,...v}),'key'],[HVC.cross,(key)=>{const p=HVC.crossParts(key);return {key,oeNorm:p.oeNorm,artKey:p.artKey};},'key'],[HVC.prices,(key,v)=>({key,...v}),'key']];
     const baseline=await db.meta.get('hvcStorage'),old=this.storageFormats(baseline),next={};
     const generation=StorageCtl.newRevision(),created=[];
     const report=text=>{if(typeof Prog!=='undefined')Prog.msg(text);};
@@ -25203,7 +25427,7 @@ const HVC = {
         };
         await sync(db.hvcOe, HVC.oe, (oeNorm, v) => ({ oeNorm, ...v }), 'oeNorm');
         await sync(db.hvcParts, HVC.parts, (key, v) => ({ key, ...v }), 'key');
-        await sync(db.hvcCross, HVC.cross, (key, v) => ({ key, oeNorm:v.oeNorm, artKey:v.artKey }), 'key');
+        await sync(db.hvcCross, HVC.cross, (key) => ({ key, ...HVC.crossParts(key) }), 'key');
         await sync(db.hvcPrices, HVC.prices, (key, v) => ({ key, ...v }), 'key');
         if(Object.keys(storage).length)await db.meta.put({key:'hvcStorage',value:storage});
         await db.meta.put({ key: 'hvcRules', value: { rules: HVC.rules, exclusions: HVC.exclusions, descTemplate: HVC.descTemplate } });
@@ -25215,7 +25439,7 @@ const HVC = {
         try {
           gas('saveHVC', {
             oe: [...HVC.oe.entries()].slice(0, 5000).map(([oeNorm, v]) => ({ oeNorm, ...v })),
-            cross: [...HVC.cross.values()].slice(0, 10000).map(v => { const p3 = String(v.artKey||'').split('|'); return { oeNorm:v.oeNorm, artNorm:p3[0], brandNorm:p3.slice(1).join('|') }; }),
+            cross: [...HVC.cross.keys()].slice(0, 10000).map(k => { const p3 = HVC.crossParts(k), a = String(p3.artKey || '').split('|'); return { oeNorm:p3.oeNorm, artNorm:a[0], brandNorm:a.slice(1).join('|') }; }),
             prices: [...HVC.prices.entries()].slice(0, 10000).map(([key, v]) => { const p2 = key.split('|'); return { artNorm: p2[0], brandNorm: p2[1], ...v }; })
           }).catch(() => { });
         } catch (e) { /* прокси недоступен — реестры остаются в IndexedDB */ }
@@ -25310,8 +25534,8 @@ const HVC = {
           const rawArt = r.artKey || (hasSep ? rawKey.split('\u001F').slice(1).join('\u001F') : legacy.slice(1).join('|'));
           const artKey = canonicalArtKey(rawArt);
           if (!on || !artKey || artKey === '|') return;
-          const ck = on + '\u001F' + artKey;
-          staged.cross.set(ck, { oeNorm:on, artKey });
+          const ck = HVC.crossKey(on, artKey);
+          staged.cross.set(ck, 1);
           if (!staged.byArt.has(artKey)) staged.byArt.set(artKey, new Set()); staged.byArt.get(artKey).add(on);
           if (!staged.byOe.has(on)) staged.byOe.set(on, new Set()); staged.byOe.get(on).add(artKey);
         });
@@ -25738,8 +25962,7 @@ const CompetitorIntel = {
         const bytes = await f.arrayBuffer();
         rows = [];
         if (/\.csv$/i.test(f.name)) {
-          let txt = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-          if (txt.slice(0, 400).indexOf('\uFFFD') > -1) txt = new TextDecoder('windows-1251').decode(bytes);
+          let txt = decodeCsvText(bytes).text;
           txt = txt.replace(/^\uFEFF/, '');
           const l1 = txt.split(/\r?\n/)[0] || '';
           const sep = (l1.match(/;/g) || []).length * 2 > (l1.match(/,/g) || []).length ? ';' : (l1.includes('\t') ? '\t' : ',');
@@ -28170,7 +28393,10 @@ const PyEngine = {
       'excluded','dimensionAnomalyBlocked','_sources','_dimensionImportIssues','_dimensionOeReview','_dimensionAutoEvidence',
       '_dimensionAutoConflict','_dimensionAutoOeEvidence','oe_numbers','oe_list','oe_norm','oeSource'];
     return {rows:S.rows.map(p=>Object.fromEntries(fields.filter(k=>p[k]!==undefined).map(k=>[k,p[k]]))),found,automatic,
-      reference:{parts:[...HVC.parts],byOe:[...HVC.byOe].map(([k,v])=>[k,[...v]]),oe:[...HVC.oe],cross:[...HVC.cross]},
+      /* v12.9.170: в памяти значение связи — константа, а наружу (в снимок для движка)
+         уходит объект {oeNorm, artKey}, собранный из ключа: формат обмена не менялся. */
+      reference:{parts:[...HVC.parts],byOe:[...HVC.byOe].map(([k,v])=>[k,[...v]]),oe:[...HVC.oe],
+        cross:[...HVC.cross.keys()].map(k=>[k,HVC.crossParts(k)])},
       limits:AnomalyDetector.limits,mode:oeMode(),labels:Object.fromEntries(STD.map(s=>[s.k,s.n])),
       catalog_revision:S.catalogVersion||0,hvc_revision:HVC.ozonRevision||0};
   },
@@ -28780,10 +29006,15 @@ const CsvStream = {
   },
   async rows(file, onRow, opts) {
     opts = opts || {};
-    const headBytes = new Uint8Array(await file.slice(0, Math.min(file.size, 65536)).arrayBuffer());
-    const probe = new TextDecoder('utf-8', { fatal: false }).decode(headBytes);
-    const enc = probe.slice(0, 400).indexOf('\uFFFD') > -1 ? 'windows-1251' : 'utf-8';
-    const dec = new TextDecoder(enc);
+    /* Кодировка определяется по всему прочитанному буферу (см. decodeCsvText):
+       раньше смотрели только первые 400 символов и на CP1251-прайсе с
+       латинской шапкой читали кириллицу как UTF-8. */
+    const headBytes = new Uint8Array(await file.slice(0, Math.min(file.size, 1 << 20)).arrayBuffer());
+    /* Голова нужна только для выбора кодировки: поток ниже начинается с нуля,
+       иначе первые мегабайты разбирались бы дважды (и строки задвоились).
+       Голова может обрываться на середине символа — отсюда opts.truncated. */
+    const enc = decodeCsvText(headBytes, { truncated: headBytes.length < file.size }).encoding;
+    const dec = new TextDecoder(enc === 'windows-1251' ? 'windows-1251' : 'utf-8');
     let parser = null, firstText = '';
     const feedText = t => {
       if (!parser) {
@@ -28988,6 +29219,10 @@ const DiskImport = {
       return CsvStream.rows(info.file, r => { if (first) { first = false; return; } onRow(r); }, { onProgress, onChunk });
     };
     await withProgress('Загрузка сразу в приложение', 'поток → IndexedDB', async prog => {
+      /* Реестр OE пополняется порциями по 2 000 строк; на время потока полный
+         identity-индекс по каталогу не пересобирается (см. HVC.identityBulk*). */
+      if (typeof HVC !== 'undefined' && HVC.identityBulkBegin) HVC.identityBulkBegin();
+      try {
       const stageCount = await db.products_stage.count().catch(() => 0);
       if (stageCount) throw new Error('В хранилище есть незавершённый черновик каталога (' + fmt(stageCount) + ' строк). Решите его судьбу в разделе «Хранилище и квота».');
       /* --- кроссы: только OE-индекс связка → OE --- */
@@ -29041,7 +29276,10 @@ const DiskImport = {
         const art = normArticle(rawArt);
         if (!art) return null;
         const brandRaw = brandM ? String(r[brandM.col] == null ? '' : r[brandM.col]).trim() : '';
-        const p = { article: rawArt, originalArticle: rawArt, brand: '', name: '', custom: {}, _sources: {}, oe_numbers: '', group_articles: art, visible: true, salesSeries: [] };
+        /* v12.9.170: без salesSeries: [] — пустой ряд у каждой строки это
+           +17 Б записи и +45 Б heap на SKU (см. salesSeriesOf: отсутствие
+           поля уже трактуется как «нет ряда»). */
+        const p = { article: rawArt, originalArticle: rawArt, brand: '', name: '', custom: {}, _sources: {}, oe_numbers: '', group_articles: art, visible: true };
         const oeSet = new Map();
         for (const cm of price.mapped) {
           if (cm.target === 'article') continue;
@@ -29130,7 +29368,24 @@ const DiskImport = {
          (bulkPut по 2 500), без черновика и транзакции подмены. */
       await runPipeline(true, { skipEconomics: true, persist: false, onProgress: prog, stepRange: [82, 97], persistMessage: 'пересчёт завершён — запись одной порцией' });
       prog('запись каталога одной порцией…');
-      const slimBack = p => { const o = { ...p }; delete o._t; delete o._bw; delete o.mp; delete o._stdDimsCalc; return o; };
+      /* Тот же набор вычисляемых полей, что в slimOf (_persistNowImpl): _srch/_sv
+         и пустой salesSeries в записи не нужны — они выводятся при загрузке. */
+      const slimBack = p => {
+        const o = { ...p };
+        delete o._t; delete o._bw; delete o.mp; delete o._stdDimsCalc; delete o._srch; delete o._sv;
+        if (Array.isArray(o.salesSeries) && !o.salesSeries.length) delete o.salesSeries;
+        /* v12.9.170: те же правила, что в slimOf — дубли OE-полей не пишем. */
+        if (o.oe_list !== undefined && String(o.oe_list) === String(o.oe_numbers === undefined ? '' : o.oe_numbers)) delete o.oe_list;
+        if (typeof o.oe_norm === 'string' && o.oe_norm && o.oe_norm === String(o.oe_numbers === undefined ? '' : o.oe_numbers)) delete o.oe_norm;
+      /* v12.9.170: происхождение полей — не копия {file,date} на каждое поле,
+         а номер общего набора (см. SourceRegistry). Не пакуется — пишем как было. */
+      delete o._src;
+      if (o._sources !== undefined) {
+        const id = SourceRegistry.idOf(o._sources);
+        if (id) { o._src = id; delete o._sources; }
+      }
+        return o;
+      };
       for (let i = 0; i < S.rows.length; i += 2500) await db.products.bulkPut(S.rows.slice(i, i + 2500).map(slimBack));
       try { await HVC.save(); } catch (e) { console.warn('[UC] DiskImport HVC.save:', e); }
       UI.fillFilters(); Table.paint();
@@ -29158,6 +29413,10 @@ const DiskImport = {
         fmt(unique) + ' SKU из прайса' + (cross ? ' · OE из кроссов получили ' + fmt(withOe) + ' SKU (связок ' + fmt(crossRows) + ' строк, OE ' + fmt(crossOe) + ')' : '') + coverText +
         (skipped ? ' · пропущено без артикула ' + fmt(skipped) : '') + (dups ? ' · дублей артикул+бренд перезаписано ' + fmt(dups) : '') +
         ' · экономика посчитается при экспорте');
+      } finally {
+        /* Один пересбор identity-индекса после потока, а не на каждую порцию. */
+        if (typeof HVC !== 'undefined' && HVC.identityBulkEnd) HVC.identityBulkEnd();
+      }
     });
   }
 };
@@ -29205,6 +29464,9 @@ const BrowserImportIO = {
 
 const BrowserApplyCheckpoint = {
   KEY:'browserApplyCheckpoint', owner:null, BATCH:1000, PAGE_BYTES:512*1024,
+  /* Сколько строк читать за одну транзакцию: память окна ограничена
+     WRITE_BATCH × PAGE_BYTES, запись всё равно идёт страницами. */
+  WRITE_BATCH:1000,
   *pages(rows) {
     let values=[],bytes=64;
     for(const row of rows){
@@ -29264,8 +29526,14 @@ const BrowserApplyCheckpoint = {
             const marker=await db.meta.get(this.KEY);
             if(marker?.value.owner!==owner||!marker.value.preparing)throw new Error('Контрольная точка изменена');
             await StorageCtl.assertCatalogFresh();
-            // Small read window bounds clones before byte-sized undo pages.
-            const rows=await(last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(32).toArray();
+            /* v12.9.170: окно чтения ограничено БАЙТАМИ, а не 32 строками.
+               32 строки — это 32 отсортированных клона на каждую транзакцию:
+               на каталоге 124 459 строк выходило ~3 900 транзакций только на
+               products (плюс реестры), при том что pages() всё равно режет
+               запись по PAGE_BYTES. Берём WRITE_BATCH строк за раз, а pages()
+               уже делит их на страницы по бюджету — тот же объём копии,
+               транзакций в десятки раз меньше. */
+            const rows=await(last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(this.WRITE_BATCH).toArray();
             for(const values of this.pages(name==='meta'?rows.filter(r=>r.key!==this.KEY&&r.key!=='browserApplyRestoreReceipt'):rows)){
               step('write-backup',name,total,values.length);
               await db.applyUndo.bulkAdd([{table:name,pos:total,values}]);
@@ -29571,6 +29839,27 @@ const BrowserImportSources = {
     return this._db;
   },
   check() { if(typeof UCCancel!=='undefined')UCCancel.check(); },
+  /* v12.9.170: оценка байт строки БЕЗ JSON.stringify.
+     Было: JSON.stringify(row).length*2+64 — это (а) создавало строку на каждую
+     строку источника (миллионы короткоживущих строк = мусор в heap), и
+     (б) считало UTF-16, а не UTF-8, поэтому на артикулах и цифровых кодах
+     бюджет 512 КиБ заполнялся вдвое раньше — вдвое больше страниц и
+     транзакций на тот же файл. Считаем UTF-8 напрямую по символам. */
+  rowBytes(row) {
+    let bytes=64;
+    for(let i=0;i<row.length;i++){
+      const v=row[i];
+      if(typeof v==='number'){bytes+=8;continue;}
+      if(v==null){bytes+=4;continue;}
+      const s=String(v);
+      for(let j=0;j<s.length;j++){
+        const c=s.charCodeAt(j);
+        bytes+=c<0x80?1:c<0x800?2:c<0xD800?3:2; /* суррогатная пара: 3+1 байт на пару */
+      }
+      bytes+=3;
+    }
+    return bytes;
+  },
   async page(id,start,count=this.BATCH) {
     return BrowserImportIO.run(this.database(),()=>this.readPage(id,start,count),{label:'Чтение исходной таблицы'});
   },
@@ -29646,7 +29935,7 @@ const BrowserImportSources = {
       while(buffer.length){
         let size=64,count=0;
         for(const row of buffer){
-          const bytes=JSON.stringify(row).length*2+64;
+          const bytes=this.rowBytes(row);
           if(count&&(size+bytes>512*1024||count>=this.BATCH))break;
           size+=bytes;count++;
         }
@@ -30440,6 +30729,9 @@ const Import = {
         if(!STD.find(s=>s.k===cm.target))return '';
         const raw=cm.m.virtual?(cm.m.def||''):r[cm.col];return raw==null?'':String(raw).trim();
       }));
+      /* Сигнатура считается и для prepareKeys: она ловит повтор ключа с
+         другими данными (в том числе внутри одной порции источника), поэтому
+         «оптимизировать» её до ключа нельзя — это отключило бы проверку. */
       const describeSource=r=>{
         const a=normArticle(artMap&&r[artMap.col]);if(!a)return null;
         const brand=normArticle(brandMap?r[brandMap.col]:'');
@@ -30571,7 +30863,7 @@ const Import = {
           const existing = !!p;
           if (!p) {
             if (enrichOnlyRef||!art) { skipped++; enrichOnlySkipped++; continue; }
-            p = { article: rawArt, originalArticle: rawArt, brand: '', name: '', custom: {}, _sources: {}, oe_numbers: '', group_articles: art, visible: true, salesSeries: [] };
+            p = { article: rawArt, originalArticle: rawArt, brand: '', name: '', custom: {}, _sources: {}, oe_numbers: '', group_articles: art, visible: true }; /* v12.9.170: пустой salesSeries не создаём */
             S.rows.push(p); idx.set(kk, p);
             if (idxArt.has(art)) duplicateArt.add(art); else idxArt.set(art, p);
             added++;
@@ -30867,7 +31159,14 @@ const Import = {
         /* v12.9.49: видно, что справочник действительно пополнился — из него
            будут обогащаться следующие файлы. */
         const _partsBefore = HVC.parts.size, _oeBefore = HVC.oe.size;
-        const hv = HVC.ingest(touchedUnique);
+        /* Один ingest на файл — но identity-индекс по каталогу при этом не
+           должен пересобираться «на всякий случай»: пакет строк это сотни
+           новых объектов, и объединённый индекс стоил O(каталог) на каждый
+           такой пакет. Область конфликтов — сам пакет + реестр parts. */
+        HVC.identityBulkBegin();
+        let hv;
+        try { hv = HVC.ingest(touchedUnique); }
+        finally { HVC.identityBulkEnd(); }
         _mark('реестр OE');
         /* Группировка от OE выполняется ВСЕГДА после imпорта: rebuildIndex строит
            OE-индексы и сразу выставляет «Группа артикулов» от нормализованного OE.
@@ -31184,8 +31483,7 @@ SUP-SHK-710;RoadTech;Амортизатор подвески передний г
       const buf = await file.arrayBuffer();
       let table = [];
       if (/\.csv$/i.test(file.name)) {
-        let txt = new TextDecoder('utf-8', { fatal: false }).decode(buf);
-        if (/[\uFFFD]/.test(txt.slice(0, 400))) txt = new TextDecoder('windows-1251').decode(buf);
+        let txt = decodeCsvText(buf).text;
         txt = txt.replace(/^\uFEFF/, '');
         const line1 = txt.slice(0, txt.search(/[\r\n]/) < 0 ? txt.length : txt.search(/[\r\n]/));
         const d = (line1.match(/;/g) || []).length * 2 > (line1.match(/,/g) || []).length ? ';' : (line1.includes('\t') ? '\t' : ',');
@@ -31535,7 +31833,7 @@ SUP-SHK-710;RoadTech;Амортизатор подвески передний г
               ...(rawStock !== null ? {stock:rawStock} : {}),
               minStock: 0,
               sales: 0,
-              salesSeries: [],
+              /* v12.9.170: salesSeries не создаём — пустой ряд читается как «нет данных». */
               /* No measured weight or packaging dimensions in this price list. */
               category: '',
               visible: (rawStock > 0 && finalPrice > 0),
@@ -37563,8 +37861,7 @@ const UE = {
         const bytes = await f.arrayBuffer();
         let sourceRows = [], sourceSheet, sheetName = '';
         if (/\.csv$/i.test(f.name)) {
-          let txt = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-          if (txt.slice(0, 400).indexOf('\uFFFD') > -1) txt = new TextDecoder('windows-1251').decode(bytes);
+          let txt = decodeCsvText(bytes).text;
           txt = txt.replace(/^\uFEFF/, '');
           const l1 = txt.split(/\r?\n/)[0] || '';
           const sepO = (l1.match(/;/g) || []).length * 2 > (l1.match(/,/g) || []).length ? ';' : (l1.includes('\t') ? '\t' : ',');
@@ -38425,8 +38722,7 @@ function mapServerProduct(p, deferKind=false) {
     markStatus: p.mark_status || '', markCode: p.mark_code || '', policyAction: p.policy_action || '',
     version: num(p.version) || 1, updatedAt: p.updated_at || nowISO(),
     custom: {},
-    _sources: serverSources,
-    salesSeries: [] };
+    _sources: serverSources }; /* v12.9.170: без пустого salesSeries */
   const known = new Set(['id','company_id','article','original_article','brand','name','applicability','oe_numbers','group_articles',
     'category','price','cost_price','weight_kg','length_cm','width_cm','height_cm','volume_l','barcode','multiplicity','image_url',
     'dimensions_str','stock','min_stock','sales','fixed_costs','net_profit','margin','roi','abc_class','xyz_class','visible',
@@ -38681,8 +38977,7 @@ const PL = {
       let wb;
       if (/\.csv$/i.test(f.name)) {
         const bytes0 = await f.arrayBuffer();
-        let txt0 = new TextDecoder('utf-8', { fatal: false }).decode(bytes0);
-        if (/[\uFFFD]/.test(txt0.slice(0, 400))) txt0 = new TextDecoder('windows-1251').decode(bytes0);
+        let txt0 = decodeCsvText(bytes0).text;
         txt0 = txt0.replace(/^\uFEFF/, '');
         const lp = txt0.split(/\r?\n/)[0] || '';
         const sepP = (lp.match(/;/g) || []).length * 2 > (lp.match(/,/g) || []).length ? ';' : (lp.includes('\t') ? '\t' : ',');
@@ -40640,8 +40935,7 @@ const DictIO = {
   async readTable(file) {
     const buf = await file.arrayBuffer();
     if (/\.csv$/i.test(file.name)) {
-      let txt = new TextDecoder('utf-8', { fatal: false }).decode(buf);
-      if (txt.slice(0, 400).indexOf('\uFFFD') > -1) txt = new TextDecoder('windows-1251').decode(buf);
+      let txt = decodeCsvText(buf).text;
       /* UC_CSV сохраняет «149,81» строкой — XLSX.read превращал её в 14981 */
       return UC_CSV.parse(txt);
     }
@@ -44244,8 +44538,7 @@ const Mail = {
       }
       let table = [];
       if (/\.csv$/i.test(parseName)) {
-        let txt = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-        if (/[\uFFFD]/.test(txt.slice(0, 400))) txt = new TextDecoder('windows-1251').decode(bytes);
+        let txt = decodeCsvText(bytes).text;
         txt = txt.replace(/^\uFEFF/, '');
         /* v11-аудит: авто-разделитель как в Import (прайсы поставщиков часто с ';') */
         const line1m = txt.split(/\r?\n/)[0] || '';
@@ -44975,8 +45268,7 @@ const TransitOps = {
       await withProgress('Импорт заказов МП', f.name, async () => {
         const bytes = await f.arrayBuffer(); let table = [];
         if (/\.csv$/i.test(f.name)) {
-          let txt = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-          if (txt.slice(0, 400).indexOf('\uFFFD') > -1) txt = new TextDecoder('windows-1251').decode(bytes);
+          let txt = decodeCsvText(bytes).text;
           txt = txt.replace(/^\uFEFF/, '');
           const l1 = txt.split(/\r?\n/)[0] || '';
           const sepO = (l1.match(/;/g) || []).length * 2 > (l1.match(/,/g) || []).length ? ';' : (l1.includes('\t') ? '\t' : ',');
@@ -46517,7 +46809,7 @@ const AnomalyOE = {
         !this.autoEvidence(entry.owner) || (verdict.tier==='oe' && !oeOk(this.codes(entry.owner,true))) ||
         !this.exactTuple(entry.owner,ev))) return false;
     }
-    const link=HVC.cross.get(entry.linkKey), part=HVC.parts.get(entry.partKey);
+    const link=HVC.cross.has(entry.linkKey)?HVC.crossParts(entry.linkKey):null, part=HVC.parts.get(entry.partKey);
     const codeOk=verdict.tier==='sku' || !!(link && DimPolicy.similarOe(normArticle(link.oeNorm),verdict.oe));
     return !!(codeOk && part===entry.ref && part._dimensionEvidence===entry.evidence &&
       this.full(this.tuple(entry.evidence)) && this.exactTuple(this.tuple(entry.evidence),entry.tuple));
@@ -47306,8 +47598,7 @@ const FinanceRecon = {
       await withProgress('Импорт фин-отчёта', f.name, async ()=>{
         const bytes = await f.arrayBuffer(); let table=[];
         if (/\.csv$/i.test(f.name)) {
-          let txt = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-          if (/[\uFFFD]/.test(txt.slice(0, 400))) txt = new TextDecoder('windows-1251').decode(bytes);
+          let txt = decodeCsvText(bytes).text;
           txt = txt.replace(/^\uFEFF/, '');
           /* v11-аудит: авто-разделитель ;/,/таб (как в импорте прайсов). */
           const lf = txt.split(/\r?\n/)[0] || '';
@@ -47967,6 +48258,178 @@ function ozonLegacyCandidates(p) {
   }
   return out;
 }
+/* ============ v12.9.170 · ПРОИСХОЖДЕНИЕ ПОЛЕЙ БЕЗ ДУБЛЕЙ В ЗАПИСИ ==========
+   `_sources[k] = {file, date}` кладётся на КАЖДОЕ заполненное поле строки, и в
+   реальном каталоге это 84 % объёма записи: замер на 13 полях происхождения —
+   1498 Б против 234 Б строки без них (178 МБ против 28 МБ на 124 459 SKU).
+   Различных наборов при этом единицы: файл один, дата одна, различаются только
+   имена колонок. Поэтому на диск пишется номер набора (`_src`), а сами наборы
+   лежат один раз в meta.catalog.sources — служебной записи, которая и так
+   пишется на каждое сохранение.
+   Совместимость: во ВРЕМЯ РАБОТЫ строка в памяти по-прежнему держит полный
+   `_sources` (панель «Происхождение полей», Ozon-доказательства и проверки
+   «импорт не затирает явное значение» ничего не знают о сжатии). Сжатие
+   происходит только на записи в IndexedDB и разворачивается при загрузке.
+   Старые записи (полный `_sources`) читаются как есть и сжимаются при
+   следующей записи.
+   Безопасность: если набор нельзя восстановить обратно один в один (пустое имя
+   колонки, вложенный объект, поле с именем file/date, дата не в ISO-виде),
+   строка пишется старым способом — происхождение не теряется никогда.
+   Даты хранятся в миллисекундах: new Date(ms).toISOString() — ровно то, что
+   возвращает прежний new Date(str), поэтому отображение не меняется. */
+const SourceRegistry = {
+  MAX: 512,          /* предохранитель: ручные правки с разными датами не должны
+                        раздувать служебную запись; сверх лимита — старый формат */
+  _ids: new Map(),   /* ключ содержимого → запись */
+  _list: [],         /* [{id, set}] — только то, что реально используется */
+  _cache: new WeakMap(), /* контейнер _sources → номер набора (null бы прочитался как попадание) */
+  _next: 1,
+  reset(list) {
+    this._ids = new Map(); this._list = []; this._cache = new WeakMap(); this._next = 1;
+    this._valIds = new WeakMap(); this._valMap = new Map(); this._valExact = new Map();
+    this._valKeyed = new Map(); this._valNext = 1;
+    for (const entry of (Array.isArray(list) ? list : [])) {
+      if (!entry || typeof entry.id !== 'number' || !Array.isArray(entry.set)) continue;
+      /* Содержимое набора (файл/дата) хранится вместе с набором — в одной записи
+         meta, отдельной таблицы не нужно. */
+      for (const f of entry.set) {
+        if (!Array.isArray(f) || typeof f[0] !== 'string' || !Number.isSafeInteger(f[1])) { entry._bad = true; break; }
+        if (!Array.isArray(f[2])) { entry._bad = true; break; }
+        const ex = [String(f[2][0] || ''), f[2][1] == null ? null : String(f[2][1]), Number(f[2][2])];
+        this._valExact.set(f[1], ex);
+        this._valKeyed.set(ex[0] + '\u0001' + (ex[1] === null ? '' : ex[1]) + '\u0001' + ex[2], f[1]);
+        if (f[1] >= this._valNext) this._valNext = f[1] + 1;
+      }
+      if (entry._bad) { delete entry._bad; continue; }
+      let key = ''; for (const f of entry.set) key += f[0] + '\u0001' + f[1] + '\u0002';
+      if (this._ids.has(key)) continue;
+      this._ids.set(key, entry); this._list.push(entry);
+      if (entry.id >= this._next) this._next = entry.id + 1;
+    }
+  },
+  keyOf(set) {
+    let k = '';
+    for (const f of set) {
+      if (!Array.isArray(f) || typeof f[0] !== 'string' || !f[0] || /[\u0001\u0002\u0003]/.test(f[0])) return null;
+      if (typeof f[1] !== 'string' || !f[1] || /[\u0001\u0002]/.test(f[1])) return null;
+      k += f[0] + '\u0001' + f[1] + '\u0002' + f[2] + '\u0002' + f[3] + '\u0003';
+    }
+    return k;
+  },
+  /* Содержимое пары {file, date} → внутренний номер. В импорте один и тот же
+     объект источника лежит на всех полях всех строк, поэтому WeakMap даёт O(1)
+     без разбора даты, а Map страхует случай разных объектов с равным содержимым. */
+  _valIds: new WeakMap(), _valMap: new Map(), _valNext: 1,
+  valId(v) {
+    if (typeof v.file !== 'string' || !v.file || typeof v.date !== 'string' || !v.date) return 0;
+    const hit = this._valIds.get(v);
+    if (hit !== undefined) return hit;
+    const ms = Date.parse(v.date);
+    if (!Number.isFinite(ms)) return 0;
+    /* Точную строку даты сохраняем, если она не каноническая: разворот обязан
+       дать ровно то значение, что было в строке. */
+    const exact = new Date(ms).toISOString() === v.date ? '' : v.date;
+    /* Содержимое могло прийти из meta.catalog — тогда номер уже известен и
+       новый выдавать нельзя: иначе набор получил бы дубль _src. */
+    const key = v.file + '\u0001' + exact + '\u0001' + ms;
+    let id = this._valMap.get(key);
+    if (id === undefined) {
+      const known = this._valKeyed && this._valKeyed.get(key);
+      id = known !== undefined ? known : this._valNext++;
+      this._valMap.set(key, id);
+      this._valExact = this._valExact || new Map();
+      if (!this._valExact.has(id)) this._valExact.set(id, [v.file, exact || null, ms]);
+      if (known === undefined && this._valKeyed) this._valKeyed.set(key, id);
+    }
+    this._valIds.set(v, id);
+    return id;
+  },
+  /* _sources → компактный набор [[поле, номер содержимого, файл, точная дата|null, мс]].
+     null — набор нельзя восстановить обратно один в один. */
+  pack(obj) {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+    const names = Object.keys(obj), set = new Array(names.length);
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i];
+      if (!name || name === 'file' || name === 'date' || /[\u0001\u0002\u0003]/.test(name)) return null;
+      const v = obj[name];
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+      if (Object.keys(v).length !== 2) return null;
+      const id = this.valId(v);
+      if (!id) return null;
+      set[i] = [name, id];
+    }
+    return names.length ? set : null;
+  },
+  /* Номер набора для контейнера _sources (0 — писать старым способом). */
+  idOf(obj) {
+    if (!obj || typeof obj !== 'object') return 0;
+    const cached = this._cache.get(obj);
+    if (cached !== undefined) return cached;
+    const set = this.pack(obj);
+    if (!set) return 0;
+    let key = '';
+    for (const f of set) key += f[0] + '\u0001' + f[1] + '\u0002';
+    let entry = this._ids.get(key);
+    if (!entry) {
+      if (this._list.length >= this.MAX) return 0;
+      entry = { id: this._next++, set };
+      this._ids.set(key, entry); this._list.push(entry);
+    }
+    this._cache.set(obj, entry.id);
+    return entry.id;
+  },
+  /* Резервная копия товаров (JSONL) может содержать _src без meta.catalog.
+     Происхождение в таком случае не выдумываем, а показываем явно — иначе
+     запись из файла выглядела бы как строка «без источников». */
+  expandOrFlag(p) {
+    if (!p || typeof p !== 'object') return p;
+    if (p._src === undefined) return p;
+    const full = this.expand(p._src);
+    if (full) { p._sources = full; delete p._src; return p; }
+    this._flags = this._flags || new Map();
+    this._flags.set(p._src, (this._flags.get(p._src) || 0) + 1);
+    if (p._sources === undefined) p._sources = {};
+    return p;
+  },
+  flagText() {
+    const list = this._flags ? [...this._flags.entries()] : [];
+    if (!list.length) return '';
+    const total = list.reduce((n, x) => n + x[1], 0);
+    return 'происхождение полей не восстановлено у ' + total + ' строк (нет meta.catalog: наборы ' + list.slice(0, 5).map(x => x[0]).join(', ') + ')';
+  },
+  /* Разворот набора. null — набора нет (тогда _src не должен был попасть в файл). */
+  expand(id) {
+    const entry = this._list.find(e => e.id === id) || null;
+    if (!entry) return null;
+    this._valExact = this._valExact || new Map();
+    const out = {};
+    for (const f of entry.set) {
+      const v = this._valExact.get(f[1]);
+      if (!v) return null; /* содержимое не восстановить — лучше пусто, чем чужое */
+      out[f[0]] = v[1] === null ? { file: v[0], date: new Date(v[2]).toISOString() } : { file: v[0], date: v[1] };
+    }
+    return out;
+  },
+  /* Служебная часть meta.catalog: только наборы, на которые есть ссылки. */
+  snapshot() {
+    this._valExact = this._valExact || new Map();
+    return this._list.map(e => ({ id: e.id, set: e.set.map(f => {
+      const v = this._valExact.get(f[1]) || ['', null, 0];
+      return [f[0], f[1], [v[0], v[1], v[2]]];
+    }) }));
+  },
+  /* Перенос номеров на строки, загруженные из старого формата, чтобы запись
+     дельты не пересобирала набор для каждой строки. */
+  adopt(rows) {
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      if (row._src !== undefined) continue;
+      if (row._sources && typeof row._sources === 'object') { const id = this.idOf(row._sources); if (id) row._src = id; }
+    }
+  },
+};
 function ozonSourceMap(p) {
   const raw = p && p._sources;
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
