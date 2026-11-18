@@ -62,15 +62,21 @@ jobs:
           # раньше вывод шёл через асинхронный `tee`, поэтому к моменту падения в
           # файл не попадала строка с ошибкой — check-run красный, а в аннотации
           # только успешные JSON предыдущих тестов.
+          # Код возврата снимаем через `|| code=$?`: внутри `if ! cmd` он уже 0,
+          # и упавший тест выглядел бы как успешный.
           smoke () {
+            local code=0
             echo "::group::$*"
-            if ! "$@"; then
-              code=$?
-              echo "::endgroup::"
+            "$@" > .arena/smoke.log 2>&1 || code=$?
+            cat .arena/smoke.log
+            echo "::endgroup::"
+            if [ "$code" -ne 0 ]; then
               echo "::error::упал e2e: $* (код $code)"
+              grep -v '^[[:space:]]*$' .arena/smoke.log | tail -n 12 | while IFS= read -r line; do
+                echo "::error::${line}"
+              done
               exit "$code"
             fi
-            echo "::endgroup::"
           }
           export NODE_PATH=.arena/browser-tests/node_modules
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
