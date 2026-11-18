@@ -439,10 +439,20 @@ assert(!/\n        HVC\.rebuildIndex\(S\.rows\);\n        rowsChanged/.test(app)
 {
   const iSettings = app.indexOf('normalizeFormatSettings();\n    /* v12.9.171: производные OE-поля');
   assert(iSettings > 0, 'восстановление OE-полей идёт сразу после загрузки настроек');
+  assert(app.includes('if (p.oe_list !== undefined && p.oe_norm !== undefined) continue;'),
+    'строки с готовыми полями пропускаются до чтения oe_numbers');
   assert(app.includes('if (p.oe_list === undefined) p.oe_list = oe;'), 'oe_list восстанавливается из oe_numbers');
-  assert(app.includes('if (p.oe_norm === undefined) {'), 'oe_norm восстанавливается только когда его нет');
+  assert(app.includes('if (p.oe_norm === undefined) p.oe_norm = codeList(oe)'),
+    'oe_norm восстанавливается только когда его нет');
   assert(app.includes('const oe = p.oe_numbers;\n        if (!oe) continue;'),
     'у строк без OE полей не появляется');
+  /* v12.9.171: ensureNorm сюда звать нельзя — она пересчитывает article_norm на
+     каждой строке (218 мс на 400k против 13 мс), хотя он уже лежит на диске. */
+  const oeRestore = app.slice(app.indexOf('/* v12.9.171: производные OE-поля'), app.indexOf('/* Дедупликация — только после загрузки разделителя'));
+  /* В комментарии слово ensureNorm остаётся (объясняем, почему не зовём) —
+     ищем именно вызов. */
+  assert(!/HVC\.ensureNorm\s*\(/.test(oeRestore), 'восстановление не зовёт ensureNorm (пересчёт article_norm на всех строках)');
+  assert(oeRestore.length > 200 && oeRestore.length < 2000, 'блок восстановления остался маленьким');
 }
 
 // v12.9.77: таргетный dedupe сливает только заданные связки, полный — все

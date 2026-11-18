@@ -74,9 +74,19 @@ const snapshot = () => S.rows.map(p => Object.fromEntries(FIELDS.map(k => [k, p[
     { article: '0003', brand: 'B1', name: 'Без OE', cost: 30 },
     { article: '0004', brand: 'B1', name: 'Good', cost: 44, oe_numbers: 'OE4', oe_list: 'OE4', oe_norm: 'OE4' },
     { article: 'DONOR', brand: 'B1', name: 'Donor', oe_numbers: 'SHARED1', oe_list: 'SHARED1', oe_norm: 'SHARED1', weight: 0.8, length: 4, width: 5, height: 6 },
-    { article: 'TARGET', brand: 'B1', name: 'Keep', oe_numbers: 'SHARED1', oe_list: 'SHARED1', oe_norm: 'SHARED1' }
+    { article: 'TARGET', brand: 'B1', name: 'Keep', oe_numbers: 'SHARED1', oe_list: 'SHARED1', oe_norm: 'SHARED1' },
+    /* Аналоги: oe_list намеренно шире oe_numbers — slimOf пишет такое поле как
+       есть, и перезапуск не должен его «выравнивать» по oe_numbers. */
+    { article: 'ANALOG', brand: 'B1', name: 'Analog', oe_numbers: 'A11', oe_list: 'A11 / EXTRA', oe_norm: 'A11' },
+    /* Расходящийся oe_norm: тоже пишется как есть. */
+    { article: 'NORMONLY', brand: 'B1', name: 'Norm', oe_numbers: 'A11', oe_list: 'A11', oe_norm: 'A11 / X2' },
   ];
-  for (const p of S.rows) { p.article_norm = c.__normArticle(p.article); c.__HVC.ensureNorm(p); }
+  /* Случай «oe_numbers есть, а oe_list/oe_norm нет» не проверяется: писатели
+     приложения так строку не оставляют — они ставят оба поля или прогоняют
+     строку через HVC.ingest, — а на диске эти поля неотличимы от «их не было».
+     article_norm ставим напрямую: ensureNorm дописала бы ANALOG/NORMONLY
+     производные поля и замаскировала бы именно те состояния, что проверяем. */
+  for (const p of S.rows) p.article_norm = c.__normArticle(p.article);
   const memory = snapshot();
 
   assert(await c.__persistNow(), 'запись каталога не удалась: ' + String(S._cacheWriteError || ''));
@@ -99,6 +109,10 @@ const snapshot = () => S.rows.map(p => Object.fromEntries(FIELDS.map(k => [k, p[
   const one = after.find(r => r.article === '0001');
   assert.equal(one.oe_list, 'A11 / A12', 'oe_list восстановлен из oe_numbers');
   assert.equal(one.oe_norm, 'A11 / A12', 'oe_norm восстановлен нормализацией');
+  const analog = after.find(r => r.article === 'ANALOG');
+  assert.equal(analog.oe_list, 'A11 / EXTRA', 'аналоги в oe_list не выравниваются по oe_numbers');
+  const normOnly = after.find(r => r.article === 'NORMONLY');
+  assert.equal(normOnly.oe_norm, 'A11 / X2', 'расходящийся oe_norm не пересчитывается');
   const noOe = after.find(r => r.article === '0003');
   assert.equal(noOe.oe_list, '__нет__', 'у строки без OE поле не появляется само');
   /* У этой строки пустое oe_norm — это состояние «в памяти» (так его видит
