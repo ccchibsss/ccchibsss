@@ -18137,9 +18137,9 @@ const StorageCtl = {
     const equal=await db.transaction('rw',db.products,db.products_stage,db.meta,async()=>{
       const current=await this.assertCatalogFresh();
       if(await db.products.count()!==rows.length||await db.products_stage.count()||await db.meta.get('incomplete')||await db.meta.get('stageOwner'))return false;
-      for(let start=0;start<ordered.length;start+=32){
+      for(const batch of this.productBatches({rowCount:ordered.length,chunk:1000,slimChunk:(a,b)=>ordered.slice(a,b)})){
         if(typeof UCCancel!=='undefined')UCCancel.check();
-        const batch=ordered.slice(start,start+32),stored=await db.products.bulkGet(batch.map(p=>p.id));
+        const stored=await db.products.bulkGet(batch.map(p=>p.id));
         if(batch.some((p,i)=>!stored[i]||!this.same(withId(p),stored[i])))return false;
       }
       const settings={...S.settings,lastPersistError:''};
@@ -22873,7 +22873,7 @@ function persistNow(changedList, options={}) {
   if (S._bootReady !== true || S._bootError) return Promise.resolve(false);
   if (_cancelPersistSoon) _cancelPersistSoon();
   _persistPending++;
-  const call = _persistQueue.catch(() => {}).then(() => PyEngine.processingMode()==='sql' ? PyEngine.saveSqlCatalog() : StorageCtl.withWriteLock(() => _persistNowImpl(changedList,false,options.verifyUnchanged===true)));
+  const call = _persistQueue.catch(() => {}).then(() => PyEngine.processingMode()==='sql' ? PyEngine.saveSqlCatalog() : StorageCtl.withWriteLock(() => _persistNowImpl(changedList,false,options.verifyUnchanged!==false&&!Array.isArray(changedList))));
   _persistQueue = call.catch(() => {}).finally(() => { _persistPending--; });
   return call;
 }
@@ -23166,7 +23166,7 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnc
     S._lastPersistFailure={at:nowISO(),engine:'browser',phase:writePhase,message:text};
     S.settings.lastPersistError = text; S._cacheWriteError = text;
     const quota = StorageCtl.isQuotaError(e), conflict = e && e.name === 'CatalogConflictError';
-    Toast.err(conflict ? 'Каталог изменился в другой вкладке' : quota ? 'Недостаточно места для кэша' : 'Кэш не сохранён',
+    Toast.err(conflict ? 'Версия каталога устарела' : quota ? 'Недостаточно места для кэша' : 'Кэш не сохранён',
       (conflict ? 'Сохранённый каталог не заменён. ' : quota ? 'Браузер или диск отклонил запись по квоте. ' : 'IndexedDB отклонил запись (' + text.slice(0, 90) + '). ') +
       'Часть изменений может быть только в памяти: не закрывайте вкладку, сначала сделайте экспорт. Откройте «Хранилище и квота».');
     /* Даже если каталог не записался, справочник и правила должны сохраниться:
@@ -29224,6 +29224,10 @@ const BrowserApplyCheckpoint = {
     const step=(operation,table,position=0,pageRows=0)=>Object.assign(context,{operation,table,position,pageRows});
     this.lastFailure=null;
     try{
+      // Complete this tab's own saves before checking for an external writer.
+      // The baseline save below includes any cancelled debounced edits.
+      if(typeof _cancelPersistSoon==='function')_cancelPersistSoon();
+      if(typeof _persistQueue!=='undefined')await _persistQueue.catch(()=>{});
       await db.transaction('r',db.meta,()=>StorageCtl.assertCatalogFresh());
       step('persist-baseline','products');
       if(!await persistNow(undefined,{verifyUnchanged:true})||S._cacheAuxError||S._hvcPersistError){

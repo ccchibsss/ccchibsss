@@ -2867,7 +2867,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.173-pyengine-44'
+VERSION = '12.9.174-pyengine-45'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -4324,14 +4324,27 @@ def _atomic_enrichment(fn):
     """Rollback a failed batch without committing/rolling back caller work."""
     @wraps(fn)
     def run(conn,*args,**kwargs):
+        # A top-level SAVEPOINT starts a deferred transaction. In WAL mode,
+        # reading reference/schema data then upgrading to a writer can fail
+        # immediately with SQLITE_BUSY_SNAPSHOT when another request commits.
+        # Reserve the writer before any reads; SQLite's busy timeout can then
+        # wait safely. Never commit or roll back an existing caller transaction.
+        own_transaction = not conn.in_transaction
+        if own_transaction:
+            conn.execute('BEGIN IMMEDIATE')
         conn.execute('SAVEPOINT enrichment_batch')
         try:
             result=fn(conn,*args,**kwargs)
             conn.execute('RELEASE enrichment_batch')
+            if own_transaction:
+                conn.commit()
             return result
         except Exception:
-            conn.execute('ROLLBACK TO enrichment_batch')
-            conn.execute('RELEASE enrichment_batch')
+            if own_transaction:
+                conn.rollback()
+            else:
+                conn.execute('ROLLBACK TO enrichment_batch')
+                conn.execute('RELEASE enrichment_batch')
             raise
     return run
 

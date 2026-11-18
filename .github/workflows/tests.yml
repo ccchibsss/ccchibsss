@@ -40,6 +40,7 @@ jobs:
           node tests/ozon-concurrent-settings-client.js
           node tests/ozon-reference-upload-client.js
           node tests/import-apply-status-client.js
+          node tests/product-byte-batches-client.js
       - name: IndexedDB источники — встроенный Dexie
         run: |
           npm install --prefix .arena/idb-tests fake-indexeddb@6.2.8 --no-save --no-audit --no-fund

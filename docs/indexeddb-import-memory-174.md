@@ -29,3 +29,20 @@ These are synthetic Node/fake-indexeddb checks, not a Chromium RSS measurement o
 Exact unchanged baseline verification now preserves the existing catalog revision when products, custom metadata, settings and tariffs match. Previously the verification itself published a new revision and could invalidate another loaded tab without a catalog edit. Real stale revisions still fail closed; no automatic token adoption or overwrite was added. The conflict message describes a revision mismatch rather than asserting an unproven other-tab cause.
 
 Validated with the IndexedDB persistence probe (unchanged token assertions) and real Chromium `browser-import-conflict-e2e.js`: no-op verification retains the token, a genuine second-tab write blocks stale Apply, and new-tab recovery preserves staged file/mapping/options and stale RAM. This does not establish which writer caused the user's screenshot.
+
+## Follow-up: ordinary saves, own queue and WAL writer reservation
+
+- Ordinary full browser saves now request exact unchanged verification by default (explicit `verifyUnchanged:false` remains available). This also covers pagehide saves: a no-op no longer rewrites the entire catalog or publishes a needless revision. Partial changed-list writes retain their existing fast path.
+- Baseline verification now reads byte-budgeted batches (up to 1000 records / estimated 4 MiB), rather than issuing one read per 32 small products. Values are still compared exactly; neither catalogVersion nor fingerprints authorize skipping a write.
+- Apply drains this tab's existing persistence queue and cancels its debounce before the first freshness check. The baseline save captures those pending edits; no external revision is silently accepted.
+- Reproduced a separate Chromium SQL failure: `/catalog/enrich-category-kind` returned `database is locked`. Top-level enrichment previously opened a deferred SAVEPOINT, permitting a WAL read-to-write upgrade failure. It now starts `BEGIN IMMEDIATE` before reference/schema reads and commits/rolls back only its own transaction. Existing caller transactions keep savepoint semantics. Engine version: 12.9.174-pyengine-45.
+- Updated large browser import assertions to inspect immutable `pages-v2` keys rather than assuming numeric v1 IDs. Registered byte-batch regression coverage in CI.
+
+Validation for this follow-up:
+- 277 Python tests passed, including a real two-connection/thread WAL test: enrichment waits before reading, sees the committed writer's value, and preserves caller work on failure.
+- All 32 client suites and all eight CI IndexedDB integration suites passed.
+- Real Chromium multi-tab conflict test passed, including default no-op save and dispatched pagehide retaining the revision; genuine concurrent edits still reject stale Apply, and new-tab recovery retains the source/mapping/options and old RAM.
+- Real Python+Chromium paged SQL import passed after writer reservation (1200 products, 5001 enrichment source rows, further SKU/OE custom columns, no browser product persistence).
+- Remaining browser smoke sequence passed through 60k first-price browser+SQL imports/reopen, volatile boot, key index, exact enrichment parity, both wide-value variants, repeated imports, abort/recovery, conflict and export, and 1000-row Apply. Its old v1-only 30k test assertion failed and was then corrected; that 30k full Apply/HVC reload/24k partial write test passed on rerun.
+- Million-row source staging, preflight and target-index test passed (~167 seconds, no catalog Apply). This is not a million-row full-import claim.
+- Initial worker-memory, Ozon streaming XLSX and 20k browser IO tests passed before the latest follow-up. No original user CSVs were available, so the screenshot's exact trigger remains unproven.

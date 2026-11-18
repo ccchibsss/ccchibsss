@@ -17,7 +17,8 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
    S.settings.autoStdDims=false;S.settings.autoOeAnomalyOnImport=false;S.settings.enrichRelatedOnImport=false;
    if(!await persistNow())throw Error('seed save failed');
    const token=S._catalogToken;
-   if(!await persistNow(undefined,{verifyUnchanged:true}))throw Error('baseline verification failed');
+   if(!await persistNow())throw Error('baseline verification failed');
+   window.dispatchEvent(new PageTransitionEvent('pagehide'));await _persistQueue;
    if(S._catalogToken!==token)throw Error('unchanged baseline created a false revision');
    await Import.read(new File(['Артикул;Бренд;Наименование\n00001;Brand;Imported title\n'],'enrich.csv',{type:'text/csv'}));
    S.pending.map=S.pending.headers.map((src,i)=>({src,field:['article','brand','name'][i],target:['Артикул','Бренд','Наименование'][i],enabled:true,type:'text'}));Import.normalize();Import.render();
