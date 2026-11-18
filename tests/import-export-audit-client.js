@@ -9,6 +9,14 @@ const h=fs.readFileSync(__dirname+'/../index.html','utf8');
  for(const name of ['stripXmlIllegal','safeCsvText']){
   const a=h.indexOf('function '+name+'('),b=h.indexOf('\n}',a)+2;vm.runInContext(h.slice(a,b),ctx);
  }
+ /* stripXmlIllegal и safeCsvText используют константы, объявленные рядом:
+    XML_ILLEGAL_RE (уже есть в сборке), XCSV_SLOW и XTXT_LEAD_UNICODE
+    (быстрые пути v12.9.171). */
+ for(const name of ['XCSV_SLOW','XTXT_LEAD_UNICODE']){
+  const i=h.indexOf('const '+name);
+  if(i>0) vm.runInContext(h.slice(i,h.indexOf('\n',i)+1),ctx);
+ }
+ if(!('XML_ILLEGAL_RE' in ctx)) vm.runInContext('var XML_ILLEGAL_RE=/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\uFFFE\\uFFFF]/;',ctx);
  const a=h.indexOf('  async downloadReimportKit() {'),b=h.indexOf('\n  open() {',a);
  vm.runInContext('this.Exp={rows:()=>S.rows,_yield:async()=>{},download:(blob,name)=>capture(blob,name),'+h.slice(a,b)+'};',Object.assign(ctx,{capture:(blob,name)=>downloads.push({blob,name})}));
  await ctx.Exp.downloadReimportKit();

@@ -54,28 +54,46 @@ jobs:
           NODE_PATH=.arena/idb-tests/node_modules node tests/persist-indexeddb-probe.js
           NODE_PATH=.arena/idb-tests/node_modules node tests/product-key-reconcile-indexeddb.js
           NODE_PATH=.arena/idb-tests/node_modules node tests/source-registry-indexeddb.js
+          NODE_PATH=.arena/idb-tests/node_modules node tests/persist-reopen-parity-indexeddb.js
       - name: Браузерный импорт — Chromium smoke
         run: |
           mkdir -p .arena
-          # Keep the failing browser's diagnostics visible in check annotations,
-          # even when the runner's external log-download host is inaccessible.
-          exec > >(tee .arena/browser-smoke.log) 2>&1
-          trap 'code=$?; tail -n 25 .arena/browser-smoke.log | while IFS= read -r line; do line=${line//%/%25}; line=${line//$"\r"/%0D}; echo "::error::$line"; done; exit "$code"' ERR
+          # Каждый e2e запускается отдельной строкой и печатается сразу, без tee:
+          # раньше вывод шёл через асинхронный `tee`, поэтому к моменту падения в
+          # файл не попадала строка с ошибкой — check-run красный, а в аннотации
+          # только успешные JSON предыдущих тестов.
+          # Код возврата снимаем через `|| code=$?`: внутри `if ! cmd` он уже 0,
+          # и упавший тест выглядел бы как успешный.
+          smoke () {
+            local code=0
+            echo "::group::$*"
+            "$@" > .arena/smoke.log 2>&1 || code=$?
+            cat .arena/smoke.log
+            echo "::endgroup::"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::упал e2e: $* (код $code)"
+              grep -v '^[[:space:]]*$' .arena/smoke.log | tail -n 12 | while IFS= read -r line; do
+                echo "::error::${line}"
+              done
+              exit "$code"
+            fi
+          }
+          export NODE_PATH=.arena/browser-tests/node_modules
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-worker-memory-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-ozon-stream-xlsx-e2e.js
-          E2E_ROWS=20000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-io-memory-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-sql-paged-import-e2e.js
-          E2E_ROWS=60000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-first-price-boot-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-volatile-boot-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-key-index-perf-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-enrichment-parity-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-wide-values-e2e.js
-          E2E_PRICE_ENRICHED=1 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-wide-values-e2e.js
-          REPEAT_ROWS=1000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-repeat-memory-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-abort-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-conflict-e2e.js
-          NODE_PATH=.arena/browser-tests/node_modules node tests/browser-export-e2e.js
-          E2E_ROWS=1000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js
-          E2E_ROWS=30000 E2E_PARTIAL_WRITE=1 E2E_TIMEOUT_MS=180000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js
-          E2E_STAGE_ONLY=1 E2E_PREFLIGHT=1 E2E_TARGET_INDEX=1 E2E_TIMEOUT_MS=300000 E2E_ROWS=1000000 NODE_PATH=.arena/browser-tests/node_modules node tests/browser-import-e2e.js
+          smoke node tests/browser-worker-memory-e2e.js
+          smoke node tests/browser-ozon-stream-xlsx-e2e.js
+          smoke env E2E_ROWS=20000 node tests/browser-io-memory-e2e.js
+          smoke node tests/browser-sql-paged-import-e2e.js
+          smoke env E2E_ROWS=60000 node tests/browser-first-price-boot-e2e.js
+          smoke node tests/browser-volatile-boot-e2e.js
+          smoke node tests/browser-key-index-perf-e2e.js
+          smoke node tests/browser-enrichment-parity-e2e.js
+          smoke node tests/browser-wide-values-e2e.js
+          smoke env E2E_PRICE_ENRICHED=1 node tests/browser-wide-values-e2e.js
+          smoke env REPEAT_ROWS=1000 node tests/browser-import-repeat-memory-e2e.js
+          smoke node tests/browser-import-abort-e2e.js
+          smoke node tests/browser-import-conflict-e2e.js
+          smoke node tests/browser-export-e2e.js
+          smoke env E2E_ROWS=1000 node tests/browser-import-e2e.js
+          smoke env E2E_ROWS=30000 E2E_PARTIAL_WRITE=1 E2E_TIMEOUT_MS=180000 node tests/browser-import-e2e.js
+          smoke env E2E_STAGE_ONLY=1 E2E_PREFLIGHT=1 E2E_TARGET_INDEX=1 E2E_TIMEOUT_MS=300000 E2E_ROWS=1000000 node tests/browser-import-e2e.js

@@ -16,6 +16,23 @@ const {chromium:pw}=require('playwright-core'),ch=require('@sparticuz/chromium')
    if(S._bootError)throw Error('boot failed');
    const originalCreate=BrowserExportSpool.create,zipAdd=fflate.Zip.prototype.add;
    let writes=0,maxWrite=0,aborts=0,closed=0,activeEntries=0,maxActive=0;
+   /* v12.9.171: ZIP-райтер бывает двух видов. fflate-путь считаем по
+      Zip.prototype.add, нативный — по открытым листам своего архива: у него
+      нет объекта fflate, но инвариант тот же — один лист за раз. */
+   const nativeEntries={open:0,max:0};
+   const createZip=BrowserExportZip.create;
+   BrowserExportZip.create=async function(...args){
+     const archive=await createZip.apply(this,args);
+     if(!archive.native)return archive;
+     const openSheet=archive.sheet.bind(archive);
+     archive.sheet=name=>{
+       nativeEntries.open++;nativeEntries.max=Math.max(nativeEntries.max,nativeEntries.open);
+       const file=openSheet(name),finish=file.end.bind(file);let closedOnce=false;
+       file.end=async()=>{const r=await finish();if(!closedOnce){closedOnce=true;nativeEntries.open--;}return r;};
+       return file;
+     };
+     return archive;
+   };
    BrowserExportSpool.create=async function(){const sink=await originalCreate.call(this);return{...sink,write:async blobs=>{writes++;maxWrite=Math.max(maxWrite,blobs.reduce((s,b)=>s+(b.size??b.byteLength),0));return sink.write(blobs)},finish:async type=>{closed++;return sink.finish(type)},abort:async()=>{aborts++;return sink.abort()}}};
    fflate.Zip.prototype.add=function(file){activeEntries++;maxActive=Math.max(maxActive,activeEntries);const push=file.push;file.push=function(data,final){const result=push.call(this,data,final);if(final)activeEntries--;return result};return zipAdd.call(this,file)};
    const rows=Array.from({length:n},(_,i)=>({id:i+1,article:String(i).padStart(8,'0'),brand:'B',name:'Unicode 😀 & < > "\r\n '+i,cost:12.5,weight:1,length:2,width:3,height:4,category:'C',price:25,custom:{extra:i%2?'=1+2':'OE;1 _x0041_ \u0001',flag:i%2===0}}));
@@ -25,7 +42,8 @@ const {chromium:pw}=require('playwright-core'),ch=require('@sparticuz/chromium')
    const same=(a,b,label)=>{if(JSON.stringify(a)!==JSON.stringify(b))throw Error(label+' differs');};
    const t=performance.now(),blob=await Exp.streamXlsx(cat,rows,()=>{}),current=await inspect(blob);
    if(navigator.storage.getDirectory&&!(blob instanceof File))throw Error('XLSX not disk-backed');
-   if(maxActive!==1)throw Error('concurrent ZIP entries '+maxActive);
+   const concurrent=Math.max(maxActive,nativeEntries.max);
+   if(concurrent!==1)throw Error('concurrent ZIP entries '+concurrent+' (fflate '+maxActive+', native '+nativeEntries.max+')');
    const book=XLSX.read(await blob.arrayBuffer(),{type:'array'});
    if(XLSX.utils.sheet_to_json(book.Sheets['Юнит-экономика'],{header:1}).length!==n+1)throw Error('main row count');
    if(XLSX.utils.sheet_to_json(book.Sheets['Вводы и ставки'],{header:1}).length!==n+1)throw Error('input row count');
@@ -33,7 +51,7 @@ const {chromium:pw}=require('playwright-core'),ch=require('@sparticuz/chromium')
    if(formulaCells.length!==n||formulaCells[0][1].f===formulaCells[n-1][1].f)throw Error('row-specific formulas missing');
    const xlsxMs=Math.round(performance.now()-t);
    // Disable instrumentation for old asynchronous compression workers.
-   fflate.Zip.prototype.add=zipAdd;
+   fflate.Zip.prototype.add=zipAdd;BrowserExportZip.create=createZip;
    if(old.xlsx){const legacy=(0,eval)('({'+old.xlsx+'})');same(current,await inspect(await legacy.streamXlsx.call(Exp,cat,rows,null)),'all XLSX XML entries');}
    const csv=await Exp.csvAsync(cat,rows,null);
    if(old.csv){const legacy=(0,eval)('({'+old.csv+'})');const a=new Uint8Array(await csv.arrayBuffer()),b=new Uint8Array(await (await legacy.csvAsync.call(Exp,cat,rows,null)).arrayBuffer());if(a.length!==b.length||a.some((v,i)=>v!==b[i])){let k=a.findIndex((v,i)=>v!==b[i]);throw Error('CSV differs '+JSON.stringify({lengths:[a.length,b.length],at:k,a:Array.from(a.slice(Math.max(0,k-10),k+30)),b:Array.from(b.slice(Math.max(0,k-10),k+30))}));}}
