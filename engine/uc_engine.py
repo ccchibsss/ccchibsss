@@ -5458,23 +5458,30 @@ def store_export_cells(conn, cells, columns, column_meta=None, formula_options=N
 
 
 def export_catalog_records(conn,keys=None):
-    rows=conn.execute('SELECT p.*,e.total,e.profit,e.margin,e.roi,e.break_even,e.target,e.fields_json '
-        'FROM products p LEFT JOIN eco_results e ON e.article=p.article AND e.brand=p.brand ORDER BY p.article,p.brand').fetchall()
+    # One joined cursor instead of fetchall + filtered copy + two SQL probes
+    # per product. Keep the presentation snapshot's original export order.
+    saved=bool(conn.execute("SELECT 1 FROM sqlite_temp_master WHERE name='export_cells'").fetchone())
+    query=('SELECT p.*,e.total,e.profit,e.margin,e.roi,e.break_even,e.target,e.fields_json '+
+        (',c.data AS __export_saved_cell_data ' if saved else '')+
+        'FROM products p LEFT JOIN eco_results e ON e.article=p.article AND e.brand=p.brand '+
+        ('JOIN export_cells c ON c.article=p.article AND c.brand=p.brand ' if saved else '')+
+        'ORDER BY p.article,p.brand')
+    wanted=None if keys is None else {(str(a),str(b)) for a,b in keys}
     result=[]
-    for raw in _filter_keys(rows,keys):
+    for raw in conn.execute(query):
+        if wanted is not None and (str(raw['article'] or ''),str(raw['brand'] or '')) not in wanted:continue
         row=dict(raw)
+        presentation=row.pop('__export_saved_cell_data',None)
         try: extra=json.loads(row.pop('fields_json',None) or '{}')
         except (ValueError,TypeError): extra={}
         if isinstance(extra,dict):
             for k,v in extra.items():
                 if k not in row: row[k]=v
-        if conn.execute("SELECT 1 FROM sqlite_temp_master WHERE name='export_cells'").fetchone():
-            saved=conn.execute('SELECT data FROM export_cells WHERE article=? AND brand=?',(row['article'],row['brand'])).fetchone()
-            if saved: row.update(json.loads(saved[0]))
+        if saved:
+            row.update(json.loads(presentation))
+            if '__export_order' not in row:continue
         result.append(row)
-    if conn.execute("SELECT 1 FROM sqlite_temp_master WHERE name='export_cells'").fetchone():
-        result=[r for r in result if '__export_order' in r]
-        result.sort(key=lambda r:r['__export_order'])
+    if saved:result.sort(key=lambda r:r['__export_order'])
     return result
 
 def _xml_esc(v):

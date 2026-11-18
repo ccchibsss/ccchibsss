@@ -13633,7 +13633,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.167-client+read-only-boot';
+const APP_VERSION = '12.9.169-client+bounded-import-export';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -27039,6 +27039,19 @@ const SqlMemory = {
 
 // Temporary export bytes only, never a catalog/checkpoint replacement.
 const BrowserExportSpool = {
+  async fromResponse(response){
+    if(!response.body?.getReader)return response.blob();
+    const sink=await this.create(),reader=response.body.getReader();let complete=false;
+    try{
+      for(;;){
+        if(typeof UCCancel!=='undefined')UCCancel.check();
+        const {value,done}=await reader.read();if(done){complete=true;break;}
+        if(value?.length)await sink.write([value]);
+      }
+      return await sink.finish(response.headers?.get('Content-Type')||'application/octet-stream');
+    }catch(e){await sink.abort();throw e;}
+    finally{if(!complete)try{await reader.cancel();}catch(e){}reader.releaseLock();}
+  },
   async create(){
     let dir,handle,name,writer;
     try{
@@ -27053,7 +27066,7 @@ const BrowserExportSpool = {
     }catch(e){
       if(dir&&name)try{await dir.removeEntry(name);}catch(ignore){}
       const parts=[];
-      return {disk:false,async write(blobs){parts.push(...blobs);},async finish(type){const blob=new Blob(parts,{type});parts.length=0;return blob;},async abort(){parts.length=0;}};
+      return {disk:false,async write(blobs){for(const blob of blobs)parts.push(blob);},async finish(type){const blob=new Blob(parts,{type});parts.length=0;return blob;},async abort(){parts.length=0;}};
     }
     const remove=async()=>{try{await dir.removeEntry(name);}catch(e){}};
     return {disk:true,
@@ -27063,6 +27076,33 @@ const BrowserExportSpool = {
         // the next export also sweeps our own stale temporary files.
         setTimeout(remove,600000);return file;},
       async abort(){try{await writer.abort();}catch(e){}await remove();}
+    };
+  }
+};
+
+// One active ZIP entry at a time: fflate otherwise queues later entries
+// behind the unfinished first sheet. Compression is synchronous/incremental;
+// callers drain compressed chunks to OPFS at bounded row boundaries.
+const BrowserExportZip = {
+  async create(prog){
+    if(!window.fflate)throw new Error('Библиотека fflate не загрузилась');
+    const sink=await BrowserExportSpool.create(),chunks=[];
+    if(!sink.disk&&prog)prog('Временное файловое хранилище недоступно: сжатый архив остаётся в памяти');
+    let failure=null,finished=false,active=null,queuedBytes=0;
+    const zip=new fflate.Zip((err,data,final)=>{if(err)failure=err;else if(data.length){chunks.push(new Blob([data]));queuedBytes+=data.length;}if(final)finished=true;});
+    const check=()=>{if(failure)throw failure;if(typeof UCCancel!=='undefined')UCCancel.check();};
+    return {
+      get needsFlush(){return queuedBytes>=1048576;},
+      async flush(){check();if(chunks.length){const batch=chunks.splice(0);queuedBytes=0;await sink.write(batch);}},
+      sheet(name){
+        check();if(active)throw new Error('Предыдущий лист ZIP ещё не завершён');
+        const file=new fflate.ZipDeflate(name,{level:6});zip.add(file);let buf='';active=file;
+        return {w(text){buf+=text;if(buf.length>=262144){file.push(fflate.strToU8(buf),false);buf='';check();}},
+          end(){file.push(fflate.strToU8(buf),true);buf='';active=null;check();}};
+      },
+      add(name,text){const file=this.sheet(name);file.w(text);file.end();},
+      async finish(){check();if(active)throw new Error('Лист ZIP не завершён');zip.end();check();if(!finished)throw new Error('Архив XLSX не завершён');await this.flush();return await sink.finish('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');},
+      async abort(){zip.terminate();chunks.length=0;await sink.abort();}
     };
   }
 };
@@ -27691,7 +27731,7 @@ const PyEngine = {
         headers: body ? { 'X-UC-Token': this.token(), 'Content-Type': 'application/json' } : { 'X-UC-Token': this.token() },
         body: body ? JSON.stringify(body) : undefined });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      const blob = await r.blob();
+      const blob = r.body?.getReader?await BrowserExportSpool.fromResponse(r):await r.blob();
       if(validateSnapshot)validateSnapshot();
       const warningHeader=r.headers?.get('X-UC-Export-Warnings');
       if(warningHeader){
@@ -28657,25 +28697,25 @@ const CsvStream = {
 
 /* Воркер XLSX для дискового импорта (v12.9.95): в странице НЕ вызывается —
    её исходник уходит в Web Worker вместе с библиотекой SheetJS, книга
-   разбирается в воркере, строки возвращаются пакетами по 2 000. */
+   разбирается в воркере, строки возвращаются по запросу пакетами до 1 000. */
 function DiskXlsxWorkerMain() {
-  let ROWS = null;
-  self.onmessage = e => {
-    const d = e.data || {};
-    if (d.type === 'load') {
-      try {
-        const wb = XLSX.read(new Uint8Array(d.buf), { type: 'array', cellDates: false });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        ROWS = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false });
-        self.postMessage({ type: 'headers', rows: (ROWS[0] || []).map(v => String(v == null ? '' : v).trim()) });
-      } catch (err) { self.postMessage({ type: 'error', message: String(err && err.message || err) }); }
-    } else if (d.type === 'go') {
-      try {
-        for (let i = 1; i < ROWS.length; i += 2000) self.postMessage({ type: 'batch', rows: ROWS.slice(i, i + 2000) });
-        self.postMessage({ type: 'done', total: Math.max(0, ROWS.length - 1) });
-      } catch (err) { self.postMessage({ type: 'error', message: String(err && err.message || err) }); }
+  let ws=null,range=null,next=0,total=0;
+  self.onmessage=e=>{const d=e.data||{};try{
+    const read=(from,to)=>XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:'',blankrows:false,range:{s:{r:from,c:range.s.c},e:{r:to,c:range.e.c}}});
+    if(d.type==='load'){
+      const wb=XLSX.read(new Uint8Array(d.buf),{type:'array',cellDates:false,sheets:0});
+      ws=wb.Sheets[wb.SheetNames[0]];range=ws?.['!ref']?XLSX.utils.decode_range(ws['!ref']):null;next=range?range.s.r:0;total=0;
+      let header=[];
+      while(range&&next<=range.e.r&&!header.length){const rows=read(next,next);next++;if(rows.length)header=rows[0];}
+      self.postMessage({type:'headers',rows:header.map(v=>String(v==null?'':v).trim())});
+    }else if(d.type==='go'){
+      if(!range||next>range.e.r){ws=null;self.postMessage({type:'done',total});return;}
+      const end=Math.min(next+999,range.e.r),rows=read(next,end);next=end+1;total+=rows.length;
+      // Exactly one requested block. Main thread acknowledges only after
+      // its IndexedDB write chain has drained.
+      self.postMessage({type:'batch',rows});
     }
-  };
+  }catch(err){self.postMessage({type:'error',message:String(err&&err.message||err)});}};
 }
 
 /* ================== 25f. ДИСКОВЫЙ ИМПОРТ (v12.9.93) ==================
@@ -28685,13 +28725,13 @@ function DiskXlsxWorkerMain() {
    каталога — одной транзакцией (как в чанковой записи persist). В RAM при этом
    живут только: текущий пакет строк, индекс ключей прайса и OE-индекс кроссов
    (у реальных кросс-листов это десятки тысяч записей, не сотни тысяч строк).
-   Ограничения режима: только CSV, только полная замена каталога, маппинг —
+   Ограничения режима: CSV/XLSX, только полная замена каталога, маппинг —
    автоматический (профиль/автоопределение); нестандартные файлы ведите через
    обычный импорт с ручным маппингом. Экономика не считается (лёгкий режим):
    досчитается при экспорте или входе в расчётные разделы. */
 const DiskImport = {
   _sessions: new Set(),
-  _closeSessions() { for (const w of this._sessions) { try { w.terminate(); } catch (e) { } } this._sessions.clear(); },
+  _closeSessions() { for (const w of this._sessions) { try { w.terminate();if(w._ucSourceUrl)URL.revokeObjectURL(w._ucSourceUrl); } catch (e) { } } this._sessions.clear(); },
   _xlsxLibSource() {
     const t = [...document.scripts].map(x => x.textContent || '').find(x => x.includes('xlsx встроен офлайн'));
     if (!t) throw new Error('Встроенный модуль XLSX не найден — для XLSX используйте обычный импорт.');
@@ -28700,34 +28740,36 @@ const DiskImport = {
   /* XLSX разбирается в воркере: сначала заголовки (роль файла и маппинг),
      затем по команде 'go' — строки пакетами. Главный поток файл не держит. */
   async _xlsxBegin(file) {
-    const src = this._xlsxLibSource() + '\n(' + DiskXlsxWorkerMain.toString() + ')();';
-    const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
-    this._sessions.add(worker);
-    const drop = () => { this._sessions.delete(worker); try { worker.terminate(); } catch (e) { } };
-    const buf = await file.arrayBuffer();
-    return new Promise((resolve, reject) => {
-      worker.onerror = () => { drop(); reject(new Error('Воркер XLSX завершился с ошибкой — используйте обычный импорт.')); };
-      worker.onmessage = e => {
-        const d = e.data || {};
-        if (d.type === 'headers') {
-          resolve({
-            headers: d.rows,
-            drain: onRow => new Promise((res, rej) => {
-              worker.onmessage = ev => {
-                const m = ev.data || {};
-                if (m.type === 'batch') { for (const r of m.rows) onRow(r); }
-                else if (m.type === 'done') { drop(); res(m.total); }
-                else if (m.type === 'error') { drop(); rej(new Error(m.message)); }
-              };
-              worker.onerror = () => { drop(); rej(new Error('Воркер XLSX завершился с ошибкой.')); };
-              worker.postMessage({ type: 'go' });
-            })
-          });
-        } else if (d.type === 'error') { drop(); reject(new Error(d.message)); }
+    const src=this._xlsxLibSource()+'\n('+DiskXlsxWorkerMain.toString()+')();';
+    const url=URL.createObjectURL(new Blob([src],{type:'text/javascript'}));
+    let worker;try{worker=new Worker(url);}catch(e){URL.revokeObjectURL(url);throw e;}
+    worker._ucSourceUrl=url;this._sessions.add(worker);
+    const drop=()=>{this._sessions.delete(worker);try{worker.terminate();}catch(e){}URL.revokeObjectURL(url);};
+    let buf;try{buf=await file.arrayBuffer();}catch(e){drop();throw e;}
+    return new Promise((resolve,reject)=>{
+      worker.onerror=()=>{drop();reject(new Error('Воркер XLSX завершился с ошибкой'));};
+      worker.onmessage=e=>{const d=e.data||{};
+        if(d.type==='headers')resolve({headers:d.rows,
+          drain:(onRow,onChunk)=>new Promise((res,rej)=>{
+            const fail=e=>{drop();rej(e);};
+            worker.onmessage=async ev=>{const m=ev.data||{};try{
+              if(m.type==='batch'){
+                for(const r of m.rows)onRow(r);
+                if(onChunk)await onChunk();
+                UCCancel.check();if(this._abort)throw Object.assign(new Error('Импорт отменён'),{_diskAbort:true});
+                worker.postMessage({type:'go'});
+              }else if(m.type==='done'){drop();res(m.total);}
+              else if(m.type==='error')fail(new Error(m.message));
+            }catch(e){fail(e);}};
+            worker.onerror=()=>fail(new Error('Воркер XLSX завершился с ошибкой'));
+            worker.postMessage({type:'go'});
+          })});
+        else if(d.type==='error'){drop();reject(new Error(d.message));}
       };
-      worker.postMessage({ type: 'load', buf }, [buf]);
+      worker.postMessage({type:'load',buf},[buf]);
     });
   },
+
   pick() {
     if(PyEngine.processingMode()==='sql')return Import.pick();
     const inp = document.createElement('input');
@@ -28805,17 +28847,17 @@ const DiskImport = {
     const mapText = price.mapped.slice(0, 14).map(x => '«' + x.m.src + '» → ' + (x.target || x.customKey)).join(', ');
     const ok = await askConfirm('Загрузка сразу в приложение',
       (S.rows.length ? 'Текущий каталог (' + fmt(S.rows.length) + ' SKU) будет ЗАМЕНЁН прайсом. ' : 'Будет создан новый каталог из прайса. ') +
-      'Файлы не поднимаются в память целиком: прайс потоком пишется в хранилище приложения (IndexedDB), кроссы — только OE-индексом. Экономика не считается — досчитается при экспорте.<br><br>' +
+      'CSV читается потоком; XLSX разбирается в памяти отдельного Worker и передаётся пакетами. Прайс пакетами пишется в IndexedDB, кроссы сохраняются OE-индексом. Итоговый каталог остаётся в памяти приложения. Экономика не считается — досчитается при экспорте.<br><br>' +
       'Прайс: <b>' + esc(price.file.name) + '</b><br>' + (cross ? 'Кроссы: <b>' + esc(cross.file.name) + '</b><br>' : '') +
       'Колонки прайса: ' + esc(mapText) + (price.mapped.length > 14 ? '…' : ''),
       'Загрузить в приложение', true);
     if (!ok) return;
-    const eachRow = async (info, onRow, onProgress) => {
-      if (info.session) return info.session.drain(onRow);
+    const eachRow = async (info, onRow, onProgress, onChunk) => {
+      if (info.session) return info.session.drain(onRow,onChunk);
       /* v12.9.95 (фикс): CsvStream отдаёт и строку заголовков — она не данные.
          До фикса заголовок прайса попадал в каталог лишней «SKU». */
       let first = true;
-      return CsvStream.rows(info.file, r => { if (first) { first = false; return; } onRow(r); }, { onProgress });
+      return CsvStream.rows(info.file, r => { if (first) { first = false; return; } onRow(r); }, { onProgress, onChunk });
     };
     await withProgress('Загрузка сразу в приложение', 'поток → IndexedDB', async prog => {
       const stageCount = await db.products_stage.count().catch(() => 0);
@@ -28914,7 +28956,7 @@ const DiskImport = {
         built.p.id = id;
         batch.set(id, built.p);
         if (batch.size >= 2000) flush();
-      }, (n, t) => prog('прайс: ' + Math.round(100 * n / Math.max(t, 1)) + '% · записано SKU ' + fmt(idByKey.size)));
+      }, (n, t) => prog('прайс: ' + Math.round(100 * n / Math.max(t, 1)) + '% · записано SKU ' + fmt(idByKey.size)),async()=>{flush();await writeChain;});
       flush();
       await writeChain;
       const unique = idByKey.size;
@@ -29579,9 +29621,8 @@ const BrowserImportSources = {
       const states=ids.map(stream);await Promise.all(states.map(advance));
       let records=[],pages=[],pending=null,emitted=0;
       const flush=async()=>{if(pages.length){this.check();await table.bulkAdd(pages);pages=[];}};
-      const emit=async item=>{
+      const emit=item=>{
         records.push(item);if(records.length===this.BATCH){pages.push({run:destination,first:records[0].key,records});records=[];}
-        if(pages.length>=8)await flush();
       };
       for(;;){
         this.check();let selected=null;
@@ -29589,30 +29630,57 @@ const BrowserImportSources = {
         for(const state of states)if(!state.done&&(!selected||state.records[state.pos].key<selected.records[selected.pos].key))selected=state;
         if(!selected)break;
         const item=selected.records[selected.pos++];
-        if(pending&&pending.key!==item.key){await emit(pending);pending=null;}
-        pending=merge(pending,item);await advance(selected);
+        if(pending&&pending.key!==item.key){emit(pending);pending=null;}
+        pending=merge(pending,item);
+        // Keep the per-key hot loop synchronous. Awaiting even an already
+        // resolved async function for every key costs millions of Dexie-zone
+        // promise transitions; only page boundaries require I/O.
+        if(pages.length>=8)await flush();
+        if(selected.pos===selected.records.length)await advance(selected);
         if(++emitted%16000===0)progress('слияние индекса: '+emitted+' ключей текущей группы');
       }
-      if(pending)await emit(pending);
+      if(pending)emit(pending);
       if(records.length)pages.push({run:destination,first:records[0].key,records});
       await flush();
     };
     try{
-      let runs=[];
+      let runs=[],stagedPages=[],sortBuffer=[],sortBytes=0;
+      const flushStaged=async()=>{if(stagedPages.length){this.check();await table.bulkAdd(stagedPages);stagedPages=[];}};
+      // Sort larger bounded runs before writing leaves. Sorting each source
+      // page separately produced ~1000 runs and an unnecessary merge pass.
+      const flushRun=async()=>{
+        if(!sortBuffer.length)return;
+        const records=compact(sortBuffer);sortBuffer=[];sortBytes=0;
+        const id=nextRun();runs.push(id);
+        for(let off=0;off<records.length;off+=this.BATCH){
+          const part=records.slice(off,off+this.BATCH);
+          stagedPages.push({run:id,first:part[0].key,records:part});
+          if(stagedPages.length>=16)await flushStaged();
+        }
+        await flushStaged();
+      };
       for await(const batch of batches){
         this.check();
-        for(let off=0;off<batch.length;off+=this.BATCH){
-          const records=compact(batch.slice(off,off+this.BATCH));if(!records.length)continue;
-          const id=nextRun();runs.push(id);await table.add({run:id,first:records[0].key,records});
+        for(const item of batch){
+          const bytes=128+2*(item.key.length+(item.brand?.length||0)+(item.signature?.length||0));
+          if(sortBuffer.length&&(sortBuffer.length>=this.BATCH*16||sortBytes+bytes>8*1048576))await flushRun();
+          sortBuffer.push(item);sortBytes+=bytes;
         }
       }
+      await flushRun();
       let pass=0;
       while(runs.length){
         const next=[];progress('слияние индекса: проход '+(++pass)+', серий '+runs.length);
         for(let off=0;off<runs.length;off+=16){
           const group=runs.slice(off,off+16),destination=runs.length<=16?run:nextRun();
+          progress('слияние индекса: проход '+pass+', группа '+(1+Math.floor(off/16))+' из '+Math.ceil(runs.length/16));
           await combine(group,destination);next.push(destination);
-          for(const id of group){await table.where('run').equals(id).delete();temporary.delete(id);}
+          // Commit deletion of consumed runs once per merge group, not once
+          // per leaf/run. Publish tracking changes only after commit succeeds.
+          await this.database().transaction('rw',table,async()=>{
+            for(const id of group)await table.where('run').equals(id).delete();
+          });
+          for(const id of group)temporary.delete(id);
         }
         if(runs.length<=16)break;runs=next;
       }
@@ -29752,7 +29820,7 @@ function BrowserSourceXlsxWorker() {
   let ws=null,range=null,next=0;
   self.onmessage=e=>{try{
     if(e.data.type==='init'){
-      const wb=XLSX.read(new Uint8Array(e.data.buf),{type:'array',cellDates:true});
+      const wb=XLSX.read(new Uint8Array(e.data.buf),{type:'array',cellDates:true,sheets:0});
       ws=wb.Sheets[wb.SheetNames[0]];range=ws?.['!ref']?XLSX.utils.decode_range(ws['!ref']):null;next=range?range.s.r:0;
       self.postMessage({ready:true});
     }else{
@@ -35706,31 +35774,27 @@ const OzonExport = {
       return s;
     };
 
-    const parts = [];
-    if (!Exp._te) Exp._te = new TextEncoder();
-    if (!isCp1251) {
-      parts.push(new Uint8Array([0xEF, 0xBB, 0xBF])); // UTF-8 BOM для Excel
-    }
-
-    // 4 строки официальных заголовков
-    const headerLines = this.HEADERS.map(r => r.map(csvEscape).join(delim)).join('\r\n') + '\r\n';
-    parts.push(isCp1251 ? encodeCp1251Strict(headerLines) : Exp._te.encode(headerLines));
-
-    const CHUNK = 3000;
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const end = Math.min(i + CHUNK, rows.length);
-      if (prog) prog(`Ozon CSV: строки ${fmt(i + 1)}–${fmt(end)} из ${fmt(rows.length)}…`);
-      const buf = [];
-      for (let j = i; j < end; j++) {
-        const ozRow = this.rowToOzon(rows[j], j, opts);
-        buf.push(ozRow.map(csvEscape).join(delim));
+    const sink=await BrowserExportSpool.create();
+    if(!sink.disk&&prog)prog('Временное файловое хранилище недоступно: CSV остаётся в памяти');
+    try{
+      if(!Exp._te)Exp._te=new TextEncoder();
+      const encode=text=>isCp1251?encodeCp1251Strict(text):Exp._te.encode(text);
+      if(!isCp1251)await sink.write([new Uint8Array([0xEF,0xBB,0xBF])]);
+      const headerLines=this.HEADERS.map(r=>r.map(csvEscape).join(delim)).join('\r\n')+'\r\n';
+      await sink.write([encode(headerLines)]);
+      let block='';
+      for(let j=0;j<rows.length;j++){
+        block+=this.rowToOzon(rows[j],j,opts).map(csvEscape).join(delim)+'\r\n';
+        if(block.length>=262144||j%1000===999||j===rows.length-1){
+          if(typeof UCCancel!=='undefined')UCCancel.check();
+          await sink.write([encode(block)]);block='';
+          if(prog)prog(`Ozon CSV: строки ${fmt(j+1)} из ${fmt(rows.length)}`);
+          await Exp._yield();
+        }
       }
-      const chunkText = buf.join('\r\n') + '\r\n';
-      parts.push(isCp1251 ? encodeCp1251Strict(chunkText) : Exp._te.encode(chunkText));
-      await Exp._yield();
-    }
+      return await sink.finish(isCp1251?'text/csv;charset=windows-1251':'text/csv;charset=utf-8');
+    }catch(e){await sink.abort();throw e;}
 
-    return new Blob(parts, { type: isCp1251 ? 'text/csv;charset=windows-1251' : 'text/csv;charset=utf-8' });
   },
 
   /* audit.2: CSV остаётся текстовым, а в XLSX строго числовые поля должны быть
@@ -40921,20 +40985,19 @@ const OzonReference = {
   async reportBlob(rows, prog) {
     if (!window.fflate) throw new Error('Встроенный ZIP-модуль недоступен.');
     if (rows.length > 1048575) throw new Error('В XLSX помещается не более 1 048 575 SKU на лист. Выберите часть каталога.');
-    const chunks=[]; let resolveZip, rejectZip;
-    const done=new Promise((resolve,reject)=>{resolveZip=resolve;rejectZip=reject;});
-    const zip=new fflate.Zip((err,data,final)=>{if(err)return rejectZip(err);chunks.push(data);if(final)resolveZip();});
-    const add=(name,text)=>{const f=new fflate.AsyncZipDeflate(name,{level:6});zip.add(f);f.push(fflate.strToU8(text),true);};
-    const file=new fflate.AsyncZipDeflate('xl/worksheets/sheet1.xml',{level:6}); zip.add(file);
-    let buf='';
-    const write=text=>{buf+=text;if(buf.length>1048576){file.push(fflate.strToU8(buf),false);buf='';}};
+    if(rows.length>1048575)throw new Error('Превышен лимит строк XLSX');
+    const archive=await BrowserExportZip.create(prog);
+    try{
+    const add=(name,text)=>archive.add(name,text);
+    const file=archive.sheet('xl/worksheets/sheet1.xml');
+    const write=text=>file.w(text);
     const header=['Артикул','Бренд','Название','Категория Ozon','Тип Ozon','description_category_id','type_id','Источник','Статус','Примечание','Внутренняя категория','Вид внутренний','ТН ВЭД','OE','Путь дерева','Ревизия снимка','Сохранённая категория Ozon','Сохранённый тип Ozon','Сохранённый ID категории','Сохранённый ID типа','Категория по словарю CSV'];
     write(Exp._sheetOpen(false));
     write('<cols>'+[20,18,42,32,36,23,18,18,15,65,30,28,20,30,56,24,32,36,23,18,34].map((w,i)=>`<col min="${i+1}" max="${i+1}" width="${w}" customWidth="1"/>`).join('')+'</cols><sheetData>');
     write('<row r="1">'+header.map((v,i)=>Exp._cx(COL_LET(i),1,1,v)).join('')+'</row>');
     const sourceName={keyword:'по названию',manual:'вручную',import:'из файла',auto:'OE/применимость'};
-    for(let start=0;start<rows.length;start+=4000){
-      const end=Math.min(start+4000,rows.length), parts=[];
+    for(let start=0;start<rows.length;start+=100){
+      const end=Math.min(start+100,rows.length), parts=[];
       for(let i=start;i<end;i++){
         const p=rows[i], d=this.exportPair(p), n=i+2;
         const values=[p.article || '',p.brand || '',p.name || '',d.category,d.type,d.catId,d.typeId,
@@ -40945,16 +41008,17 @@ const OzonReference = {
           p.ozon_description_category_id || '',p.ozon_type_id || '',CategoryKindAuto.reference(p)];
         parts.push(`<row r="${n}">`,...values.map((v,j)=>Exp._cx(COL_LET(j),n,0,String(v == null ? '' : v))),'</row>');
       }
-      write(parts.join('')); if(prog)prog(`Строки ${fmt(end)} из ${fmt(rows.length)}…`); await Exp._yield();
+      write(parts.join('')); await archive.flush(); if(prog)prog(`Строки ${fmt(end)} из ${fmt(rows.length)}…`); await Exp._yield();
     }
     write(`</sheetData><autoFilter ref="A1:U${rows.length+1}"/></worksheet>`);
-    file.push(fflate.strToU8(buf),true);
+    file.end();await archive.flush();
     add('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
     add('_rels/.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
     add('xl/workbook.xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Категории и типы" sheetId="1" r:id="rId1"/></sheets></workbook>');
     add('xl/_rels/workbook.xml.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
-    add('xl/styles.xml',Exp._stylesXml([])); zip.end(); await done;
-    return new Blob(chunks,{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    add('xl/styles.xml',Exp._stylesXml([]));
+    return await archive.finish();
+    }catch(e){await archive.abort();throw e;}
   },
   async report() {
     const opts=OzonExport.getViewOptions('xlsx'), rows=OzonExport.getRows(opts.scope);
@@ -42190,6 +42254,15 @@ const DataOnlyExport = {
     const v=c.custom?(p.custom||{})[c.key]:p[c.key];
     return v==null?'':typeof v==='object'?JSON.stringify(v):v;
   },
+  xlsxCell(column,row,value){
+    const ref=COL_LET(column)+row;
+    if(typeof value==='boolean')return `<c r="${ref}" t="b"><v>${value?1:0}</v></c>`;
+    if(typeof value==='number')return Number.isFinite(value)?`<c r="${ref}"><v>${value}</v></c>`:`<c r="${ref}" t="e"><v>${Number.isNaN(value)?'#NUM!':'#DIV/0!'}</v></c>`;
+    // Inline strings are not formulas. Do not apply the CSV apostrophe policy
+    // to values-only XLSX, which must retain original text values.
+    const text=String(value??'').replace(/_x[0-9a-f]{4}_/gi,token=>'_x005F_'+token.slice(1)).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffe\uffff]/g,ch=>'_x'+ch.charCodeAt(0).toString(16).padStart(4,'0')+'_');
+    return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${Exp._xE(text)}</t></is></c>`;
+  },
   async run() {
     const button=$('#dataExportRun');if(button.disabled)return;button.disabled=true;
     let handle=null,sink=null;
@@ -42213,7 +42286,7 @@ const DataOnlyExport = {
           if(handle&&r.body){
             sink=await handle.createWritable();await r.body.pipeTo(sink);sink=null;return;
           }
-          blob=await r.blob();
+          blob=r.body?.getReader?await BrowserExportSpool.fromResponse(r):await r.blob();
         }finally{clearTimeout(timer);}
       }else{
         const rows=S.rows,version=S.catalogVersion,custom=JSON.stringify(S.custom);
@@ -42235,29 +42308,51 @@ const DataOnlyExport = {
         }
         if(format==='csv'){
           const quote=v=>'"'+safeCsvText(v).replace(/"/g,'""')+'"';
-          const chunks=[];
-          if(handle)sink=await handle.createWritable();
-          const emit=async text=>{if(sink)await sink.write(text);else chunks.push(text);};
+          let spool=null;
+          if(handle)sink=await handle.createWritable();else spool=await BrowserExportSpool.create();
+          try{
+          const emit=async text=>{if(sink)await sink.write(text);else await spool.write([new Blob([text])]);};
           await emit('\ufeff'+headers.map(quote).join(';')+'\r\n');
-          for(let i=0;i<rows.length;i+=1000){
-            await emit(rows.slice(i,i+1000).map(p=>cols.map(c=>quote(this.value(p,c))).join(';')).join('\r\n')+'\r\n');
-            if(typeof Prog!=='undefined'){Prog.msg('CSV: '+Math.min(i+1000,rows.length)+' из '+rows.length+' строк');Prog.step(10+80*Math.min(i+1000,rows.length)/rows.length);}
-            if(typeof UCCancel!=='undefined')UCCancel.check();
-            await new Promise(resolve=>setTimeout(resolve,0));validate();
+          let block='';
+          for(let i=0;i<rows.length;i++){
+            block+=cols.map(c=>quote(this.value(rows[i],c))).join(';')+'\r\n';
+            if(block.length>=262144||i%1000===999||i===rows.length-1){
+              await emit(block);block='';
+              if(typeof Prog!=='undefined'){Prog.msg('CSV: '+(i+1)+' из '+rows.length+' строк');Prog.step(10+80*(i+1)/rows.length);}
+              if(typeof UCCancel!=='undefined')UCCancel.check();
+              await new Promise(resolve=>setTimeout(resolve,0));validate();
+            }
           }
           if(sink){await sink.close();sink=null;return;}
-          blob=new Blob(chunks,{type:'text/csv;charset=utf-8'});
+          blob=await spool.finish('text/csv;charset=utf-8');
+          }catch(e){if(spool)await spool.abort();throw e;}
         }else{
           if(cols.length>16384||rows.length>1048575)throw new Error('Превышен лимит XLSX; выберите CSV');
-          const ws=XLSX.utils.aoa_to_sheet([headers]);
-          for(let i=0;i<rows.length;i+=1000){
-            XLSX.utils.sheet_add_aoa(ws,rows.slice(i,i+1000).map(p=>cols.map(c=>this.value(p,c))),{origin:-1});
-            if(typeof Prog!=='undefined'){Prog.msg('XLSX: '+Math.min(i+1000,rows.length)+' из '+rows.length+' строк');Prog.step(10+70*Math.min(i+1000,rows.length)/rows.length);}
-            if(typeof UCCancel!=='undefined')UCCancel.check();
-            await new Promise(resolve=>setTimeout(resolve,0));validate();
-          }
-          const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Данные');
-          blob=new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+          const archive=await BrowserExportZip.create(text=>{if(typeof Prog!=='undefined')Prog.msg(text);});
+          try{
+            const file=archive.sheet('xl/worksheets/sheet1.xml');
+            file.w(Exp._sheetOpen(false)+'<sheetData>');
+            file.w('<row r="1">'+headers.map((v,j)=>this.xlsxCell(j,1,v)).join('')+'</row>');
+            for(let i=0;i<rows.length;i+=100){
+              for(let j=i;j<Math.min(i+100,rows.length);j++){
+                const n=j+2;
+                file.w(`<row r="${n}">`);
+                for(let k=0;k<cols.length;k++){file.w(this.xlsxCell(k,n,this.value(rows[j],cols[k])));if(archive.needsFlush)await archive.flush();}
+                file.w('</row>');
+              }
+              await archive.flush();
+              if(typeof Prog!=='undefined'){Prog.msg('XLSX: '+Math.min(i+100,rows.length)+' из '+rows.length+' строк');Prog.step(10+70*Math.min(i+100,rows.length)/rows.length);}
+              await Exp._yield();validate();
+            }
+            file.w('</sheetData></worksheet>');file.end();
+            archive.add('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
+            archive.add('_rels/.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+            archive.add('xl/workbook.xml','<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Данные" sheetId="1" r:id="rId1"/></sheets></workbook>');
+            archive.add('xl/_rels/workbook.xml.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+            archive.add('xl/styles.xml',Exp._stylesXml([]));
+            blob=await archive.finish();
+          }catch(e){await archive.abort();throw e;}
+
         }
       }
       if(handle){sink=await handle.createWritable();await sink.write(blob);await sink.close();sink=null;return;}
@@ -42824,6 +42919,7 @@ const Exp = {
     return '';
   },
   async streamXlsx(cat, rows, prog) {
+    if(rows.length>1048575||cat.length>16384)throw new Error('Превышен лимит XLSX; разделите выгрузку или используйте CSV');
     if (!window.fflate) throw new Error('Библиотека fflate не загрузилась (нет сети?) — экспорт XLSX недоступен, используйте CSV');
     const useF = $('#expFormulas') ? $('#expFormulas').classList.contains('on') : true;
     const protect = $('#expProtect') ? $('#expProtect').classList.contains('on') : true;
@@ -42991,20 +43087,10 @@ const Exp = {
       if (ref.tnved) ce('tnved', `ISNUMBER(SEARCH("АВТО[ТН ВЭД]",$${mainRef.autoFillNote}2))`, dYellow);
     }
 
-    /* ---- zip-поток ---- */
-    const chunks = [];
-    let resolveZip, rejectZip;
-    const zipDone = new Promise((res, rej) => { resolveZip = res; rejectZip = rej; });
-    const zip = new fflate.Zip((err, dat, final) => { if (err) return rejectZip(err); chunks.push(dat); if (final) resolveZip(); });
-    const addStr = (name, str) => { const f = new fflate.AsyncZipDeflate(name, { level: 6 }); zip.add(f); f.push(fflate.strToU8(str), true); };
-    const sheetW = name => {
-      const f = new fflate.AsyncZipDeflate(name, { level: 6 }); zip.add(f); let buf = '';
-      return {
-        w(s) { buf += s; if (buf.length > 1048576) { f.push(fflate.strToU8(buf), false); buf = ''; } },
-        end() { if (buf) { f.push(fflate.strToU8(buf), true); buf = ''; } else f.push(new Uint8Array(0), true); }
-      };
-    };
-
+    /* ---- bounded, sequential ZIP entries with disk-backed output ---- */
+    const archive=await BrowserExportZip.create(prog);
+    try{
+    const addStr=(name,str)=>archive.add(name,str),sheetW=name=>archive.sheet(name);
     /* ---- лист 1: Юнит-экономика (потоково, чанками строк) ---- */
     const s1 = sheetW('xl/worksheets/sheet1.xml');
     s1.w(Exp._sheetOpen(true));
@@ -43012,14 +43098,7 @@ const Exp = {
     s1.w('<sheetData>');
     s1.w('<row r="1" ht="24">' + mainCat.map((c, i) => cx(COL_LET(i), 1, 1, c.n)).join('') + '</row>');
     /* Лист вводов: габариты — свёрнутая группа (outlineLevel), как в калькуляторе Ozon. */
-    const s2 = sheetW('xl/worksheets/sheet' + (sheetNames.indexOf('Вводы и ставки') + 1) + '.xml');
-    const dimIdx = ['weight','length','width','height'].map(k => inCat.findIndex(c => c.k === k)).filter(i => i >= 0);
-    const dimGroup = dimIdx.length > 1 && Math.max(...dimIdx) - Math.min(...dimIdx) === dimIdx.length - 1 ? { from: Math.min(...dimIdx), to: Math.max(...dimIdx) } : null;
-    s2.w(Exp._sheetOpen(true).replace('<sheetViews>', '<sheetPr><outlinePr summaryBelow="0"/></sheetPr><sheetViews>'));
-    s2.w('<cols>' + inCat.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.w || 12}" customWidth="1"${dimGroup && i >= dimGroup.from && i <= dimGroup.to ? ' outlineLevel="1" hidden="1"' : ''}/>`).join('') + '</cols>');
-    s2.w('<sheetData>');
-    s2.w('<row r="1" ht="24">' + inCat.map((c, i) => cx(COL_LET(i), 1, 1, c.n)).join('') + '</row>');
-    const CH = 4000, nC = mainCat.length;
+    const CH = 100, nC = mainCat.length;
     /* Одна ячейка любого из двух листов: значение/формула считаются один раз,
        буква колонки зависит от листа (у вводов — межлистовая ссылка в ref). */
     const cellFor = (p, R, c, letter) => {
@@ -43045,17 +43124,13 @@ const Exp = {
     };
     for (let i = 0; i < rows.length; i += CH) {
       const end = Math.min(i + CH, rows.length);
-      const parts = [], partsIn = [];
       for (let j = i; j < end; j++) {
         const p = rows[j], R = j + 2;
-        parts.push(`<row r="${R}">`);
-        for (let cix = 0; cix < mainCat.length; cix++) parts.push(cellFor(p, R, mainCat[cix], mainCat[cix].L));
-        parts.push('</row>');
-        partsIn.push(`<row r="${R}">`);
-        for (let cix = 0; cix < inCat.length; cix++) { const c = inCat[cix]; partsIn.push(cellFor(p, R, c, c.Lin || c.L)); }
-        partsIn.push('</row>');
+        s1.w(`<row r="${R}">`);
+        for(const c of mainCat){s1.w(cellFor(p,R,c,c.L));if(archive.needsFlush)await archive.flush();}
+        s1.w('</row>');
       }
-      s1.w(parts.join('')); s2.w(partsIn.join(''));
+      await archive.flush();
       if (prog) prog(`Юнит-экономика: строки ${fmt(end)} из ${fmt(rows.length)}`);
       Prog.step(6 + (end / rows.length) * 62);
       await Exp._yield();
@@ -43066,10 +43141,29 @@ const Exp = {
     if (protect) s1.w('<sheetProtection sheet="1" objects="1" scenarios="1" formatColumns="0" insertRows="0" deleteRows="0" sort="1" autoFilter="1"/>');
     s1.w(`<autoFilter ref="A1:${COL_LET(nC - 1)}${last}"/>`);
     cfs.forEach(cf => s1.w(`<conditionalFormatting sqref="${cf.sqref}">` + cf.rules.join('') + '</conditionalFormatting>'));
-    s1.w('</worksheet>'); s1.end();
+    s1.w('</worksheet>'); s1.end();await archive.flush();
+    const s2 = sheetW('xl/worksheets/sheet' + (sheetNames.indexOf('Вводы и ставки') + 1) + '.xml');
+    const dimIdx = ['weight','length','width','height'].map(k => inCat.findIndex(c => c.k === k)).filter(i => i >= 0);
+    const dimGroup = dimIdx.length > 1 && Math.max(...dimIdx) - Math.min(...dimIdx) === dimIdx.length - 1 ? { from: Math.min(...dimIdx), to: Math.max(...dimIdx) } : null;
+    s2.w(Exp._sheetOpen(true).replace('<sheetViews>', '<sheetPr><outlinePr summaryBelow="0"/></sheetPr><sheetViews>'));
+    s2.w('<cols>' + inCat.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.w || 12}" customWidth="1"${dimGroup && i >= dimGroup.from && i <= dimGroup.to ? ' outlineLevel="1" hidden="1"' : ''}/>`).join('') + '</cols>');
+    s2.w('<sheetData>');
+    s2.w('<row r="1" ht="24">' + inCat.map((c, i) => cx(COL_LET(i), 1, 1, c.n)).join('') + '</row>');
+    for(let i=0;i<rows.length;i+=CH){
+      const end=Math.min(i+CH,rows.length);
+      for(let j=i;j<end;j++){
+        const p=rows[j],R=j+2;
+        s2.w(`<row r="${R}">`);
+        for(const c of inCat){s2.w(cellFor(p,R,c,c.Lin||c.L));if(archive.needsFlush)await archive.flush();}
+        s2.w('</row>');
+      }
+      await archive.flush();
+      if(prog)prog(`Вводы и ставки: строки ${fmt(end)} из ${fmt(rows.length)}`);
+      await Exp._yield();
+    }
     s2.w('</sheetData>');
     if (inCat.length) s2.w(`<autoFilter ref="A1:${COL_LET(inCat.length - 1)}${last}"/>`);
-    s2.w('</worksheet>'); s2.end();
+    s2.w('</worksheet>'); s2.end();await archive.flush();
     if (prog) prog('Сводные листы: Категории, Тарифы, Сводка…'); Prog.step(72);
     await Exp._yield();
     /* ---- мелкие сводные листы (значения + формулы, одна книга) ---- */
@@ -43335,9 +43429,8 @@ const Exp = {
           (list.length > 6 ? '…' : '') + '. В этих колонках записаны значения из расчёта — включите колонки в профиль выгрузки, чтобы получить эти частичные формулы; тарифы и налог после изменения цены пересчитываются только в приложении.');
       } catch (e) { }
     }
-    zip.end();
-    await zipDone;
-    return new Blob(chunks, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return await archive.finish();
+    }catch(e){await archive.abort();throw e;}
   },
 
   /* Кодирование строки в Windows-1251.
@@ -43369,8 +43462,8 @@ const Exp = {
     return out.slice(0, o);
   },
   /* CSV: чанкованная сериализация без блокировки UI и БЕЗ склейки в одну строку.
-     Blob собирается из массива частей (строки utf-8 / Uint8Array cp1251), поэтому
-     пик памяти ≈ размер файла + один чанк, а не ×2 от join(). */
+     При доступном OPFS байты сбрасываются во временный файл; без OPFS
+     Blob fallback сохраняет весь файл в памяти. Один широкий ряд временно целый. */
   async csvAsync(cat, rows, prog, sliceFrom, sliceTo, options={}) {
     const delim = $('#expDelim').value, enc = options.utf8?'utf8':$('#expEnc').value;
     /* v10.4: RU-Excel при разделителе ';' ждёт запятую в числах — иначе откроются текстом. */
@@ -43393,27 +43486,24 @@ const Exp = {
     const from = sliceFrom || 0, to = sliceTo === undefined ? rows.length : sliceTo;
     /* КЛЮЧ К ПАМЯТИ: каждый чанк СРАЗУ кодируется в байты (Uint8Array) и строка-чанк
        освобождается. Иначе 580k строк жили бы как JS-строки UTF-16 (~1.2 ГБ) плюс
-       закодированная копия — это и был Out of Memory. Пик = размер файла + один чанк. */
+       закодированная копия. Теперь байты уходят в spool; размер всего файла
+       остаётся фактором памяти только в совместимом Blob fallback. */
     if (!Exp._te) Exp._te = new TextEncoder();
-    const parts = [];
-    if (from === 0 && enc !== 'cp1251') parts.push(new Uint8Array([0xEF, 0xBB, 0xBF])); /* UTF-8 BOM для Excel */
-    const head = cat.map(c => esc2(c.n)).join(delim) + '\r\n';
-    parts.push(enc === 'cp1251' ? encodeCp1251Strict(head) : Exp._te.encode(head));
-    const CHUNK = 20000;
-    for (let i = from; i < to; i += CHUNK) {
-      const end = Math.min(i + CHUNK, to);
-      if (prog) prog(`CSV: строки ${fmt(i + 1)}–${fmt(end)} из ${fmt(to - from)}`);
-      Prog.step(10 + ((i - from) / Math.max(to - from, 1)) * 75);
-      const buf = [];
-      for (let j = i; j < end; j++) {
-        const p = rows[j];
-        buf.push(cat.map(c => esc2(csvNum(cellVal(c, p)))).join(delim));
+    const sink=await BrowserExportSpool.create();
+    if(!sink.disk&&prog)prog('Временное файловое хранилище недоступно: CSV остаётся в памяти');
+    try{
+      const encode=text=>enc==='cp1251'?encodeCp1251Strict(text):Exp._te.encode(text);
+      if(from===0&&enc!=='cp1251')await sink.write([new Uint8Array([0xEF,0xBB,0xBF])]);
+      await sink.write([encode(cat.map(c=>esc2(c.n)).join(delim)+'\r\n')]);
+      let block='',count=0;
+      const flush=async()=>{if(!block)return;if(typeof UCCancel!=='undefined')UCCancel.check();await sink.write([encode(block)]);block='';if(prog)prog(`CSV: ${fmt(count)} из ${fmt(to-from)} строк`);Prog.step(10+count/Math.max(to-from,1)*75);await Exp._yield();};
+      for(let j=from;j<to;j++){
+        block+=cat.map(c=>esc2(csvNum(cellVal(c,rows[j])))).join(delim)+'\r\n';count++;
+        if(block.length>=262144||count%1000===0)await flush();
       }
-      const block = buf.join('\r\n') + '\r\n';
-      parts.push(enc === 'cp1251' ? encodeCp1251Strict(block) : Exp._te.encode(block));
-      await Exp._yield();
-    }
-    return new Blob(parts, { type: enc === 'cp1251' ? 'text/csv;charset=windows-1251' : 'text/csv;charset=utf-8' });
+      await flush();return await sink.finish(enc==='cp1251'?'text/csv;charset=windows-1251':'text/csv;charset=utf-8');
+    }catch(e){await sink.abort();throw e;}
+
   },
 
   /* XLSX: асинхронное заполнение листа строками чанками по 1000.

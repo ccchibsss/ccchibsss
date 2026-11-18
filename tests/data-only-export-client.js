@@ -11,6 +11,10 @@ const c={STD:[{k:'article',n:'Артикул'},{k:'name',n:'Название'},{
  Exp:{download:b=>{blob=b}},
  URL:{createObjectURL:b=>{blob=b;return 'blob:test'},revokeObjectURL(){}},document:{createElement:()=>({click(){},remove(){}}),body:{appendChild(){}}},
  XLSX:{utils:{aoa_to_sheet:table=>{assert(!table[0].includes('netProfit'));return {}},sheet_add_aoa:(ws,table)=>{assert.equal(table[0][0],'00123')},book_new:()=>({}),book_append_sheet(){}},write:()=>new Uint8Array([1])}};
+// Isolated UI contract stubs; real ZIP/OPFS values are checked in Chromium.
+c.BrowserExportSpool={create:async()=>{let parts=[];return {write:async p=>parts.push(...p),finish:async type=>new Blob(parts,{type}),abort:async()=>{parts=[]}}}};
+c.BrowserExportZip={create:async()=>({sheet:()=>({w(){},end(){}}),flush:async()=>{},add(){},finish:async()=>new Blob(['xlsx']),abort:async()=>{}})};
+c.COL_LET=i=>String.fromCharCode(65+i);c.Exp._cx=()=>'';c.Exp._xE=String;c.Exp._sheetOpen=()=>'';c.Exp._stylesXml=()=>'';c.Exp._yield=async()=>{};
 vm.createContext(c);vm.runInContext(source+';this.E=DataOnlyExport;',c);
 (async()=>{
  await c.E.run();const csv=await blob.text();assert(csv.includes('00123'));assert(csv.includes("'=CMD()"));assert(csv.includes('OE;1'));assert(!csv.includes('netProfit'));assert(!csv.includes('999'));assert.equal(saves,0);assert(!button.disabled);

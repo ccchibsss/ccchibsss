@@ -5,6 +5,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert'),h=fs.readFileSy
  Prog:{step(){}},UCCancel:{check(){}},safeCsvText:String,exportCatalogCellValue:(c,p)=>c.src?c.src(p):p[c.k],
  $:id=>({value:id==='#expDelim'?';':'cp1251'}),encodeCp1251Strict:()=>{throw Error('must use UTF8')},
  PyEngine:{processingMode:()=> 'browser'},S:{settings:{}},storageErrorText:String};vm.createContext(ctx);
+ vm.runInContext(h.slice(h.indexOf('const BrowserExportSpool = {'),h.indexOf('const PyEngine = {')),ctx);
  const overflow=h.indexOf('  async xlsxTextOverflow('),overflowEnd=h.indexOf('  async streamXlsx(',overflow);
  const csv=h.indexOf('  async csvAsync('),csvEnd=h.indexOf('\n  /* XLSX:',csv);
  vm.runInContext('this.Exp={_yield:async()=>{},'+h.slice(overflow,overflowEnd)+h.slice(csv,csvEnd)+'};',ctx);
