@@ -10,5 +10,11 @@ vm.runInContext(html.slice(html.indexOf('const BrowserExportSpool = {'),html.ind
  writes=[];const failed=await c.spool.create();quota=true;await assert.rejects(()=>failed.write([new Blob(['data'])]),/quota/);await failed.abort();assert.equal(aborted,1);quota=false;
  c.navigator.storage.getDirectory=undefined;const memory=await c.spool.create();assert(!memory.disk);await memory.write([new Blob(['portable'])]);const blob=await memory.finish('application/test');assert.equal(await blob.text(),'portable');assert.equal(blob.type,'application/test');
  const cancelled=await c.spool.create();await cancelled.write([new Blob(['discard'])]);await cancelled.abort();assert.equal((await cancelled.finish()).size,0);
+ // Network downloads use a backpressured reader and release it on success/failure.
+ let readerCancelled=0,released=0,next=0;
+ const response={headers:{get:()=> 'text/test'},body:{getReader:()=>({read:async()=>++next===1?{value:new Uint8Array([65,66]),done:false}:{done:true},cancel:async()=>readerCancelled++,releaseLock:()=>released++})}};
+ const network=await c.spool.fromResponse(response);assert.equal(await network.text(),'AB');assert.equal(released,1);assert.equal(readerCancelled,0);
+ const original=c.spool.create;c.spool.create=async()=>({write:async()=>{throw Error('network disk full')},abort:async()=>aborted++});next=0;
+ await assert.rejects(()=>c.spool.fromResponse(response),/network disk full/);assert.equal(readerCancelled,1);assert.equal(released,2);c.spool.create=original;
  console.log('OK: disk-spooled export flush/close, expired-temp cleanup, no early deletion, quota failure abort, portable compressed Blob fallback');
 })().catch(e=>{console.error(e);process.exitCode=1});

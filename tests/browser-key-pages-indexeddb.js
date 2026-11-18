@@ -50,10 +50,15 @@ const B=c.B,plain=v=>JSON.parse(JSON.stringify(v));
  await B.clearRun('random');await B.clearRun('other');assert.equal(await d.keyPages.count(),0);
  // Old complete row-key indexes remain readable while new ones use pages.
  await d.runs.add({id:'old',source:'legacy',complete:true});await d.keys.add({run:'old',key:'A',conflict:true});assert((await B.conflicts('old',[{key:'A'}],r=>r)).has('A'));await B.clearRun('old');
- // Bulk external merge: >256 leaves forces three stable merge passes.
+ // Bulk external merge: bounded multi-page sorted runs, stable merge passes.
  B.BATCH=37;
  async function* chunks(){for(let off=0;off<input.length;off+=271)yield input.slice(off,off+271);}
+ const sortingRuns=new Set(),trackRun=(key,obj)=>{if(obj.run.startsWith('bulk:sort:'))sortingRuns.add(obj.run)};
+ d.keyPages.hook('creating',trackRun);
  await B.buildKeyPages('bulk',chunks());
+ d.keyPages.hook('creating').unsubscribe(trackRun);
+ // Runs contain up to 16 leaves instead of one run per source page.
+ assert(sortingRuns.size<100,'external sort regressed to one run per leaf');
  const built=await B.lookupKeyPages('bulk',[...expected.keys(),'NONE']);assert.deepEqual(plain([...built].sort()),plain([...expected].sort()));
  const dense=await d.keyPages.where('run').equals('bulk').toArray();assert.equal(dense.length,Math.ceil(expected.size/B.BATCH));
  assert(dense.every(p=>p.records.length<=B.BATCH));assert.equal(await d.keyPages.where('run').startsWith('bulk:sort:').count(),0);
@@ -66,6 +71,16 @@ const B=c.B,plain=v=>JSON.parse(JSON.stringify(v));
  assert.equal(await d.keyPages.where('run').startsWith('bulk-fail').count(),0);
  await assert.rejects(()=>B.buildKeyPages('bulk-cancel',chunks(),undefined,()=>{throw Error('cancel merge')}),/cancel merge/);
  assert.equal(await d.keyPages.where('run').startsWith('bulk-cancel').count(),0);
+ // Wide signatures force the byte cap before the row cap. No signatures
+ // are truncated or hashed: equality/conflict decisions retain exact strings.
+ const wide='W'.repeat(70000),wideRuns=new Set();
+ const trackWide=(key,obj)=>{if(obj.run.startsWith('wide:sort:'))wideRuns.add(obj.run)};
+ d.keyPages.hook('creating',trackWide);
+ async function* wideChunks(){for(let i=0;i<128;i++)yield [{key:'W'+String(i).padStart(3,'0'),brand:'B',signature:wide}];}
+ await B.buildKeyPages('wide',wideChunks());d.keyPages.hook('creating').unsubscribe(trackWide);
+ assert(wideRuns.size>=3,'wide signatures must trigger bounded sort runs');
+ const wideHit=await B.lookupKeyPages('wide',['W000','W127']);assert.equal(wideHit.size,2);assert.equal(wideHit.get('W127').signature,wide);
+ await B.clearRun('wide');
  // Mutable-page writer invalidates immutable-build directory/cache.
  await B.writeKeyPages('bulk',[{key:'LOCAL',brand:'B',signature:'NEW'}],'ЯLAST');assert(!B._keyDirectories.has('bulk'));
  await B.clearRun('bulk');assert.equal(await d.keyPages.count(),0);assert.equal(B._keyPageCache.size,0);
