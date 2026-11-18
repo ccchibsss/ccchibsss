@@ -91,14 +91,14 @@ const html=fs.readFileSync(__dirname+'/../index.html');
    }
    const hvcPageCounts={},hvcStorage=(await db.meta.get('hvcStorage'))?.value||{};
    for(const [key,table] of [['oe','hvcOe'],['parts','hvcParts'],['cross','hvcCross'],['prices','hvcPrices']])if(HVC[key].size>=20000){
-    if(hvcStorage[table]?.format!=='pages-v1'||hvcStorage[table]?.count!==HVC[key].size)throw Error('large HVC registry not packed');
+    if(hvcStorage[table]?.format!=='pages-v2'||hvcStorage[table]?.count!==HVC[key].size)throw Error('large HVC registry not packed');
     const pageSize=hvcStorage[table].pageSize;
     if(!Number.isSafeInteger(pageSize)||pageSize<1||pageSize>1000)throw Error('invalid HVC page size: '+table);
     hvcPageCounts[table]=await db[table].count();if(hvcPageCounts[table]!==Math.ceil(HVC[key].size/pageSize))throw Error('HVC page count mismatch: '+table);
     // Wide records legitimately reduce pageSize below 1000. Verify the actual
     // layout rather than assuming fixed-size pages, including the short tail.
     for(let page=1;page<=hvcPageCounts[table];page++){
-     const stored=await db[table].get(page),expected=Math.min(pageSize,HVC[key].size-(page-1)*pageSize);
+     const stored=await db[table].get(hvcStorage[table].keys[page-1]),expected=Math.min(pageSize,HVC[key].size-(page-1)*pageSize);
      if(stored?.__ucHvcPage!=='v1'||!Array.isArray(stored.values)||stored.values.length!==expected)throw Error('HVC page layout mismatch: '+table+' #'+page);
     }
    }
