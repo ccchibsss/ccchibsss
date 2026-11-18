@@ -22,12 +22,19 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
    const B=BrowserImportSources,read=B.readConflicts;
    B.readConflicts=async function(...args){
     probe.reads++;sessionStorage.setItem('abortProbe',JSON.stringify(probe));
+    if(mode==='key-repair'){
+     if(probe.reads===2){const table=this.database().keyPages,page=await table.where('run').equals(args[0]).first();delete page.records[0].conflict;await table.put(page);this.invalidateKeyIndex(args[0]);}
+     return read.apply(this,args);
+    }
     if(probe.reads>=2&&(mode!=='transient'||probe.reads===2)){
      const d=this.database();return d.transaction('r',d.keyPages,tx=>d.keyPages.limit(1).toArray().then(()=>{tx.abort();throw Object.assign(Error('injected read abort'),{name:'AbortError'})}));
     }
     return read.apply(this,args);
    };
-   if(mode!=='transient'){
+   if(mode==='late-restore'){
+    const atomic=BrowserApplyCheckpoint.restoreAtomic;
+    BrowserApplyCheckpoint.restoreAtomic=async function(owner){await atomic.call(this,owner);probe.restores++;sessionStorage.setItem('abortProbe',JSON.stringify(probe));if(probe.restores===1)throw Object.assign(Error('late restore abort'),{name:'AbortError'});};
+   }else if(mode!=='transient'&&mode!=='key-repair'){
     window.abortRestoreHook=(key,obj,tx)=>{if(mode==='manual'||probe.restores===0){probe.restores++;sessionStorage.setItem('abortProbe',JSON.stringify(probe));tx.abort()}};
     db.products.hook('creating',abortRestoreHook);
    }
@@ -49,6 +56,14 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
   await page.evaluate(()=>db.products.hook('creating').unsubscribe(abortRestoreHook));
   const restored=page.waitForEvent('load');await page.click('#impRestoreRetry');await restored;await ready();
   assert(await page.evaluate(async()=>S.rows.every(r=>r.cost===77)&&!await db.meta.get(BrowserApplyCheckpoint.KEY)&&await db.applyUndo.count()===0));
+  // Malformed source index after one batch is repaired without replaying Apply.
+  await prepare(101,'key-repair');await page.click('#impApply');
+  await page.waitForFunction(()=>!document.querySelector('#impApply').disabled&&!document.querySelector('#mImport').classList.contains('on'),null,{timeout:60000});
+  assert(await page.evaluate(()=>S.rows.every(r=>r.cost===101)&&probe.reads===3));
+  await page.reload();await ready();
+  // A late abort after COMMITTED rollback is recovered via its durable receipt.
+  await prepare(102,'late-restore');const receiptNav=page.waitForEvent('load');await page.click('#impApply');await receiptNav;await ready();
+  assert(await page.evaluate(async()=>{const p=JSON.parse(sessionStorage.getItem('abortProbe'));return p.restores===2&&S.rows.every(r=>r.cost===101)&&!await db.meta.get(BrowserApplyCheckpoint.KEY)&&!!await db.meta.get('browserApplyRestoreReceipt');}));
   assert.equal(errors.length,0,errors.join('\n'));
   console.log('OK: real read transaction abort resumes without replaying Apply; persistent read failure + first atomic restore abort recover; exhausted restores preserve backup/block saves; manual restore succeeds');
  }finally{if(browser)await browser.close();await new Promise(r=>server.close(r));}

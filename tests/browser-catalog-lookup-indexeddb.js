@@ -20,6 +20,11 @@ function legacy(rows){const idx=new Map(),idxArt=new Map(),duplicateArt=new Set(
  rows.push(rows[2]);c.S.rows=rows;
  const L=c.L,B=c.B,expected=legacy(rows),lookup=await L.create(rows,'source-A');
  assert(await B.database().keyPages.count()>0);
+ const broken=await B.database().keyPages.where('run').equals(lookup.run+':pair').first();
+ delete broken.records[0].conflict;await B.database().keyPages.put(broken);B.invalidateKeyIndex(lookup.run+':pair');
+ // Rebuild once from the frozen row references; ambiguity remains protected.
+ await lookup.query('pair',[broken.first]);assert(lookup._keyRepairUsed);
+
  for(let off=0;off<rows.length;off+=713){
   const input=rows.slice(off,off+713).map(p=>[p.article,p.brand]);input.push(['MISSING',''],[rows[1].article,''],[rows[2].article,'Wrong']);
   const actual=await lookup.batch(input,r=>norm(r[0]),r=>norm(r[1]));
