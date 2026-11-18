@@ -13,13 +13,42 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
   const ready=p=>p.waitForFunction(()=>S._bootReady||S._bootError,null,{timeout:60000});
   await stale.goto(url);await ready(stale);
   await stale.evaluate(async()=>{
+   /* Кто публикует ревизию: перехватываем присваивание токена и вызов
+      catalogValue, чтобы в сообщении об ошибке был стек, а не только факт. */
+   window.__rev=[];
+   let tok=S._catalogToken;
+   Object.defineProperty(S,'_catalogToken',{configurable:true,enumerable:true,
+     get(){return tok;},
+     set(v){ if(v!==tok) window.__rev.push('TOKEN '+(new Error().stack||'').split('\n').slice(2,7).join(' | ')); tok=v; }});
+   /* Что решила сверка и почему. */
+   const _sv=StorageCtl.saveVerifiedMetadata.bind(StorageCtl);
+   StorageCtl.saveVerifiedMetadata=async function(rows,withId){
+     let r; try { r=await _sv(rows,withId); } catch(e){ window.__rev.push('VERIFY threw '+e.name+': '+e.message); throw e; }
+     window.__rev.push('VERIFY '+r+' reason='+String(this._verifiedReason)+' rows='+rows.length+' counts='+(S._cacheLastWrite&&S._cacheLastWrite.count));
+     return r;
+   };
+   const _da=StorageCtl.saveDiffAtomic.bind(StorageCtl);
+   StorageCtl.saveDiffAtomic=function(a){ window.__rev.push('DIFF fullWrite='+a.fullWrite+' rowCount='+a.rowCount+' changed='+(Array.isArray(a.changedList)?a.changedList.length:'нет')); return _da(a); };
+   const _cv=StorageCtl.catalogValue.bind(StorageCtl);
+   StorageCtl.catalogValue=(...a)=>{const v=_cv(...a);window.__rev.push('PUBLISH '+v.revision+' :: '+(new Error().stack||'').split('\n').slice(2,7).join(' | '));return v;};
    S.rows=[{id:1,article:'00001',brand:'Brand',cost:10,custom:{}}];S._econPending=true;
    S.settings.autoStdDims=false;S.settings.autoOeAnomalyOnImport=false;S.settings.enrichRelatedOnImport=false;
    if(!await persistNow())throw Error('seed save failed');
    const token=S._catalogToken;
    if(!await persistNow())throw Error('baseline verification failed');
    window.dispatchEvent(new PageTransitionEvent('pagehide'));await _persistQueue;
-   if(S._catalogToken!==token)throw Error('unchanged baseline created a false revision');
+   if(S._catalogToken!==token){
+     const d={token:[token,S._catalogToken],reason:String(StorageCtl._verifiedReason),mode:PyEngine.processingMode(),rows:S.rows.length,disk:await db.products.count(),stage:await db.products_stage.count(),lastWrite:S._cacheLastWrite,econPending:!!S._econPending,aux:!!S._cacheAuxError,hvc:!!S._hvcPersistError,pending:_persistPending,dirty:_persistDirty};
+     const m=await db.meta.get('catalog'),mc=await db.meta.get('custom'),ms=await db.meta.get('settings'),mt=await db.meta.get('tariffs');
+     d.catalogOnDisk=m&&m.value&&m.value.revision;
+     d.customEqual=StorageCtl.same(mc&&mc.value,S.custom);
+     d.settingsEqual=StorageCtl.same(ms&&ms.value,{...S.settings,lastPersistError:''});
+     d.tariffsEqual=StorageCtl.same(mt&&mt.value,S.tariffs);
+     d.settingsDisk=ms&&ms.value&&Object.keys(ms.value).filter(k=>JSON.stringify(ms.value[k])!==JSON.stringify(({...S.settings,lastPersistError:''})[k]));
+     d.lastPersistError=String(S.settings.lastPersistError||'');
+     d.rev=(window.__rev||[]).slice(-6);
+     throw Error('unchanged baseline created a false revision · '+JSON.stringify(d));
+   }
    await Import.read(new File(['Артикул;Бренд;Наименование\n00001;Brand;Imported title\n'],'enrich.csv',{type:'text/csv'}));
    S.pending.map=S.pending.headers.map((src,i)=>({src,field:['article','brand','name'][i],target:['Артикул','Бренд','Наименование'][i],enabled:true,type:'text'}));Import.normalize();Import.render();
    document.querySelector('#impKey').value='article+brand';document.querySelector('#impOe').classList.remove('on');document.querySelector('#impEnrichRelated').checked=false;
