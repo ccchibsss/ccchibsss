@@ -13,6 +13,15 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
   const ready=p=>p.waitForFunction(()=>S._bootReady||S._bootError,null,{timeout:60000});
   await stale.goto(url);await ready(stale);
   await stale.evaluate(async()=>{
+   /* Кто публикует ревизию: перехватываем присваивание токена и вызов
+      catalogValue, чтобы в сообщении об ошибке был стек, а не только факт. */
+   window.__rev=[];
+   let tok=S._catalogToken;
+   Object.defineProperty(S,'_catalogToken',{configurable:true,enumerable:true,
+     get(){return tok;},
+     set(v){ if(v!==tok) window.__rev.push('TOKEN '+(new Error().stack||'').split('\n').slice(2,7).join(' | ')); tok=v; }});
+   const _cv=StorageCtl.catalogValue.bind(StorageCtl);
+   StorageCtl.catalogValue=(...a)=>{const v=_cv(...a);window.__rev.push('PUBLISH '+v.revision+' :: '+(new Error().stack||'').split('\n').slice(2,7).join(' | '));return v;};
    S.rows=[{id:1,article:'00001',brand:'Brand',cost:10,custom:{}}];S._econPending=true;
    S.settings.autoStdDims=false;S.settings.autoOeAnomalyOnImport=false;S.settings.enrichRelatedOnImport=false;
    if(!await persistNow())throw Error('seed save failed');
@@ -28,6 +37,7 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
      d.tariffsEqual=StorageCtl.same(mt&&mt.value,S.tariffs);
      d.settingsDisk=ms&&ms.value&&Object.keys(ms.value).filter(k=>JSON.stringify(ms.value[k])!==JSON.stringify(({...S.settings,lastPersistError:''})[k]));
      d.lastPersistError=String(S.settings.lastPersistError||'');
+     d.rev=(window.__rev||[]).slice(-6);
      throw Error('unchanged baseline created a false revision · '+JSON.stringify(d));
    }
    await Import.read(new File(['Артикул;Бренд;Наименование\n00001;Brand;Imported title\n'],'enrich.csv',{type:'text/csv'}));
