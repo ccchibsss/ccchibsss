@@ -10,7 +10,13 @@ ctx.A.limits=input.limits;
 if(input.operation==='search' || input.operation==='oeApply') {
   vm.runInContext(obj('DimPolicy')+';globalThis.O=AnomalyOE;',ctx);
   ctx.S.rows=input.rows;ctx.S.catalogVersion=1;
+  /* Значение связи в приложении — константа, а oeNorm/artKey восстанавливаются
+     из ключа через HVC.crossParts. Разбор берём из index.html, чтобы заглушка
+     не разошлась с продуктом (parity-тест обязан видеть ту же функцию). */
+  const crossParts=(()=>{const a=h.indexOf('  crossParts(key) {'),end=h.indexOf('\n  },',a)+4;
+    return vm.runInContext('({'+h.slice(a,end)+'}).crossParts',vm.createContext({}))})();
   ctx.HVC={ozonRevision:1,parts:new Map(input.reference.parts||[]),oe:new Map(input.reference.oe||[]),
+    crossParts,
     byOe:new Map((input.reference.byOe||[]).map(([k,v])=>[k,new Set(v)])),cross:new Map(input.reference.cross||[])};
   ctx.STD=Object.entries(input.labels||{}).map(([k,n])=>({k,n}));
   ctx.A.found=input.targets.map(i=>({p:input.rows[i],_sel:true}));

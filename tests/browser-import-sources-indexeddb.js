@@ -6,6 +6,10 @@ let seq=0,cancel=false,sql=false;
 const c={...fidb,console,setTimeout,clearTimeout,queueMicrotask,AbortController,structuredClone,TextDecoder,Blob,performance,CustomEvent:class{constructor(t){this.type=t}},location:{protocol:'http:'},navigator:{},uid:p=>p+'-'+(++seq),PyEngine:{processingMode:()=>sql?'sql':'browser'},UCCancel:{check(){if(cancel)throw Error('cancelled')}},Prog:{msg(){},step(){}}};c.window=c;c.self=c;
 vm.createContext(c);vm.runInContext(h.slice(h.indexOf('const BrowserImportIO = {'),h.indexOf('const BrowserApplyCheckpoint = {')),c);
 vm.runInContext(lib,c);
+// CSV decoding lives next to normArticle, outside the CsvStream slice.
+const da=h.indexOf('function decodeCsvText(bytes, opts) {'),db_=h.indexOf('const normArticle = s => {',da);
+assert(da>0&&db_>da);
+vm.runInContext('this.decodeCsvText='+h.slice(da,db_).trim()+';',c);
 const ca=h.indexOf('const CsvStream = {'),cb=h.indexOf('\n/* Воркер XLSX',ca);vm.runInContext(h.slice(ca,cb)+';this.Csv=CsvStream;',c);
 const a=h.indexOf('const BrowserImportSources = {'),b=h.indexOf('const Import = {',a);vm.runInContext(h.slice(a,b)+';this.B=BrowserImportSources;',c);
 const B=c.B;
