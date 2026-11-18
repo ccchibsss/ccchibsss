@@ -22379,8 +22379,16 @@ var OZON_ANNOTATION_MAX = 6000; /* лимит OZON на «Аннотацию» *
 var XML_ILLEGAL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/;
 function needsCellClean(s) { return s.length > XLSX_CELL_MAX || XML_ILLEGAL_RE.test(s); }
 function stripXmlIllegal(s) {
-  /* символы, недопустимые в XML 1.0 (кроме \t, \n, \r) */
-  return String(s).replace(XML_ILLEGAL_RE, ' ');
+  /* символы, недопустимые в XML 1.0 (кроме \t, \n, \r).
+     v12.9.171 (проверка): общий XML_ILLEGAL_RE объявлен БЕЗ флага g — это
+     проверка «есть ли запрещённые символы» в needsCellClean. Для замены нужен
+     глобальный вариант, иначе replace меняет только ПЕРВОЕ вхождение и в файл
+     попадают недопустимые для XML символы (Excel такой лист не откроет).
+     Глобальную регулярку берём «свежей» из источника: /g-регулярка хранит
+     lastIndex между вызовами repace-with-function и на общем объекте это
+     приводило бы к пропускам. */
+  const re = new RegExp(XML_ILLEGAL_RE.source, 'g');
+  return String(s).replace(re, ' ');
 }
 /* v12.9.171: однопроходное экранирование XML. Раньше на каждую ячейку шло
    шесть replace (управляющие, &, <, >, ", \r) — один проход с функцией даёт
@@ -22398,6 +22406,12 @@ const XESC_TEST = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF&<>"\r]/;
    открытии ячейки. Список намеренно шире, чем «точно опасно»: лишний прогон
    старой функцией безвреден, пропуск — нет. */
 const XTXT_FAST_BAD = /[\u0000-\u001F\u007F\uFFFE\uFFFF&<>"']/;
+/* v12.9.171 (проверка): прежний _txt ищет формульный триггер после ЛЮБОГО
+   юникод-пробела (регулярка «все пробелы, затем не-пробел»), а не только после
+   обычного пробела и NBSP. Строка с \uFEFF или \u2028 впереди, за которым идёт
+   «=», раньше получала апостроф, а быстрый путь по первому символу её
+   пропускал. Такую строку сразу отправляем прежним путём. */
+const XTXT_LEAD_UNICODE = /^[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/;
 /* v12.9.171: fflate.strToU8 на 37 МБ текста — 313 мс, TextEncoder — 87 мс (×3,6).
    Кодирование побайтово то же (UTF-8 без BOM, суррогатные пары собираются).
    Экземпляр один: создание encoder'а на каждый чанк само по себе стоит денег.
@@ -22421,6 +22435,7 @@ function safeCsvText(v) {
     const c0 = v.charCodeAt(0);
     if (v.length === 0) return v;
     if (c0 > 32 && c0 !== 0xA0 && c0 !== 0x3D && c0 !== 0x2B && c0 !== 0x40 && c0 !== 0x2D &&
+        (c0 < 0x80 || !XTXT_LEAD_UNICODE.test(v)) &&
         !XCSV_SLOW.test(v)) return v;
   } else if (typeof v === 'number' && isFinite(v) && v >= 0) {
     /* только неотрицательные: «-1e+21» старый путь берёт в апостроф, а
@@ -22435,6 +22450,10 @@ function safeCsvText(v) {
 }
 /* символы, из-за которых safeCsvText обязан идти прежним путём */
 const XCSV_SLOW = /[\u0000-\u001F\u007F\uFFFE\uFFFF]/;
+/* строка состоит ТОЛЬКО из пробельных символов (пробел, таб, перевод строки,
+   NBSP): импорт такие строки пропускает — прежняя проверка звала для этого
+   String(v).trim() по каждой ячейке */
+const XWS_ONLY = /^[\s\u00a0\ufeff]*$/;
 function encodeCp1251Strict(text) {
   text = String(text == null ? '' : text).replace(/₽/g, 'руб.');
   const bytes = Exp._cp1251(text);
@@ -30271,13 +30290,16 @@ const BrowserImportSources = {
     let phase='sources.add',registered=false;
     const prefix=[],preview=[],numericCounts=[];let headers=null,buffer=[],total=0,written=0;
     const consume=row=>{
-      /* v12.9.171: прежняя проверка строила String() и звала trim() для каждой
-         ячейки каждой строки (2,4 млн вызовов на большом файле). Быстрый путь
-         признаёт строку непустой сразу; полностью пустые строки проверяются
-         прежним способом, так что набор отбрасываемых строк не меняется. */
-      let hasValue=false;
-      for(let i=0;i<row.length;i++){const v=row[i];if(v!=null&&v!==''){hasValue=true;break;}}
-      if(!hasValue&&!row.some(v=>String(v??'').trim()!==''))return;
+      /* v12.9.171: прежняя проверка строила String() и звала trim() для КАЖДОЙ
+         ячейки КАЖДОЙ строки (2,4 млн вызовов на большом файле).
+         Внимание (проверено): быстрый признак «есть значение» не заменяет
+         проверку целиком — ячейка из одних пробелов или табуляции непустая как
+         значение, но строка с ней считается пустой. Поэтому сначала дешёвый
+         проход, а решение всё равно принимает прежняя проверка; дорогой
+         String()+trim() выполняется только там, где он может что-то изменить. */
+      let plain=false;
+      for(let i=0;i<row.length;i++){const v=row[i];if(v==null)continue;const t=typeof v;if(t==='number'||t==='boolean'){plain=1;break;}if(t==='string'&&v!==''&&!XWS_ONLY.test(v)){plain=2;break;}}
+      if(!plain&&!row.some(v=>String(v??'').trim()!==''))return;
       if(!headers){prefix.push(row);return;}
       if(preview.length<200)preview.push(row);
       row.forEach((v,i)=>{if(typeof v==='number')numericCounts[i]=(numericCounts[i]||0)+1;});
@@ -43610,7 +43632,8 @@ const Exp = {
       const n = v.length;
       if (n > 0 && n <= XLSX_CELL_MAX && !XTXT_FAST_BAD.test(v)) {
         const c0 = v.charCodeAt(0);
-        if (c0 !== 32 && c0 !== 0x3D && c0 !== 0x2B && c0 !== 0x2D && c0 !== 0x40 && c0 !== 0xA0) return v;
+        if (c0 !== 32 && c0 !== 0x3D && c0 !== 0x2B && c0 !== 0x2D && c0 !== 0x40 && c0 !== 0xA0 &&
+            (c0 < 0x80 || !XTXT_LEAD_UNICODE.test(v))) return v;
       }
     }
     const sv = clampCellText(v == null ? '' : v, XLSX_CELL_MAX);
@@ -43633,7 +43656,8 @@ const Exp = {
       if (typeof v === 'number' && isFinite(v)) return `<c r="${L}${R}" s="${st}"><v>${v}</v></c>`;
       if (typeof v === 'string' && v.length > 0 && v.length <= XLSX_CELL_MAX && !XCX_FAST_BAD.test(v)) {
         const c0 = v.charCodeAt(0);
-        if (c0 !== 32 && c0 !== 0x3D && c0 !== 0x2B && c0 !== 0x2D && c0 !== 0x40 && c0 !== 0xA0)
+        if (c0 !== 32 && c0 !== 0x3D && c0 !== 0x2B && c0 !== 0x2D && c0 !== 0x40 && c0 !== 0xA0 &&
+            (c0 < 0x80 || !XTXT_LEAD_UNICODE.test(v)))
           return `<c r="${L}${R}" s="${st}" t="inlineStr"><is><t xml:space="preserve">${v}</t></is></c>`;
       }
     }

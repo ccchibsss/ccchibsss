@@ -11,8 +11,12 @@ const da=h.indexOf('function decodeCsvText(bytes, opts) {'),db_=h.indexOf('const
 assert(da>0&&db_>da);
 vm.runInContext('this.decodeCsvText='+h.slice(da,db_).trim()+';',c);
 const ca=h.indexOf('const CsvStream = {'),cb=h.indexOf('\n/* Воркер XLSX',ca);vm.runInContext(h.slice(ca,cb)+';this.Csv=CsvStream;',c);
-/* rowBytes (v12.9.171) использует константу RBYTES_NONASCII из общей части сборки */
-vm.runInContext(h.slice(h.indexOf('const RBYTES_NONASCII'),h.indexOf('\n',h.indexOf('const RBYTES_NONASCII'))+1),c);
+/* rowBytes и проверка пустой строки (v12.9.171) используют константы из общей
+   части сборки: RBYTES_NONASCII и XWS_ONLY */
+for(const name of ['RBYTES_NONASCII','XWS_ONLY']){
+  const i=h.indexOf('const '+name);
+  vm.runInContext(h.slice(i,h.indexOf('\n',i)+1),c);
+}
 const a=h.indexOf('const BrowserImportSources = {'),b=h.indexOf('const Import = {',a);vm.runInContext(h.slice(a,b)+';this.B=BrowserImportSources;',c);
 const B=c.B;
 const preStart=h.indexOf('      const sourceVariants=',h.indexOf('const Import = {')),preEnd=h.indexOf('      let sourceCollision=',preStart);

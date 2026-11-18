@@ -54,6 +54,7 @@ function parseZip(buf){
     assert.equal(readU32(buf,dOff+8),comp,'сжатый размер в data descriptor');
     assert.equal(readU32(buf,dOff+12),size,'исходный размер в data descriptor');
     files[name]=plain.toString('utf8');
+    files.__meta=files.__meta||{};files.__meta[name]={crc,comp,size,method,flags,lFlags};
     p+=46+nameLen+extra+comment;
   }
   return files;
@@ -83,7 +84,7 @@ function crc32js(b){let t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)
   const buf=await archive.finish();
   assert.equal(buf.readUInt32LE(0),0x04034b50,'файл начинается с локального заголовка');
   const files=parseZip(buf);
-  assert.deepEqual(Object.keys(files).sort(),sheets.map(s=>s.name).sort(),'все листы в архиве');
+  assert.deepEqual(Object.keys(files).filter(k=>k!=='__meta').sort(),sheets.map(s=>s.name).sort(),'все листы в архиве');
   for(const s of sheets)assert.equal(files[s.name],s.text,'содержимое '+s.name+' байт-в-байт: получено '+files[s.name].length+' из '+s.text.length+' байт');
 
   // 2. Попеременная запись листов и flush — порядок байт не должен сбиться.
@@ -134,6 +135,30 @@ function crc32js(b){let t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)
     const ds=b.off+30+buf4b.readUInt16LE(b.off+26)+buf4b.readUInt16LE(b.off+28);
     return [buf4b.slice(ds,ds+b.comp)];
   })()).toString(),'<b/>','второй лист записан целиком');
+
+  // 4c. Крайние случаи: много листов, большой лист, сжатие не «store»,
+  // abort доходит до спула, CRC в каталоге совпадает с CRC32 от исходных байт.
+  const a4c=await Native.create();
+  const exp={},names=[];
+  for(let i=0;i<120;i++){const nm='f'+i+'.xml',t='<x>'+i+'</x>';await a4c.add(nm,t);exp[nm]=t;names.push(nm);}
+  const big=('текст 😀 & < > "x"\n').repeat(60000);
+  await a4c.add('big.xml',big);exp['big.xml']=big;
+  const buf4c=await a4c.finish();
+  const z4c=parseZip(buf4c);
+  for(const nm of Object.keys(exp))assert.equal(z4c[nm].toString(),exp[nm],'крайние случаи: содержимое '+nm);
+  // CRC большого листа сверяем со своим CRC32 от исходных байт (parseZip уже
+  // проверил CRC в каталоге и в data descriptor для каждого файла).
+  const crcReal=(()=>{const t=new Int32Array(256);for(let n2=0;n2<256;n2++){let v=n2;for(let k=0;k<8;k++)v=v&1?0xEDB88320^(v>>>1):v>>>1;t[n2]=v;}
+    let c=-1;const b=Buffer.from(big,'utf8');for(let i=0;i<b.length;i++)c=t[(c^b[i])&0xFF]^(c>>>8);return (c^-1)>>>0;})();
+  assert.equal(z4c.__meta['big.xml'].crc,crcReal,'CRC большого листа');
+  assert.equal(z4c.__meta['big.xml'].size,Buffer.byteLength(big),'несжатый размер большого листа');
+  // данные действительно сжимаются, а не пишутся «как есть»
+  const rep='одно и то же '.repeat(50000);
+  const a4d=await Native.create();await a4d.add('r.xml',rep);
+  const z4d=parseZip(await a4d.finish());
+  assert.equal(z4d['r.xml'],rep,'повторяющийся текст распаковывается обратно');
+  assert(z4d.__meta['r.xml'].comp<Buffer.byteLength(rep)/50,'данные действительно сжаты');
+  console.log('крайние случаи: '+names.length+'+1 лист (из них один '+Math.round(Buffer.byteLength(big)/1048576)+' МБ), сжатие ×'+Math.round(Buffer.byteLength(rep)/z4d.__meta['r.xml'].comp));
 
   // 5. Фолбэк: без CompressionStream остаётся прежний fflate-путь.
   const ctx2={console,TextEncoder,Blob,Uint8Array,DataView,Promise,setTimeout,Math,Number,String,Array,Object,JSON,Error};

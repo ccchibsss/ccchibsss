@@ -22,7 +22,7 @@ for(const name of ['stripXmlIllegal','safeCsvText']){
  vm.runInContext(html.slice(start,end),context);
 }
 // константы, на которые опираются эти функции в сборке (v12.9.171: быстрый путь)
-for(const name of ['XML_ILLEGAL_RE','XCSV_SLOW']){
+for(const name of ['XML_ILLEGAL_RE','XCSV_SLOW','XTXT_LEAD_UNICODE']){
  const start=html.indexOf('const '+name), end=html.indexOf('\n',start)+1;
  if(start>0) vm.runInContext(html.slice(start,end),context);
 }
