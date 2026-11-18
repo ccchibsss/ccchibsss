@@ -23,3 +23,9 @@ The reported 96% / 740-second stall is not reproduced: the user's large CSVs are
 ## Limits
 
 These are synthetic Node/fake-indexeddb checks, not a Chromium RSS measurement or reproduction of the user's browser failure. A payload estimate is not a hard total-memory cap: original rows, import/enrichment maps, browser internals and an individually enormous record can still exhaust RAM. Small auxiliary metadata (including applicability/settings), full in-memory enrichment state and the atomic *restore* transaction are not converted into a fully out-of-core representation in this change. Crash leftovers can require extra disk until the next successful registry save. No original database was cleared. Do not interpret these changes as a guarantee against every browser OOM or disk failure.
+
+## Conflict follow-up
+
+Exact unchanged baseline verification now preserves the existing catalog revision when products, custom metadata, settings and tariffs match. Previously the verification itself published a new revision and could invalidate another loaded tab without a catalog edit. Real stale revisions still fail closed; no automatic token adoption or overwrite was added. The conflict message describes a revision mismatch rather than asserting an unproven other-tab cause.
+
+Validated with the IndexedDB persistence probe (unchanged token assertions) and real Chromium `browser-import-conflict-e2e.js`: no-op verification retains the token, a genuine second-tab write blocks stale Apply, and new-tab recovery preserves staged file/mapping/options and stale RAM. This does not establish which writer caused the user's screenshot.

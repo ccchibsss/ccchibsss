@@ -18142,8 +18142,15 @@ const StorageCtl = {
         const batch=ordered.slice(start,start+32),stored=await db.products.bulkGet(batch.map(p=>p.id));
         if(batch.some((p,i)=>!stored[i]||!this.same(withId(p),stored[i])))return false;
       }
-      catalog=this.catalogValue(rows.length,current?.value?.fp||'');
-      await db.meta.put({key:'catalog',value:catalog});
+      const settings={...S.settings,lastPersistError:''};
+      const metaEqual=current&&this.same(current.value.custom,S.custom)&&
+        this.same((await db.meta.get('custom'))?.value,S.custom)&&
+        this.same((await db.meta.get('settings'))?.value,settings)&&
+        this.same((await db.meta.get('tariffs'))?.value,S.tariffs);
+      // Verifying a byte-for-byte unchanged baseline is not an edit. Do not
+      // invalidate another tab merely because Apply prepared then cancelled.
+      catalog=metaEqual?current.value:this.catalogValue(rows.length,current?.value?.fp||'');
+      if(!metaEqual)await db.meta.put({key:'catalog',value:catalog});
       await db.meta.put({key:'custom',value:S.custom});
       await db.meta.put({key:'settings',value:{...S.settings,lastPersistError:''}});
       await db.meta.put({key:'tariffs',value:S.tariffs});
@@ -18191,7 +18198,7 @@ const StorageCtl = {
       S._catalogConflict = true;
       S._catalogConflictInfo={at:nowISO(),expected:S._catalogToken??null,current:this.catalogToken(current)};
       console.warn('[UC] конфликт ревизий каталога',S._catalogConflictInfo);
-      const e = new Error('Каталог изменился в другой вкладке. Сохраните изменения этой вкладки отдельным экспортом и только после проверки копии откройте файл заново.');
+      const e = new Error('Версия каталога в этой вкладке отличается от сохранённой. Импорт остановлен, чтобы не перезаписать данные. Сохраните несохранённые правки экспортом; затем нажмите «Продолжить в новой вкладке» в окне импорта.');
       e.name = 'CatalogConflictError'; throw e;
     }
     return current;

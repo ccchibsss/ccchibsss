@@ -12,7 +12,7 @@ const x=h.indexOf('async function _persistNowImpl('),y=h.indexOf('\n}\n',x)+2;vm
  await c.db.open();
  // fake-indexeddb clones into Node's realm; real IDB clones into the page.
  vm.runInContext('this.rehome=row=>row==null?row:JSON.parse(JSON.stringify(row));',c);
- c.db.products.hook('reading',c.rehome);
+ c.db.products.hook('reading',c.rehome);c.db.meta.hook('reading',c.rehome);
  for(const mode of ['economy','staged'])for(const n of [1,21001,...(process.env.LARGE_PRICE_PROBE?[124236]:[])]){
   c.StorageCtl._mode=mode;
   vm.runInContext('S.rows=Array.from({length:'+n+'},(_,i)=>({article:String(i),custom:{code:"00042"},price:10}));',c);
@@ -24,8 +24,9 @@ const x=h.indexOf('async function _persistNowImpl('),y=h.indexOf('\n}\n',x)+2;vm
   c.db.products.hook('updating',update);c.db.products.hook('creating',create);c.db.products.hook('deleting',del);
   let release,started;const start=new Promise(r=>started=r);
   c.HVC.save=async()=>{started();await new Promise(r=>release=r);return true;};
+  const baselineToken=c.S._catalogToken;
   let finished=false;const verify=c._persistNowImpl(undefined,false,true).then(ok=>{assert(ok);finished=true});
-  await start;assert(!finished,'persist must await HVC');assert.equal(productWrites,0,'unchanged baseline must not write products');release();await verify;
+  await start;assert(!finished,'persist must await HVC');assert.equal(productWrites,0,'unchanged baseline must not write products');release();await verify;assert.equal(c.S._catalogToken,baselineToken,'exact unchanged verification must not create a competing revision');
   assert.equal(c.S._cacheLastWrite.verified,n);c.HVC.save=async()=>true;
   // A direct nested edit with no dirty notification must force a write.
   c.S.rows[0].custom.code='edited';assert(await c._persistNowImpl(undefined,false,true));assert(productWrites>0);assert.equal((await c.db.products.get(c.S.rows[0].id)).custom.code,'edited');
@@ -40,7 +41,7 @@ const x=h.indexOf('async function _persistNowImpl('),y=h.indexOf('\n}\n',x)+2;vm
  delete source[1].id;assert.equal(await c.StorageCtl.saveVerifiedMetadata(source,p=>p),false);source[1].id=oldId;
  assert.equal(await c.StorageCtl.saveVerifiedMetadata(source.slice(1),p=>p),false);
  await c.db.products_stage.add({article:'draft'});assert.equal(await c.StorageCtl.saveVerifiedMetadata(source,p=>p),false);await c.db.products_stage.clear();
- c.S._catalogToken='stale';await assert.rejects(()=>c.StorageCtl.saveVerifiedMetadata(source,p=>p),/Каталог изменился/);c.S._catalogToken=token;
+ c.S._catalogToken='stale';await assert.rejects(()=>c.StorageCtl.saveVerifiedMetadata(source,p=>p),e=>e.name==='CatalogConflictError');c.S._catalogToken=token;
  console.log('PASS verified baseline fails closed for duplicate/missing IDs, count changes, draft and stale revision');
  // Large PARTIAL imports must not run a single >20k-row transaction.
  const realChunk=c.StorageCtl.saveChunked;let chunked=0;
