@@ -19,7 +19,17 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
    const token=S._catalogToken;
    if(!await persistNow())throw Error('baseline verification failed');
    window.dispatchEvent(new PageTransitionEvent('pagehide'));await _persistQueue;
-   if(S._catalogToken!==token)throw Error('unchanged baseline created a false revision · было '+token+' · стало '+S._catalogToken+' · reason='+String(StorageCtl._verifiedReason)+' · mode='+PyEngine.processingMode()+' · rows='+S.rows.length+' · disk='+await db.products.count()+' · lastWrite='+JSON.stringify(S._cacheLastWrite)+' · econPending='+!!S._econPending);
+   if(S._catalogToken!==token){
+     const d={token:[token,S._catalogToken],reason:String(StorageCtl._verifiedReason),mode:PyEngine.processingMode(),rows:S.rows.length,disk:await db.products.count(),stage:await db.products_stage.count(),lastWrite:S._cacheLastWrite,econPending:!!S._econPending,aux:!!S._cacheAuxError,hvc:!!S._hvcPersistError,pending:_persistPending,dirty:_persistDirty};
+     const m=await db.meta.get('catalog'),mc=await db.meta.get('custom'),ms=await db.meta.get('settings'),mt=await db.meta.get('tariffs');
+     d.catalogOnDisk=m&&m.value&&m.value.revision;
+     d.customEqual=StorageCtl.same(mc&&mc.value,S.custom);
+     d.settingsEqual=StorageCtl.same(ms&&ms.value,{...S.settings,lastPersistError:''});
+     d.tariffsEqual=StorageCtl.same(mt&&mt.value,S.tariffs);
+     d.settingsDisk=ms&&ms.value&&Object.keys(ms.value).filter(k=>JSON.stringify(ms.value[k])!==JSON.stringify(({...S.settings,lastPersistError:''})[k]));
+     d.lastPersistError=String(S.settings.lastPersistError||'');
+     throw Error('unchanged baseline created a false revision · '+JSON.stringify(d));
+   }
    await Import.read(new File(['Артикул;Бренд;Наименование\n00001;Brand;Imported title\n'],'enrich.csv',{type:'text/csv'}));
    S.pending.map=S.pending.headers.map((src,i)=>({src,field:['article','brand','name'][i],target:['Артикул','Бренд','Наименование'][i],enabled:true,type:'text'}));Import.normalize();Import.render();
    document.querySelector('#impKey').value='article+brand';document.querySelector('#impOe').classList.remove('on');document.querySelector('#impEnrichRelated').checked=false;
