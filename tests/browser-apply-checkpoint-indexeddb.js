@@ -8,7 +8,7 @@ const a=h.indexOf('const BrowserApplyCheckpoint = {'),b=h.indexOf('const Browser
 vm.runInContext("this.db=new Dexie('checkpoint-test');db.version(6).stores({products:'++id',products_stage:'++id',meta:'key',cats:'++id',rules:'++id',excs:'++id',imports:'++id',hvcOe:'++id,&oeNorm',hvcParts:'++id,&key',hvcCross:'++id,&key',hvcPrices:'++id,&key'});",c);
 const schemaStart=h.indexOf('db.version(7).stores('),schemaEnd=h.indexOf('db.version(7).upgrade(() => {});',schemaStart)+'db.version(7).upgrade(() => {});'.length;vm.runInContext(h.slice(schemaStart,schemaEnd),c);
 c.StorageCtl={assertCatalogFresh:()=>c.C.assertWriter()};vm.runInContext('Object.assign(StorageCtl,{'+h.slice(h.indexOf('  recordBytes('),h.indexOf('  *productBatches('))+'});',c);const C=c.C,db=c.db;const plain=x=>JSON.parse(JSON.stringify(x));
-async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await db.table(n).toArray());return out;}
+async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain((await db.table(n).toArray()).filter(r=>n!=='meta'||r.key!=='browserApplyRestoreReceipt'));return out;}
 (async()=>{
  await db.open();
  await db.products.bulkAdd(Array.from({length:2503},(_,i)=>({id:i+1,article:String(i).padStart(8,'0'),custom:{value:'text'},oe_numbers:'A / B'})));
@@ -134,13 +134,33 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  // Tampered/incomplete checkpoints fail closed without clearing live data.
  owner=await C.begin();await db.applyUndo.where('table').equals('products').first().then(r=>db.applyUndo.delete(r.id));
  const partial=await readAll();await assert.rejects(()=>C.restore(owner),/Неполная/);assert.deepEqual(await readAll(),partial);assert(await db.meta.get(C.KEY));
+ // Simulate a late abort reported after the restore transaction committed.
+ await C.commit(owner);owner=await C.begin();
+ await db.products.add({article:'PARTIAL-RESTORE'});
+ const receiptAtomic=C.restoreAtomic;let receiptCalls=0;
+ C.restoreAtomic=async function(o){await receiptAtomic.call(this,o);if(++receiptCalls===1){const e=Error('late abort');e.name='AbortError';throw e;}};
+ await C.restore(owner);assert.equal(receiptCalls,2);assert.equal(C.owner,null);
+ const receipt=await db.meta.get('browserApplyRestoreReceipt');assert.equal(receipt.value.owner,owner);
+ await C.restore(owner); // idempotent receipt; never replay data
+ await assert.rejects(()=>C.restore('foreign-owner'),e=>e.name==='CheckpointMissingError');
+ await db.meta.put({key:'catalog',value:{revision:'after-restore'}});
+ await assert.rejects(()=>C.restore(owner),e=>e.name==='CheckpointMissingError');
+ C.restoreAtomic=receiptAtomic;
+ // Reset only test bookkeeping before the independent preparation-crash case.
+ await db.meta.delete('browserApplyRestoreReceipt');
  // Crash during preparation: source is intact, partial undo must never replay.
- await C.commit(owner);const originalAfter=await readAll();
+ const originalAfter=await readAll();
  await db.meta.put({key:C.KEY,value:{owner:'preparation-crash',preparing:true}});
  await db.applyUndo.add({table:'products',pos:0,values:[{id:99999,article:'PARTIAL'}]});
  C.owner=null;db.close();await db.open();
  await assert.rejects(()=>C.restore('preparation-crash'),/не подготовлена/);
  await C.recover();assert.deepEqual(await readAll(),originalAfter);assert.equal(await db.applyUndo.count(),0);
+ // An orphaned backup must not be silently cleared by startup or next Apply.
+ await db.applyUndo.add({table:'products',pos:0,values:[{id:123,article:'ORPHAN'}]});
+ const orphan=await db.applyUndo.toArray();
+ await assert.rejects(()=>C.recover(),e=>e.name==='CheckpointMissingError');
+ await assert.rejects(()=>C.begin(),e=>e.cause?.name==='CheckpointMissingError');
+ assert.deepEqual(await db.applyUndo.toArray(),orphan);
  await db.delete();
  // Source, SQL isolation and publication/error wiring remain explicit.
  const apply=h.slice(h.indexOf('  apply() {',h.indexOf('const Import = {')),h.indexOf('  _relatedRows(',h.indexOf('const Import = {')));

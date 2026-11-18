@@ -55,6 +55,13 @@ const plain=v=>JSON.parse(JSON.stringify(v));
  const byPair=row=>({key:row[0]+'|'+row[1],brand:row[1],signature:''});
  await B.prepareKeys(first.id,'run2',byPair);assert.equal((await B.conflicts('run2',await B.page(first.id,0,1000),byPair)).size,0);
  await B.clearRun('run1');await B.clearRun('run2');assert.equal(await B.database().keys.count(),0);assert.equal(await B.database().keyPages.count(),0);
+ // A malformed derived index is rebuilt from immutable input, not ignored.
+ await B.prepareKeys(first.id,'repair-run',describe,'repair-fingerprint');
+ const broken=await B.database().keyPages.where('run').equals('repair-run').first();
+ delete broken.records[0].conflict;await B.database().keyPages.put(broken);B.invalidateKeyIndex('repair-run');
+ assert((await B.conflicts('repair-run',await B.page(first.id,0,1000),describe)).has('A0'));
+ assert.equal((await B.source(first.id)).total,n+1);
+ await B.clearRun('repair-run');
  // Standard-value conflicts across batches remain blocked, but OE/custom
  // columns accumulate and must not create the same conflict.
  let evidence='article;brand;value\n';for(let i=0;i<2001;i++)evidence+='X'+i+';B;first\n';evidence+='X0;B;second\n';

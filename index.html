@@ -24498,6 +24498,7 @@ const HVC = {
   /* Агрегат всех частей с данным OE: max габаритов (бюджет 2000), первый непустой
      текст, список аналогов (60) и группа (200). Считается ОДИН РАЗ на OE и кэшируется. */
   _oeAggOf(oe) {
+    if(HVC._prof)HVC._prof.oeAggCalls=(HVC._prof.oeAggCalls||0)+1;
     if (!HVC._oeAggCache) HVC._oeAggCache = new Map();
     let hit = HVC._oeAggCache.get(oe);
     if (hit) return hit;
@@ -24507,12 +24508,14 @@ const HVC = {
       smallest:null, smallestOe:'' };
     const oeRec = HVC.identityUnsafeOe(oe) ? null : HVC.oe.get(oe);
     if (oeRec && (oeRec.name || oeRec.applicability || (oeRec.category && !['Без категории','Разное','Прочее','Не определено'].includes(String(oeRec.category).trim())) || oeRec.length || oeRec.dimensions_str)) H.rep = oeRec;
+    if(HVC._prof)HVC._prof.oeAggMisses=(HVC._prof.oeAggMisses||0)+1;
     const keys = HVC.byOe.get(oe);
     if (keys) {
       const seenArt = new Set();
       let dimsBudget = 1200;
       const listN = H.agg.listN;
       for (const k of keys) {
+        if(HVC._prof)HVC._prof.oeDonorVisits=(HVC._prof.oeDonorVisits||0)+1;
         if (HVC.identityUnsafeKey(k)) continue;
         const pt = HVC.parts.get(k); if (!pt) continue;
         const ev = pt._dimensionEvidence;
@@ -24916,6 +24919,7 @@ const HVC = {
       console.info('[UC] обогащение: ' + fmt(rows.length) + ' строк · ' + fmt(ms) + ' мс · заполнено ' + fmt(n) +
         ' · без работы ' + fmt(fast) + ' · по OE ' + fmt(oeRows) + ' · по паре ' + fmt(abRows) +
         ' · ' + (rows.length ? Math.round(ms * 1000 / rows.length) : 0) + ' мкс/строка');
+      if (_prof) console.info('[UC] обогащение · OE агрегаты: обращений '+fmt(_prof.oeAggCalls||0)+' · пересчитано '+fmt(_prof.oeAggMisses||0)+' · посещений доноров '+fmt(_prof.oeDonorVisits||0));
       if (_prof && _prof.n) console.info('[UC] обогащение · проверка (образец ' + fmt(_prof.n) + '): ' +
         (_prof.total / _prof.n).toFixed(1).replace('.', ',') + ' мкс/строка, из них identity ' +
         (_prof.identity / _prof.n).toFixed(1).replace('.', ',') + ' мкс');
@@ -29215,6 +29219,14 @@ const BrowserApplyCheckpoint = {
     const marker=await db.meta.get(this.KEY);
     if(marker&&marker.value.owner!==this.owner)throw new Error('Незавершённый импорт в другой вкладке: запись заблокирована до завершения или восстановления.');
   },
+  async assertBackupManifest() {
+    await db.transaction('r',db.meta,db.applyUndo,async()=>{
+      if(!await db.meta.get(this.KEY)&&await db.applyUndo.count()){
+        const error=new Error('Найдены данные отката без контрольного маркера. Автоматическая запись остановлена, чтобы не затереть копию. Не очищайте IndexedDB; сохраните доступные данные экспортом.');
+        error.name='CheckpointMissingError';throw error;
+      }
+    });
+  },
   async begin() {
     if(S._volatileStorage)throw new Error('Без IndexedDB безопасное применение недоступно');
     if(this.owner)throw new Error('Контрольная точка уже используется');
@@ -29228,6 +29240,7 @@ const BrowserApplyCheckpoint = {
       // The baseline save below includes any cancelled debounced edits.
       if(typeof _cancelPersistSoon==='function')_cancelPersistSoon();
       if(typeof _persistQueue!=='undefined')await _persistQueue.catch(()=>{});
+      await this.assertBackupManifest();
       await db.transaction('r',db.meta,()=>StorageCtl.assertCatalogFresh());
       step('persist-baseline','products');
       if(!await persistNow(undefined,{verifyUnchanged:true})||S._cacheAuxError||S._hvcPersistError){
@@ -29253,7 +29266,7 @@ const BrowserApplyCheckpoint = {
             await StorageCtl.assertCatalogFresh();
             // Small read window bounds clones before byte-sized undo pages.
             const rows=await(last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(32).toArray();
-            for(const values of this.pages(rows)){
+            for(const values of this.pages(name==='meta'?rows.filter(r=>r.key!==this.KEY&&r.key!=='browserApplyRestoreReceipt'):rows)){
               step('write-backup',name,total,values.length);
               await db.applyUndo.bulkAdd([{table:name,pos:total,values}]);
               total+=values.length;pages++;context.completedRows+=values.length;
@@ -29308,7 +29321,14 @@ const BrowserApplyCheckpoint = {
     // Clearing the target and replaying the backup are ONE transaction. A
     // failed restore leaves both the pre-restore DB and the undo checkpoint.
     await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
-      const m=await db.meta.get(this.KEY);if(!m||m.value.owner!==owner)throw new Error('Нет соответствующей контрольной точки');
+      const m=await db.meta.get(this.KEY);
+      if(!m){
+        const receipt=await db.meta.get('browserApplyRestoreReceipt');
+        if(receipt?.value.owner===owner&&receipt.value.catalog===JSON.stringify(await db.meta.get('catalog')||null)&&await db.applyUndo.count()===0)return;
+        const missing=new Error('Нет соответствующей контрольной точки. Её наличие не подтверждено; повторный откат запрещён.');
+        missing.name='CheckpointMissingError';throw missing;
+      }
+      if(m.value.owner!==owner)throw new Error('Контрольная точка принадлежит другому импорту');
       if(m.value.preparing)throw new Error('Контрольная копия ещё не подготовлена; восстановление запрещено');
       const variable=m.value.storage==='pages-v2',packed=variable||m.value.storage==='pages-v1';
       if(m.value.storage!==undefined&&!packed)throw new Error('Неизвестный формат контрольной точки');
@@ -29336,9 +29356,11 @@ const BrowserApplyCheckpoint = {
         }
       }
       await db.meta.delete(this.KEY);await db.applyUndo.clear();
+      await db.meta.put({key:'browserApplyRestoreReceipt',value:{owner,catalog:JSON.stringify(await db.meta.get('catalog')||null)}});
     });
   },
   async recover() {
+    await BrowserImportIO.run(db,()=>this.assertBackupManifest(),{label:'Проверка данных отката',recovery:true});
     const marker=await BrowserImportIO.run(db,()=>db.meta.get(this.KEY),{label:'Проверка контрольной точки',recovery:true});if(!marker)return;
     const recover=async()=>{
       // A crash during preparation precedes all catalog mutation. Discard the
@@ -29411,7 +29433,18 @@ const BrowserCatalogLookup = {
     }
   },
   async query(kind,keys) {
-    const found=await BrowserImportSources.lookupKeyPages(this.run+':'+kind,keys),out=new Map();
+    let found;
+    try{found=await BrowserImportSources.lookupKeyPages(this.run+':'+kind,keys);}
+    catch(error){
+      if(error?.name!=='KeyIndexError'||this._keyRepairUsed)throw error;
+      this._keyRepairUsed=true;
+      const rebuilt=await BrowserCatalogLookup.create(this.rows);
+      const old=this.run;this.run=rebuilt.run;this.oeReady=false;
+      await BrowserCatalogLookup.clear(old);
+      if(kind==='oe')await this.ensureOe();
+      found=await BrowserImportSources.lookupKeyPages(this.run+':'+kind,keys);
+    }
+    const out=new Map();
     for(const [key,record] of found){
       if(!Number.isSafeInteger(record.pos)||record.pos<0||record.pos>=this.rows.length)throw new Error('Индекс каталога повреждён');
       out.set(key,{...record,duplicate:record.conflict});
@@ -29671,11 +29704,17 @@ const BrowserImportSources = {
     if(!prior.brand&&item.brand)prior.brand=item.brand;
     return prior;
   },
+  keyIndexError(reason,context={}) {
+    const error=new Error('Индекс ключей повреждён: '+reason);
+    error.name='KeyIndexError';error._ucKeyIndex=context;
+    console.error('[UC] индекс ключей',reason,context);
+    return error;
+  },
   validateKeyPage(page) {
-    if(!page||!Array.isArray(page.records)||!page.records.length||page.records.length>this.BATCH||page.first!==page.records[0]?.key)throw new Error('Индекс ключей повреждён');
+    if(!page||!Array.isArray(page.records)||!page.records.length||page.records.length>this.BATCH||page.first!==page.records[0]?.key)throw this.keyIndexError('неверная страница или запись',{run:page?.run,first:page?.first,records:page?.records?.length});
     let previous;
     for(const row of page.records){
-      if(!row||typeof row.key!=='string'||typeof row.conflict!=='boolean'||(previous!==undefined&&previous>=row.key))throw new Error('Индекс ключей повреждён');
+      if(!row||typeof row.key!=='string'||typeof row.conflict!=='boolean'||(previous!==undefined&&previous>=row.key))throw this.keyIndexError('неверная страница или запись',{run:page?.run,first:page?.first,records:page?.records?.length});
       previous=row.key;
     }
     return page;
@@ -29737,7 +29776,7 @@ const BrowserImportSources = {
       }
       const loaded=await table.bulkGet(missing.map(first=>[run,first]));
       loaded.forEach((page,i)=>{
-        this.validateKeyPage(page);if(page.first!==missing[i])throw new Error('Индекс ключей повреждён');
+        this.validateKeyPage(page);if(page.first!==missing[i])throw this.keyIndexError('неверная страница или запись',{run:page?.run,first:page?.first,records:page?.records?.length});
         pages.set(page.first,page);
         const bytes=page.records.reduce((n,r)=>n+96+2*(r.key.length+(r.brand?.length||0)+(r.signature?.length||0)),0);
         if(bytes<=32*1048576){this._keyPageCache.set(JSON.stringify([run,page.first]),{run,page,bytes});this._keyCacheBytes+=bytes;}
@@ -29917,7 +29956,23 @@ const BrowserImportSources = {
     return found;
   },
   async conflicts(run,rows,describe) {
-    return BrowserImportIO.run(this.database(),()=>this.readConflicts(run,rows,describe),{label:'Проверка конфликтов источника'});
+    const read=()=>BrowserImportIO.run(this.database(),()=>this.readConflicts(run,rows,describe),{label:'Проверка конфликтов источника'});
+    try{return await read();}catch(error){
+      if(error?.name!=='KeyIndexError')throw error;
+      if(!this._repairedKeyRuns)this._repairedKeyRuns=new Set();
+      if(this._repairedKeyRuns.has(run))throw error;
+      this._repairedKeyRuns.add(run);
+      while(this._repairedKeyRuns.size>8)this._repairedKeyRuns.delete(this._repairedKeyRuns.values().next().value);
+      const meta=await this.database().runs.get(run);
+      if(!meta?.complete||!meta.source)throw error;
+      try{await this.source(meta.source);}catch(sourceError){error.cause=sourceError;throw error;}
+      // Only derived keys are discarded. Immutable input rows and the Apply
+      // checkpoint stay intact; never replay already-applied catalog batches.
+      if(typeof Prog!=='undefined')Prog.msg('Перестроение индекса ключей сохранённого источника…');
+      await this.clearRun(run);
+      await this.prepareKeys(meta.source,run,describe,meta.fingerprint);
+      return read(); // one repair attempt; a second failure is not suppressed
+    }
   },
   async readConflicts(run,rows,describe) {
     const keys=[...new Set(rows.map(describe).filter(Boolean).map(x=>x.key))];
@@ -29925,7 +29980,7 @@ const BrowserImportSources = {
     if(!meta?.complete)throw new Error('Индекс ключей не готов');
     if(meta.storage==='key-pages-v1'){
       const values=await this.readKeyPages(run,keys);
-      if(values.size!==keys.length)throw new Error('Индекс ключей неполон; применение остановлено');
+      if(values.size!==keys.length)throw this.keyIndexError('индекс неполон',{run,expected:keys.length,found:values.size});
       return new Set([...values.values()].filter(v=>v.conflict).map(v=>v.key));
     }
     if(meta.storage)throw new Error('Неизвестный формат индекса ключей');
@@ -31020,8 +31075,8 @@ const Import = {
           Toast.warn('Импорт отменён','Каталог и реестры восстановлены. Страница будет перезагружена; исходник остаётся в таблицах источников.');
           location.reload();
         }catch(recoveryError){S._bootError=recoveryError;
-          const failure=new Error('Импорт прерван. Автооткат не завершён: '+storageErrorText(recoveryError)+'. Не запускайте новый импорт. Повторите восстановление кнопкой в окне импорта либо откройте страницу заново для восстановления. Контрольная точка не удалена. Причина: '+storageErrorText(error));
-          failure._ucRollbackFailed=true;throw failure;}
+          const failure=new Error('Импорт прерван. Автооткат не завершён: '+storageErrorText(recoveryError)+'. Не запускайте новый импорт. '+(recoveryError?.name==='CheckpointMissingError'?'Наличие контрольной точки не подтверждено. Сохраните доступные данные экспортом; повторный откат без точки невозможен.':'Откройте страницу заново для проверки контрольной точки либо повторите восстановление кнопкой в окне импорта.')+' Причина: '+storageErrorText(error));
+          failure._ucRollbackFailed=true;failure._ucCheckpointMissing=recoveryError?.name==='CheckpointMissingError';throw failure;}
       }
       throw error;
     }).finally(async()=>{if(catalogLookup)try{await catalogLookup.dispose();}catch(e){console.warn('[UC] очистка индекса каталога:',e);}if(sourceId){BrowserImportSources.active.delete(sourceId);try{await BrowserImportSources.releaseRun(collisionRun);}catch(e){console.warn('[UC] очистка индекса источника:',e);}}}));
@@ -48512,7 +48567,7 @@ function bindAll() {
       console.info('[UC] импорт · результат применения: '+(stillOpen ? 'мастер остался открыт (проверка не пройдена)' : 'мастер закрыт'));
     } catch (err) {
       console.error('[UC] Import.apply error:', err);
-      $('#impRestoreActions').hidden=err?._ucRollbackFailed!==true;
+      $('#impRestoreActions').hidden=err?._ucRollbackFailed!==true||err?._ucCheckpointMissing===true;
       const conflict=err?.name==='CatalogConflictError';
       $('#impConflictActions').hidden=!conflict;
       const reason = storageErrorText(err);
@@ -48537,7 +48592,7 @@ function bindAll() {
         Toast.ok('Каталог восстановлен','Исходная таблица сохранена. Страница будет перезагружена.');
         location.reload();
       }));
-    }catch(error){S._bootError=error;Toast.err('Восстановление не завершено',storageErrorText(error)+'. Контрольная точка сохранена; не очищайте IndexedDB.');}
+    }catch(error){S._bootError=error;if(error?.name==='CheckpointMissingError')$('#impRestoreActions').hidden=true;Toast.err('Восстановление не завершено',storageErrorText(error)+'. Не очищайте IndexedDB. Если точка отсутствует, повторные попытки её не восстановят; сохраните доступные данные экспортом.');}
     finally{button.disabled=false;}
   });
   on('#impConflictResume','onclick',()=>{try{ImportConflictRecovery.open();}catch(e){Toast.err('Продолжение импорта',storageErrorText(e));}});
