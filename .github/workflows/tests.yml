@@ -54,6 +54,11 @@ jobs:
           NODE_PATH=.arena/idb-tests/node_modules node tests/product-key-reconcile-indexeddb.js
       - name: Браузерный импорт — Chromium smoke
         run: |
+          mkdir -p .arena
+          # Keep the failing browser's diagnostics visible in check annotations,
+          # even when the runner's external log-download host is inaccessible.
+          exec > >(tee .arena/browser-smoke.log) 2>&1
+          trap 'code=$?; tail -n 25 .arena/browser-smoke.log | while IFS= read -r line; do line=${line//%/%25}; line=${line//$"\r"/%0D}; echo "::error::$line"; done; exit "$code"' ERR
           npm install --prefix .arena/browser-tests playwright-core@1.58.2 @sparticuz/chromium@143.0.4 --no-save --no-audit --no-fund
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-worker-memory-e2e.js
           NODE_PATH=.arena/browser-tests/node_modules node tests/browser-ozon-stream-xlsx-e2e.js
