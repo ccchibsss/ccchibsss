@@ -54,6 +54,7 @@ jobs:
           NODE_PATH=.arena/idb-tests/node_modules node tests/persist-indexeddb-probe.js
           NODE_PATH=.arena/idb-tests/node_modules node tests/product-key-reconcile-indexeddb.js
           NODE_PATH=.arena/idb-tests/node_modules node tests/source-registry-indexeddb.js
+          NODE_PATH=.arena/idb-tests/node_modules node tests/persist-reopen-parity-indexeddb.js
       - name: Браузерный импорт — Chromium smoke
         run: |
           mkdir -p .arena
