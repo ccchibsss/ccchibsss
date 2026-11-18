@@ -29,6 +29,7 @@ vm.runInContext(h.slice(start,end),c);
  // Actual IndexedDB persistence catch must preserve nested event errors.
  c.PyEngine={processingMode:()=> 'browser'};
  c.StorageCtl={mode:()=> 'economy',saveDiffAtomic:async()=>{throw {target:{error:{name:'QuotaExceededError',message:'full volume'}}}},isQuotaError:()=>true,refresh:()=>{}};
+ vm.runInContext('Object.assign(StorageCtl,{'+h.slice(h.indexOf('  recordBytes('),h.indexOf('  *productBatches('))+'});',c);
  const a=h.indexOf('async function _persistNowImpl('),b=h.indexOf('\n}\n',a)+2;
  vm.runInContext(h.slice(a,b),c);
  assert.equal(await c._persistNowImpl(),false);

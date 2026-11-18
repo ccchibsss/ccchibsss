@@ -7,7 +7,7 @@ vm.runInContext([...h.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1],c);
 const a=h.indexOf('const BrowserApplyCheckpoint = {'),b=h.indexOf('const BrowserImportSources = {',a);vm.runInContext(h.slice(a,b)+';this.C=BrowserApplyCheckpoint;',c);
 vm.runInContext("this.db=new Dexie('checkpoint-test');db.version(6).stores({products:'++id',products_stage:'++id',meta:'key',cats:'++id',rules:'++id',excs:'++id',imports:'++id',hvcOe:'++id,&oeNorm',hvcParts:'++id,&key',hvcCross:'++id,&key',hvcPrices:'++id,&key'});",c);
 const schemaStart=h.indexOf('db.version(7).stores('),schemaEnd=h.indexOf('db.version(7).upgrade(() => {});',schemaStart)+'db.version(7).upgrade(() => {});'.length;vm.runInContext(h.slice(schemaStart,schemaEnd),c);
-c.StorageCtl={assertCatalogFresh:()=>c.C.assertWriter()};const C=c.C,db=c.db;const plain=x=>JSON.parse(JSON.stringify(x));
+c.StorageCtl={assertCatalogFresh:()=>c.C.assertWriter()};vm.runInContext('Object.assign(StorageCtl,{'+h.slice(h.indexOf('  recordBytes('),h.indexOf('  *productBatches('))+'});',c);const C=c.C,db=c.db;const plain=x=>JSON.parse(JSON.stringify(x));
 async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await db.table(n).toArray());return out;}
 (async()=>{
  await db.open();
@@ -44,21 +44,21 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  // A failed second backup page must leave the entire saved catalog intact.
  const backupAdd=db.applyUndo.bulkAdd.bind(db.applyUndo);
  const io=Object.assign(Error('DataError Failed to write blobs (IOError)'),{name:'AbortError'});
- db.applyUndo.bulkAdd=async rows=>{if(rows[0].table==='products'&&rows[0].pos===1000)throw io;return backupAdd(rows)};
- await assert.rejects(()=>C.begin(),e=>(e.cause===io||e.cause?.inner===io)&&e.name==='AbortError'&&e._ucCheckpointBeginFailed&&e._ucCheckpointContext.operation==='write-backup'&&e._ucCheckpointContext.table==='products'&&e._ucCheckpointContext.position===1000);
- assert.equal(C.lastFailure.completedRows,1000);assert.equal(C.lastFailure.pageRows,1000);assert(/Failed to write blobs/.test(C.lastFailure.message));
+ db.applyUndo.bulkAdd=async rows=>{if(rows[0].table==='products'&&rows[0].pos===32)throw io;return backupAdd(rows)};
+ await assert.rejects(()=>C.begin(),e=>(e.cause===io||e.cause?.inner===io)&&e.name==='AbortError'&&e._ucCheckpointBeginFailed&&e._ucCheckpointContext.operation==='write-backup'&&e._ucCheckpointContext.table==='products'&&e._ucCheckpointContext.position===32);
+ assert.equal(C.lastFailure.completedRows,32);assert.equal(C.lastFailure.pageRows,32);assert(/Failed to write blobs/.test(C.lastFailure.message));
  assert.equal(C.owner,null);assert.equal(await db.applyUndo.count(),0);assert(!await db.meta.get(C.KEY));assert.deepEqual(await readAll(),before);
  db.applyUndo.bulkAdd=backupAdd;
  const failRead=()=>{throw io};db.products.hook('reading',failRead);
  await assert.rejects(()=>C.begin(),e=>e._ucCheckpointContext.operation==='read'&&e._ucCheckpointContext.table==='products'&&e._ucCheckpointContext.position===0);
  db.products.hook('reading').unsubscribe(failRead);assert.deepEqual(await readAll(),before);assert.equal(await db.applyUndo.count(),0);
  const failMarker=(key,obj)=>{if(key===C.KEY)throw io};db.meta.hook('creating',failMarker);
- await assert.rejects(()=>C.begin(),e=>e._ucCheckpointContext.operation==='publish-marker'&&e._ucCheckpointContext.table==='meta');
+ await assert.rejects(()=>C.begin(),e=>e._ucCheckpointContext.operation==='reserve-marker'&&e._ucCheckpointContext.table==='meta');
  db.meta.hook('creating').unsubscribe(failMarker);assert.deepEqual(await readAll(),before);assert.equal(await db.applyUndo.count(),0);assert(!await db.meta.get(C.KEY));
  let peak=0;const bulk=db.applyUndo.bulkAdd.bind(db.applyUndo);db.applyUndo.bulkAdd=async rows=>{peak=Math.max(peak,rows.length);return bulk(rows)};
  let owner=await C.begin();assert.equal(C.lastFailure,null);assert(peak<=1000);assert(await db.meta.get(C.KEY));assert.equal(C.owner,owner);
  const marker=(await db.meta.get(C.KEY)).value;assert.equal(marker.storage,'pages-v2');assert.equal(marker.pageSize,1000);
- const pages=await db.applyUndo.where('table').equals('products').sortBy('pos');assert.deepEqual(pages.map(p=>p.pos),[0,1000,2000]);assert.deepEqual(pages.map(p=>p.values.length),[1000,1000,503]);
+ const pages=await db.applyUndo.where('table').equals('products').sortBy('pos');assert.deepEqual(pages.map(p=>p.pos),Array.from({length:Math.ceil(2503/32)},(_,i)=>i*32));assert.equal(pages.reduce((n,p)=>n+p.values.length,0),2503);assert(pages.every(p=>p.values.length<=32));
  assert((await db.applyUndo.toArray()).every(p=>p.values.length<=1000));
  await assert.rejects(()=>C.begin(),/уже используется/);
  // Guard rejects a second tab's writer and never changes its catalog token.
@@ -123,7 +123,7 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  owner=await C.begin();let invalid=await db.meta.get(C.KEY);invalid.value.storage='future-v99';await db.meta.put(invalid);
  const unknown=await readAll();await assert.rejects(()=>C.restore(owner),/Неизвестный формат/);assert.deepEqual(await readAll(),unknown);
  invalid.value.storage='pages-v1';invalid.value.pageSize=0;await db.meta.put(invalid);await assert.rejects(()=>C.restore(owner),/размер страницы/);
- invalid.value.pageSize=1000;await db.meta.put(invalid);await C.restore(owner);
+ invalid.value.storage='pages-v2';invalid.value.pageSize=1000;await db.meta.put(invalid);await C.restore(owner);
  // A shortened page has the correct record count, but must still fail closed.
  owner=await C.begin();let page=await db.applyUndo.where('table').equals('products').first();const intact=plain(page);page.values.pop();await db.applyUndo.put(page);
  const damagedPage=await readAll();await assert.rejects(()=>C.restore(owner),/Повреждена/);assert.deepEqual(await readAll(),damagedPage);assert(await db.meta.get(C.KEY));
@@ -134,6 +134,13 @@ async function readAll(){const out={};for(const n of C.TABLES)out[n]=plain(await
  // Tampered/incomplete checkpoints fail closed without clearing live data.
  owner=await C.begin();await db.applyUndo.where('table').equals('products').first().then(r=>db.applyUndo.delete(r.id));
  const partial=await readAll();await assert.rejects(()=>C.restore(owner),/Неполная/);assert.deepEqual(await readAll(),partial);assert(await db.meta.get(C.KEY));
+ // Crash during preparation: source is intact, partial undo must never replay.
+ await C.commit(owner);const originalAfter=await readAll();
+ await db.meta.put({key:C.KEY,value:{owner:'preparation-crash',preparing:true}});
+ await db.applyUndo.add({table:'products',pos:0,values:[{id:99999,article:'PARTIAL'}]});
+ C.owner=null;db.close();await db.open();
+ await assert.rejects(()=>C.restore('preparation-crash'),/не подготовлена/);
+ await C.recover();assert.deepEqual(await readAll(),originalAfter);assert.equal(await db.applyUndo.count(),0);
  await db.delete();
  // Source, SQL isolation and publication/error wiring remain explicit.
  const apply=h.slice(h.indexOf('  apply() {',h.indexOf('const Import = {')),h.indexOf('  _relatedRows(',h.indexOf('const Import = {')));

@@ -18137,9 +18137,9 @@ const StorageCtl = {
     const equal=await db.transaction('rw',db.products,db.products_stage,db.meta,async()=>{
       const current=await this.assertCatalogFresh();
       if(await db.products.count()!==rows.length||await db.products_stage.count()||await db.meta.get('incomplete')||await db.meta.get('stageOwner'))return false;
-      for(let start=0;start<ordered.length;start+=1000){
+      for(let start=0;start<ordered.length;start+=32){
         if(typeof UCCancel!=='undefined')UCCancel.check();
-        const batch=ordered.slice(start,start+1000),stored=await db.products.bulkGet(batch.map(p=>p.id));
+        const batch=ordered.slice(start,start+32),stored=await db.products.bulkGet(batch.map(p=>p.id));
         if(batch.some((p,i)=>!stored[i]||!this.same(withId(p),stored[i])))return false;
       }
       catalog=this.catalogValue(rows.length,current?.value?.fp||'');
@@ -18269,15 +18269,14 @@ const StorageCtl = {
     await db.transaction('rw', db.products, db.meta, async () => {
       await this.assertCatalogFresh();
       if (onlyChanged) {
-        for (let i = 0; i < changedList.length; i += chunk) {
-          const rows = changedList.slice(i, i + chunk).map(p => withId(p));
+        for (const rows of this.productBatches({rowCount,chunk,changedList,withId,slimChunk})) {
           await db.products.bulkPut(rows); written += rows.length;
         }
       } else {
         const ids=this.productIds(S.rows,withId);
         const reconciled=await this.reconcileProductKeys(ids);deleted=reconciled.deleted;
-        for (let i = 0; i < rowCount; i += chunk) {
-          const rows = slimChunk(i, i + chunk);
+        let i=0;
+        for (const rows of this.productBatches({rowCount,chunk,withId,slimChunk})) {
           /* fullWrite: каталог перезаписывается целиком — читать прежние записи и
              сравнивать их по каждому полю незачем. Это главный ускоритель записи
              после импорта большого прайса. */
@@ -18288,7 +18287,8 @@ const StorageCtl = {
             for (let j = 0; j < rows.length; j++) if (!previous || !previous[j] || !this.same(rows[j], previous[j])) changed.push(rows[j]);
             if (changed.length) { await db.products.bulkPut(changed); written += changed.length; }
           }
-          if ((i / chunk) % 8 === 0 && typeof MemGuard !== 'undefined') MemGuard.check('запись каталога');
+          i+=rows.length;
+          if (typeof UCCancel!=='undefined')UCCancel.check();
         }
       }
       /* Никаких setTimeout внутри IndexedDB-транзакции: это может её закрыть. */
@@ -18310,6 +18310,32 @@ const StorageCtl = {
      (её повторяем), а не всего каталога. Неатомарность закрывается маркером
      meta.incomplete: ревизия meta.catalog пишется последней, и оборванная
      запись видна при следующем запуске. */
+  // Conservative structured-clone estimate, without building a JSON string.
+  // This is a batch budget, not a promise about total browser RSS.
+  recordBytes(value, seen = new WeakSet()) {
+    if(typeof value==='string')return 32+value.length*2;
+    if(value===null||typeof value!=='object')return 16;
+    if(seen.has(value))return 8;seen.add(value);
+    if(typeof Blob!=='undefined'&&value instanceof Blob)return 64+value.size;
+    if(value instanceof ArrayBuffer||ArrayBuffer.isView(value))return 64+value.byteLength;
+    let bytes=64;
+    if(value instanceof Map){for(const [k,v] of value)bytes+=this.recordBytes(k,seen)+this.recordBytes(v,seen);}
+    else if(value instanceof Set){for(const v of value)bytes+=this.recordBytes(v,seen);}
+    else for(const k of Object.keys(value))bytes+=32+k.length*2+this.recordBytes(value[k],seen);
+    return bytes;
+  },
+  *productBatches({rowCount,chunk,changedList,withId,slimChunk}) {
+    const partial=Array.isArray(changedList)&&changedList.length>0&&changedList.length<rowCount;
+    const total=partial?changedList.length:rowCount,budget=4*1024*1024;
+    let rows=[],bytes=0;
+    for(let i=0;i<total;i++){
+      const row=partial?withId(changedList[i]):slimChunk(i,i+1)[0];
+      const size=this.recordBytes(row);
+      if(rows.length&&(rows.length>=chunk||bytes+size>budget)){yield rows;rows=[];bytes=0;}
+      rows.push(row);bytes+=size;
+    }
+    if(rows.length)yield rows;
+  },
   async saveChunked({ rowCount, chunk, changedList, withId, slimChunk, fullWrite }) {
     const onlyChanged = Array.isArray(changedList) && changedList.length > 0 && changedList.length < rowCount;
     const chunkRows = Math.max(100, Math.min(3000, num(chunk) || 500));
@@ -18330,10 +18356,10 @@ const StorageCtl = {
       ids=null; // release the source key vector before materializing write batches
     }
     const total = onlyChanged ? changedList.length : rowCount;
-    for (let i = 0; i < total; i += chunkRows) {
-      const rows = onlyChanged
-        ? changedList.slice(i, i + chunkRows).map(p => withId(p))
-        : slimChunk(i, i + chunkRows);
+    let batches=0;
+    for (const rows of this.productBatches({rowCount,chunk:chunkRows,changedList,withId,slimChunk})) {
+      const i=written;
+      batches++;
       if (!rows.length) continue;
       let ok = false, lastErr = null;
       for (let attempt = 0; attempt < 3 && !ok; attempt++) {
@@ -18359,12 +18385,13 @@ const StorageCtl = {
       }
       if (!ok) throw lastErr;
       written += rows.length;
-      if ((i / chunkRows) % 4 === 0) {
+      if(typeof Prog!=='undefined')Prog.msg('IndexedDB · товары: '+written+' / '+total);
+      if (batches % 4 === 1) {
         if (typeof MemGuard !== 'undefined') MemGuard.check('запись каталога');
         await new Promise(r => setTimeout(r, 0));
       }
       /* Журнал записи: видно, что каталог действительно пишется порциями. */
-      if ((i / chunkRows) % 10 === 0 && written < total) console.info('[UC] запись каталога: ' + fmt(written) + ' из ' + fmt(total) + ' строк');
+      if (batches % 10 === 1 && written < total) console.info('[UC] запись каталога: ' + fmt(written) + ' из ' + fmt(total) + ' строк');
     }
     await db.transaction('rw', db.meta, async () => {
       await this.assertCatalogFresh();
@@ -18379,7 +18406,7 @@ const StorageCtl = {
     /* v12.9.66: видно, сколько именно заняла запись каталога — в журнале импорта
        это отдельный, самый «дисковый» этап. */
     const _writeMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _tWriteStart);
-    console.info('[UC] запись каталога: ' + fmt(written) + ' строк за ' + _writeMs + ' мс · порций ' + fmt(Math.ceil(total / chunkRows)) + ' · удалено ' + fmt(deleted));
+    console.info('[UC] запись каталога: ' + fmt(written) + ' строк за ' + _writeMs + ' мс · порций ' + fmt(batches) + ' · удалено ' + fmt(deleted));
     S._lastCatalogWriteMs = _writeMs;
     S._cacheLastWrite = { mode: 'chunked', count: rowCount, written, deleted, partial: onlyChanged, ms: _writeMs, bytes: (S._cacheLastWrite && S._cacheLastWrite.bytes) || 0 };
   },
@@ -22953,6 +22980,7 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnc
          OE-графе занимают секунды — показываем это в журнале, чтобы было видно
          вклад в общее время сохранения. */
       const _tHvc = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      if(typeof Prog!=='undefined')Prog.msg('IndexedDB · сохранение реестров Каталога V…');
       const hvcSaved=await HVC.save();
       if(hvcSaved===false&&!S._hvcPersistError)S._hvcPersistError='Реестры Каталога V не подтвердили сохранение';
       const _hvcMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _tHvc);
@@ -22998,14 +23026,17 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnc
     /* v12.9.47: крупный каталог не пишем одной транзакцией — браузер обрывает
        её на десятках тысяч записей. Порционная запись держит память в норме и
        повторяет только повреждённую порцию. */
-    const _bigWrite = rowCount > (num(CONST.CHUNKED_WRITE_ROWS) || 20000);
+    let _writeBytes=0;
+    const _writeSource=Array.isArray(changedList)&&changedList.length?changedList:S.rows;
+    for(const row of _writeSource){_writeBytes+=StorageCtl.recordBytes(row);if(_writeBytes>4*1024*1024)break;}
+    const _bigWrite = rowCount > (num(CONST.CHUNKED_WRITE_ROWS) || 20000)||_writeBytes>4*1024*1024;
     writePhase='запись товаров и метаданных ('+StorageCtl.mode()+')';
     if(verifyUnchanged&&await StorageCtl.saveVerifiedMetadata(S.rows,withId)){
       // Metadata committed above; no product writes are needed. Aux tables
       // still go through their own awaited saves below.
     }else if (StorageCtl.mode() === 'economy') {
       const _writeArgs = { rowCount, chunk: CH, changedList, withId, slimChunk, fullWrite: _fullWrite };
-      if (_bigWrite && (_fullWrite || changedList.length > (num(CONST.CHUNKED_WRITE_ROWS) || 20000))) {
+      if (_bigWrite) {
         /* v12.9.66: 1000 строк на транзакцию давало 123 фиксации IndexedDB на
            первом импорте 122 930 SKU — и именно там браузер обрывал порцию
            (BulkError). 2 500 строк на транзакцию: втрое меньше фиксаций, память
@@ -23030,14 +23061,14 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnc
        транзакцией. Для полной замены большого каталога сначала занимаем
        маркер черновика, затем атомарно подменяем таблицу после проверки версии. */
     } else if (Array.isArray(changedList) && changedList.length && changedList.length < rowCount) {
-      if(changedList.length>(num(CONST.CHUNKED_WRITE_ROWS)||20000)){
+      if(_bigWrite){
         await StorageCtl.saveChunked({rowCount,chunk:2500,changedList,withId,slimChunk,fullWrite:false});
       }else{
       let committedCatalog;
       await db.transaction('rw', db.products, db.meta, async () => {
         await StorageCtl.assertCatalogFresh();
-        for (let i = 0; i < changedList.length; i += CH) {
-          await db.products.bulkPut(changedList.slice(i, i + CH).map(src => withId(src)));
+        for (const rows of StorageCtl.productBatches({rowCount,chunk:CH,changedList,withId,slimChunk})) {
+          await db.products.bulkPut(rows);
         }
         committedCatalog = StorageCtl.catalogValue(rowCount, '');
         await db.meta.put({ key: 'catalog', value: committedCatalog });
@@ -23056,9 +23087,8 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnc
       await db.transaction('rw', db.products, db.meta, async () => {
         await StorageCtl.assertCatalogFresh();
         await db.products.clear();
-        for (let i = 0; i < rowCount; i += CH) {
-          await db.products.bulkAdd(slimChunk(i, i + CH));
-          if ((i / CH) % 8 === 0 && typeof MemGuard !== 'undefined') MemGuard.check('запись каталога');
+        for (const rows of StorageCtl.productBatches({rowCount,chunk:CH,withId,slimChunk})) {
+          await db.products.bulkAdd(rows);
         }
         committedCatalog = StorageCtl.catalogValue(rowCount, '');
         await db.meta.put({ key: 'catalog', value: committedCatalog });
@@ -24998,6 +25028,83 @@ const HVC = {
   /* Четыре реестра и правила сохраняются в одной транзакции. Изменения
      сравниваются порциями: полный дубликат реестров больше не требуется. */
   async save() {
+    // Serialize registry generations separately from the outer catalog lock.
+    const task=()=>this._saveImpl();
+    const locks=typeof navigator!=='undefined'&&navigator.locks;
+    if(locks?.request)return locks.request('UC-hvc-write',{mode:'exclusive'},task);
+    const pending=(this._saveQueue||Promise.resolve()).catch(()=>{}).then(task);
+    this._saveQueue=pending;return pending;
+  },
+  async savePaged() {
+    const names=['hvcOe','hvcParts','hvcCross','hvcPrices'];
+    const specs=[[HVC.oe,(oeNorm,v)=>({oeNorm,...v}),'oeNorm'],[HVC.parts,(key,v)=>({key,...v}),'key'],[HVC.cross,(key,v)=>({key,oeNorm:v.oeNorm,artKey:v.artKey}),'key'],[HVC.prices,(key,v)=>({key,...v}),'key']];
+    const baseline=await db.meta.get('hvcStorage'),old=this.storageFormats(baseline),next={};
+    const generation=StorageCtl.newRevision(),created=[];
+    const report=text=>{if(typeof Prog!=='undefined')Prog.msg(text);};
+    try{
+      for(let t=0;t<names.length;t++){
+        const name=names[t],table=db.table(name),[source,make,pk]=specs[t];
+        let largest=1,scanned=0;
+        for(const [key,val] of source){
+          if(typeof key!=='string'||!key||make(key,val)[pk]!==key)throw new Error('Недопустимый ключ реестра '+name);
+          largest=Math.max(largest,StorageCtl.recordBytes(make(key,val)));
+          if(++scanned%1000===0){if(typeof UCCancel!=='undefined')UCCancel.check();report('IndexedDB · подготовка '+name+': '+scanned+' / '+source.size);await new Promise(r=>setTimeout(r,0));}
+        }
+        const pageSize=Math.max(1,Math.min(1000,Math.floor((512*1024-256)/largest))),keys=[];
+        let values=[],done=0;
+        const flush=async()=>{
+          if(typeof UCCancel!=='undefined')UCCancel.check();
+          const pos=keys.length,prior=old[name],priorKey=prior?.format==='pages-v2'?prior.keys[pos]:prior?pos+1:null;
+          const previous=priorKey==null?null:await table.get(priorKey);
+          if(previous&&StorageCtl.same(values,previous.values)){keys.push(priorKey);}
+          else{
+            const id=['hvc',generation,t,pos];
+            await db.transaction('rw',table,db.meta,async()=>{
+              await StorageCtl.assertCatalogFresh();
+              await table.put({id,__ucHvcPage:'v1',values});
+            });
+            created.push([name,id]);keys.push(id);
+          }
+          done+=values.length;values=[];
+          report('IndexedDB · '+name+': '+done+' / '+source.size);
+          await new Promise(r=>setTimeout(r,0));
+        };
+        for(const [key,val] of source){values.push(make(key,val));if(values.length>=pageSize)await flush();}
+        if(values.length)await flush();
+        next[name]={format:'pages-v2',count:source.size,pageSize,keys};
+      }
+      // Publish all four registries together. Failed/stale writes leave the
+      // prior generation readable; no clear/replay transaction is necessary.
+      await db.transaction('rw',db.meta,async()=>{
+        await StorageCtl.assertCatalogFresh();
+        if(!StorageCtl.same(await db.meta.get('hvcStorage'),baseline))throw new Error('Реестры изменены другой вкладкой');
+        await db.meta.put({key:'hvcStorage',value:next});
+        await db.meta.put({key:'hvcRules',value:{rules:HVC.rules,exclusions:HVC.exclusions,descTemplate:HVC.descTemplate}});
+        await db.meta.put({key:'ozonApplicability',value:[...HVC.ozonApplicability.entries()]});
+      });
+    }catch(e){
+      for(let i=0;i<created.length;i+=100){const batch=created.slice(i,i+100);for(const name of names)try{await db.table(name).bulkDelete(batch.filter(x=>x[0]===name).map(x=>x[1]));}catch(_){} }
+      throw e;
+    }
+    // Garbage collection is deliberately after publication and bounded.
+    // Check the pointer in every transaction: never delete a newer writer's pages.
+    try{for(const name of names){
+      let last;const keep=new Set(next[name].keys.map(k=>JSON.stringify(k)));
+      for(;;){
+        const result=await db.transaction('rw',db.table(name),db.meta,async()=>{
+          if(!StorageCtl.same(await db.meta.get('hvcStorage'),{key:'hvcStorage',value:next}))return null;
+          const table=db.table(name),ids=await(last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(100).primaryKeys();
+          await table.bulkDelete(ids.filter(k=>!keep.has(JSON.stringify(k))));return ids;
+        });
+        if(!result?.length)break;last=result[result.length-1];
+        await new Promise(r=>setTimeout(r,0));
+      }
+    }
+    }catch(e){console.warn('[UC] отложена очистка прежних страниц реестров',e);}
+    return true;
+  },
+  async _saveImpl() {
+
     if (S._bootReady !== true || S._bootError) {
       S._hvcPersistError = 'Запуск не завершён: запись реестров остановлена.';
       StorageCtl.refresh(); return false;
@@ -25012,6 +25119,15 @@ const HVC = {
       StorageCtl.refresh(); return false;
     }
     try {
+      const formats=HVC.storageFormats(await db.meta.get('hvcStorage'));
+      let registryBytes=0;
+      for(const source of [HVC.oe,HVC.parts,HVC.cross,HVC.prices]){
+        for(const [key,value] of source){registryBytes+=StorageCtl.recordBytes(key)+StorageCtl.recordBytes(value);if(registryBytes>4*1024*1024)break;}
+        if(registryBytes>4*1024*1024)break;
+      }
+      if(registryBytes>4*1024*1024||Object.values(formats).some(v=>v.format==='pages-v2')||Math.max(HVC.oe.size,HVC.parts.size,HVC.cross.size,HVC.prices.size)>=20000){
+        await HVC.savePaged();S._hvcPersistError='';StorageCtl.refresh();return true;
+      }
       await db.transaction('rw', db.hvcOe, db.hvcParts, db.hvcCross, db.hvcPrices, db.meta, async () => {
         await StorageCtl.assertCatalogFresh();
         const storageRecord=await db.meta.get('hvcStorage');
@@ -25026,7 +25142,7 @@ const HVC = {
             // Fixed rows-per-page remains compatible with v1, but the size
             // is selected from the widest record, not blindly set to 1000.
             let largest=1;
-            for(const [key,val] of source)largest=Math.max(largest,JSON.stringify(make(key,val)).length*2+64);
+            for(const [key,val] of source)largest=Math.max(largest,StorageCtl.recordBytes(make(key,val)));
             const pageSize=Math.max(1,Math.min(1000,Math.floor((512*1024-256)/largest)));
             let page=0,values=[];
             const flush=async()=>{
@@ -25106,8 +25222,9 @@ const HVC = {
     if(!storage||typeof storage!=='object'||Array.isArray(storage))throw new Error('Повреждён формат хранения реестров Каталога V');
     const names=['hvcOe','hvcParts','hvcCross','hvcPrices'];
     for(const [name,value] of Object.entries(storage)){
-      if(!names.includes(name)||!value||value.format!=='pages-v1'||(!Number.isSafeInteger(value.pageSize)||value.pageSize<1||value.pageSize>1000)||!Number.isSafeInteger(value.count)||value.count<0)throw new Error('Неизвестный или повреждённый формат реестра Каталога V');
+      if(!names.includes(name)||!value||!['pages-v1','pages-v2'].includes(value.format)||(!Number.isSafeInteger(value.pageSize)||value.pageSize<1||value.pageSize>1000)||!Number.isSafeInteger(value.count)||value.count<0)throw new Error('Неизвестный или повреждённый формат реестра Каталога V');
     }
+    for(const value of Object.values(storage))if(value.format==='pages-v2'&&(!Array.isArray(value.keys)||value.keys.length!==Math.ceil(value.count/value.pageSize)||new Set(value.keys.map(k=>JSON.stringify(k))).size!==value.keys.length))throw new Error('Повреждены ссылки на страницы реестра');
     return {...storage};
   },
   async load() {
@@ -25122,10 +25239,10 @@ const HVC = {
         const format=storage[table.name];
         if(format){
           const count=format.count,pageSize=format.pageSize,pages=Math.ceil(count/pageSize);
-          if(await table.count()!==pages)throw new Error('Неполный реестр Каталога V: '+table.name);
+          if(format.format!=='pages-v2'&&await table.count()!==pages)throw new Error('Неполный реестр Каталога V: '+table.name);
           const pk=table.name==='hvcOe'?'oeNorm':'key',seen=new Set();
           for(let page=1;page<=pages;page++){
-            const row=await table.get(page),length=Math.min(pageSize,count-(page-1)*pageSize);
+            const row=await table.get(format.format==='pages-v2'?format.keys[page-1]:page),length=Math.min(pageSize,count-(page-1)*pageSize);
             if(!row||row.__ucHvcPage!=='v1'||!Array.isArray(row.values)||row.values.length!==length)throw new Error('Повреждена страница реестра Каталога V: '+table.name);
             for(const value of row.values){
               const key=value&&value[pk];
@@ -29080,7 +29197,7 @@ const BrowserApplyCheckpoint = {
   *pages(rows) {
     let values=[],bytes=64;
     for(const row of rows){
-      const size=JSON.stringify(row).length*2+64;
+      const size=StorageCtl.recordBytes(row);
       if(values.length&&(bytes+size>this.PAGE_BYTES||values.length>=this.BATCH)){yield values;values=[];bytes=64;}
       values.push(row);bytes+=size;
     }
@@ -29107,36 +29224,51 @@ const BrowserApplyCheckpoint = {
         if(S._catalogConflict)e.name='CatalogConflictError';throw e;
       }
       const owner=uid('apply');this.owner=owner;
-      step('transaction-open','applyUndo');
-      await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
-        step('check-marker','meta');
+      step('reserve-marker','meta');
+      await db.transaction('rw',db.meta,db.applyUndo,async()=>{
         if(await db.meta.get(this.KEY))throw new Error('Сначала восстановите незавершённый импорт');
-        step('freshness','meta');await StorageCtl.assertCatalogFresh();
-        step('clear-backup','applyUndo');await db.applyUndo.clear();
-        const counts={},pageCounts={};
-        for(const name of this.TABLES){
-          const table=db.table(name),key=table.schema.primKey.keyPath;let last,total=0,pages=0;
-          for(;;){
-            if(typeof UCCancel!=='undefined')UCCancel.check();
-            step('read',name,total);
-            const rows=await (last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(this.BATCH).toArray();
-            if(!rows.length)break;
+        await StorageCtl.assertCatalogFresh();await db.applyUndo.clear();
+        await db.meta.put({key:this.KEY,value:{owner,preparing:true,created:Date.now()}});
+      });
+      const counts={},pageCounts={};
+      for(const name of this.TABLES){
+        const table=db.table(name),key=table.schema.primKey.keyPath;let last,total=0,pages=0;
+        for(;;){
+          if(typeof UCCancel!=='undefined')UCCancel.check();
+          step('read',name,total);
+          const result=await db.transaction('rw',table,db.meta,db.applyUndo,async()=>{
+            const marker=await db.meta.get(this.KEY);
+            if(marker?.value.owner!==owner||!marker.value.preparing)throw new Error('Контрольная точка изменена');
+            await StorageCtl.assertCatalogFresh();
+            // Small read window bounds clones before byte-sized undo pages.
+            const rows=await(last===undefined?table.orderBy(':id'):table.where(':id').above(last)).limit(32).toArray();
             for(const values of this.pages(rows)){
-              // table identifies the source; destination is always applyUndo.
               step('write-backup',name,total,values.length);
               await db.applyUndo.bulkAdd([{table:name,pos:total,values}]);
               total+=values.length;pages++;context.completedRows+=values.length;
             }
-            last=rows[rows.length-1][key];
-          }
-          counts[name]=total;pageCounts[name]=pages;
+            return rows.length?{last:rows[rows.length-1][key]}:null;
+          });
+          if(!result)break;last=result.last;
+          if(typeof Prog!=='undefined')Prog.msg('Контрольная копия · '+name+': '+total);
+          await new Promise(r=>setTimeout(r,0));
         }
-        step('publish-marker','meta');
+        counts[name]=total;pageCounts[name]=pages;
+      }
+      step('publish-marker','meta');
+      await db.transaction('rw',db.meta,async()=>{
+        const marker=await db.meta.get(this.KEY);if(marker?.value.owner!==owner||!marker.value.preparing)throw new Error('Контрольная точка изменена');
+        await StorageCtl.assertCatalogFresh();
         await db.meta.put({key:this.KEY,value:{owner,created:Date.now(),counts,pageCounts,storage:'pages-v2',pageSize:this.BATCH}});
-        step('transaction-commit','applyUndo');
       });
       return owner;
     }catch(e){
+      // No Apply mutation is allowed until begin resolves. A partial backup
+      // is not a restorable snapshot; remove only our own preparation marker.
+      try{await db.transaction('rw',db.meta,db.applyUndo,async()=>{
+        const marker=await db.meta.get(this.KEY);
+        if(marker?.value.owner===this.owner&&marker.value.preparing){await db.meta.delete(this.KEY);await db.applyUndo.clear();}
+      });}catch(cleanupError){console.warn('[UC] незавершённая подготовка копии',cleanupError);}
       this.owner=null;
       if(e?._ucCancelled)throw e;
       const message=typeof storageErrorText==='function'?storageErrorText(e):String(e?.message||e);
@@ -29166,6 +29298,7 @@ const BrowserApplyCheckpoint = {
     // failed restore leaves both the pre-restore DB and the undo checkpoint.
     await db.transaction('rw',[...this.TABLES.map(n=>db.table(n)),db.applyUndo],async()=>{
       const m=await db.meta.get(this.KEY);if(!m||m.value.owner!==owner)throw new Error('Нет соответствующей контрольной точки');
+      if(m.value.preparing)throw new Error('Контрольная копия ещё не подготовлена; восстановление запрещено');
       const variable=m.value.storage==='pages-v2',packed=variable||m.value.storage==='pages-v1';
       if(m.value.storage!==undefined&&!packed)throw new Error('Неизвестный формат контрольной точки');
       const batch=packed?m.value.pageSize:this.BATCH;
@@ -29197,6 +29330,15 @@ const BrowserApplyCheckpoint = {
   async recover() {
     const marker=await BrowserImportIO.run(db,()=>db.meta.get(this.KEY),{label:'Проверка контрольной точки',recovery:true});if(!marker)return;
     const recover=async()=>{
+      // A crash during preparation precedes all catalog mutation. Discard the
+      // incomplete backup, never replay it over the intact original tables.
+      if(marker.value.preparing){
+        await db.transaction('rw',db.meta,db.applyUndo,async()=>{
+          const m=await db.meta.get(this.KEY);
+          if(m?.value.owner!==marker.value.owner||!m.value.preparing)throw new Error('Контрольная точка изменена');
+          await db.meta.delete(this.KEY);await db.applyUndo.clear();
+        });return;
+      }
       const current=await BrowserImportIO.run(db,()=>db.meta.get(this.KEY),{label:'Проверка контрольной точки',recovery:true});if(!current)return;
       if(!await askConfirm('Прерванный импорт','Восстановить каталог и реестры до незавершённого Apply? Закройте другие вкладки приложения. Исходные таблицы сохранятся.','Восстановить'))throw new Error('Запуск остановлен: требуется восстановление незавершённого импорта');
       await this.restore(current.value.owner);
@@ -29460,7 +29602,7 @@ const BrowserImportSources = {
       while(buffer.length){
         let size=64,count=0;
         for(const row of buffer){
-          const bytes=JSON.stringify(row).length*2+64;
+          const bytes=StorageCtl.recordBytes(row);
           if(count&&(size+bytes>512*1024||count>=this.BATCH))break;
           size+=bytes;count++;
         }
