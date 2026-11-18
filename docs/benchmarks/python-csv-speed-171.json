@@ -1,0 +1,97 @@
+{
+  "rows": 20000,
+  "description_random_words": 32,
+  "baseline_api": "file",
+  "samples": [
+    {
+      "version": "before",
+      "format": "csv",
+      "seconds": 3.4483165599999666,
+      "rss_start": 27095040,
+      "peak_rss": 41439232,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 1
+    },
+    {
+      "version": "after",
+      "format": "csv",
+      "seconds": 1.8897289609999461,
+      "rss_start": 26984448,
+      "peak_rss": 41439232,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 1
+    },
+    {
+      "version": "after",
+      "format": "csv",
+      "seconds": 1.8387986279999495,
+      "rss_start": 27086848,
+      "peak_rss": 41439232,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 2
+    },
+    {
+      "version": "before",
+      "format": "csv",
+      "seconds": 3.5358280670000113,
+      "rss_start": 27086848,
+      "peak_rss": 41439232,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 2
+    },
+    {
+      "version": "before",
+      "format": "csv",
+      "seconds": 3.5722632440000552,
+      "rss_start": 26955776,
+      "peak_rss": 41439232,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 3
+    },
+    {
+      "version": "after",
+      "format": "csv",
+      "seconds": 1.9129838200000222,
+      "rss_start": 27045888,
+      "peak_rss": 41439232,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 3
+    },
+    {
+      "version": "after",
+      "format": "csv",
+      "seconds": 1.840770075000023,
+      "rss_start": 27066368,
+      "peak_rss": 41439232,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 4
+    },
+    {
+      "version": "before",
+      "format": "csv",
+      "seconds": 3.5351399889999584,
+      "rss_start": 27103232,
+      "peak_rss": 41439232,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 4
+    }
+  ],
+  "baseline_reference": "engine/tests/fixtures/csv-file-170-reference.txt",
+  "after_engine": "12.9.171-pyengine-42",
+  "rss_note": "ru_maxrss for process lifetime including inherited/setup high-water floor; equal readings do not prove writer has constant memory",
+  "profile_seconds_before": {
+    "prepare": 1.438258324,
+    "safe_csv_text": 1.933170964,
+    "csv_serializer": 0.248646684,
+    "encode": 0.028591235,
+    "file_write": 0.074070902
+  }
+}

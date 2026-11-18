@@ -1,0 +1,88 @@
+{
+  "rows": 20000,
+  "description_random_words": 32,
+  "samples": [
+    {
+      "version": "before",
+      "format": "xlsx",
+      "seconds": 2.86564082000001,
+      "rss_start": 36257792,
+      "peak_rss": 322269184,
+      "size": 8669876,
+      "content_sha256": "78591055aad31b0ee39854a985623a2470ff8a3a356fe26023cff06768ce1ac9",
+      "repeat": 1
+    },
+    {
+      "version": "after",
+      "format": "xlsx",
+      "seconds": 2.8153021480000007,
+      "rss_start": 36007936,
+      "peak_rss": 59953152,
+      "size": 8669896,
+      "content_sha256": "78591055aad31b0ee39854a985623a2470ff8a3a356fe26023cff06768ce1ac9",
+      "repeat": 1
+    },
+    {
+      "version": "before",
+      "format": "csv",
+      "seconds": 3.0548931839999796,
+      "rss_start": 36458496,
+      "peak_rss": 165183488,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 1
+    },
+    {
+      "version": "after",
+      "format": "csv",
+      "seconds": 3.3089115459999903,
+      "rss_start": 35987456,
+      "peak_rss": 59932672,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 1
+    },
+    {
+      "version": "after",
+      "format": "xlsx",
+      "seconds": 2.798607516000004,
+      "rss_start": 35110912,
+      "peak_rss": 59936768,
+      "size": 8669896,
+      "content_sha256": "78591055aad31b0ee39854a985623a2470ff8a3a356fe26023cff06768ce1ac9",
+      "repeat": 2
+    },
+    {
+      "version": "before",
+      "format": "xlsx",
+      "seconds": 2.809692757999983,
+      "rss_start": 36364288,
+      "peak_rss": 322375680,
+      "size": 8669876,
+      "content_sha256": "78591055aad31b0ee39854a985623a2470ff8a3a356fe26023cff06768ce1ac9",
+      "repeat": 2
+    },
+    {
+      "version": "after",
+      "format": "csv",
+      "seconds": 3.5285540049999895,
+      "rss_start": 36122624,
+      "peak_rss": 59920384,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 2
+    },
+    {
+      "version": "before",
+      "format": "csv",
+      "seconds": 3.324105118000034,
+      "rss_start": 36175872,
+      "peak_rss": 164360192,
+      "size": 23968206,
+      "content_sha256": "a2e88a4dedd7c4d99a910826b838448914fb7518ab10086d8e22e5e36b15dddc",
+      "repeat": 2
+    }
+  ],
+  "baseline_commit": "5e5a6660841e72761dbca8fede6d84c0c49c8224",
+  "method": "Linux ru_maxrss including setup, separate process for every sample; AST baseline compiled in both variants; source creation excluded; XLSX digest covers sorted uncompressed ZIP parts, CSV digest covers raw bytes; two alternating repetitions"
+}

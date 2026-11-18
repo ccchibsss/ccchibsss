@@ -2867,7 +2867,7 @@ DATA.mkdir(exist_ok=True)
 DB_PATH = DATA / 'catalog.db'
 TOKEN_PATH = DATA / 'token.txt'
 SECRETS_PATH = DATA / 'secrets.json'
-VERSION = '12.9.156-pyengine-40'
+VERSION = '12.9.173-pyengine-44'
 
 class DiskFullError(Exception):
     """v12.9.144: на диске с базой не хватает места для безопасного импорта."""
@@ -3602,11 +3602,23 @@ def import_header_index(rows):
     return 0
 
 
+_CSV_CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]')
+_CSV_FORMULA_START = re.compile(r'^[\s\u00a0]*[=+@]')
+_CSV_LINE_START = re.compile(r'^[ \u00a0]*[\t\r\n]')
+_CSV_MINUS_START = re.compile(r'^[\s\u00a0]*-')
+_CSV_NEGATIVE_NUMBER = re.compile(r'\s*-\d+(?:[.,]\d+)?\s*',re.ASCII)
+
+
 def safe_csv_text(value):
     s='' if value is None else str(value)
-    s=re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]',' ',s)
-    if (re.match(r'^[\s\u00a0]*[=+@]',s) or re.match(r'^[ \u00a0]*[\t\r\n]',s) or
-        (re.match(r'^[\s\u00a0]*-',s) and not re.fullmatch(r'\s*-\d+(?:[.,]\d+)?\s*',s,flags=re.ASCII))):
+    if not s:return s
+    s=_CSV_CONTROL.sub(' ',s)
+    # A trigger can only follow leading whitespace or start the cell itself.
+    # Keep the original regex policies for all such cases, including Unicode
+    # whitespace and strict ASCII negative numbers. Do not strip the value.
+    if s[0] not in '=+@-' and not s[0].isspace():return s
+    if (_CSV_FORMULA_START.match(s) or _CSV_LINE_START.match(s) or
+        (_CSV_MINUS_START.match(s) and not _CSV_NEGATIVE_NUMBER.fullmatch(s))):
         s="'"+s
     return s
 
@@ -5489,50 +5501,47 @@ def _xml_esc(v):
     return (text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             .replace('"', '&quot;'))
 
-def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None, yellow=None, formulas=None):
+def _xlsx_from_rows_file(headers, data_rows, sheet_name='Лист', header_rows=None, yellow=None, formulas=None):
     """Общий XLSX-писатель без openpyxl: zip из XML (stdlib).
        header_rows — служебные строки перед шапкой (официальный шаблон Ozon);
        yellow — множество (строка_данных_0based, колонка_0based) для жёлтой заливки."""
-    import zipfile
+    import zipfile,tempfile
     def col_letter(i):
         out = ''
         i += 1
         while i: i, rem = divmod(i - 1, 26); out = chr(65 + rem) + out
         return out
-    rows_xml = []
-    rn = 0
-    for hrow in (header_rows or []):
+    def sheet_rows():
+        rn = 0
+        for hrow in (header_rows or []):
+            rn += 1
+            cells = ''.join(f'<c r="{col_letter(i)}{rn}" t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>'
+                            for i, v in enumerate(hrow) if v not in (None, ''))
+            yield (f'<row r="{rn}">{cells}</row>')
         rn += 1
-        cells = ''.join(f'<c r="{col_letter(i)}{rn}" t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>'
-                        for i, v in enumerate(hrow) if v not in (None, ''))
-        rows_xml.append(f'<row r="{rn}">{cells}</row>')
-    rn += 1
-    header = ''.join(f'<c r="{col_letter(i)}{rn}" t="inlineStr"><is><t>{_xml_esc(h)}</t></is></c>'
-                     for i, h in enumerate(headers))
-    rows_xml.append(f'<row r="{rn}">{header}</row>')
-    yellow = yellow or set()
-    for di, row in enumerate(data_rows):
-        rn += 1
-        cells = []
-        for i, v in enumerate(row):
-            formula=(formulas or {}).get((di,i))
-            if (v is None or v == '') and not formula: continue
-            ref = f'{col_letter(i)}{rn}'
-            st = ' s="1"' if (di, i) in yellow else ''
-            if formula:
-                f=_xml_esc(formula.lstrip('='))
-                numeric=isinstance(v,(int,float)) and not isinstance(v,bool)
-                typ='' if numeric else ' t="str"'
-                cached=_xml_esc('' if v is None else v)
-                cells.append(f'<c r="{ref}"{st}{typ}><f>{f}</f><v>{cached}</v></c>')
-            elif isinstance(v, (int, float)) and not isinstance(v, bool):
-                cells.append(f'<c r="{ref}"{st}><v>{v}</v></c>')
-            else:
-                cells.append(f'<c r="{ref}"{st} t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>')
-        rows_xml.append(f'<row r="{rn}">{"".join(cells)}</row>')
-    sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-             f'<sheetData>{"".join(rows_xml)}</sheetData></worksheet>')
+        header = ''.join(f'<c r="{col_letter(i)}{rn}" t="inlineStr"><is><t>{_xml_esc(h)}</t></is></c>'
+                         for i, h in enumerate(headers))
+        yield (f'<row r="{rn}">{header}</row>')
+        marks = yellow if yellow is not None else set()
+        for di, row in enumerate(data_rows):
+            rn += 1
+            cells = []
+            for i, v in enumerate(row):
+                formula=(formulas or {}).get((di,i))
+                if (v is None or v == '') and not formula: continue
+                ref = f'{col_letter(i)}{rn}'
+                st = ' s="1"' if (di, i) in marks else ''
+                if formula:
+                    f=_xml_esc(formula.lstrip('='))
+                    numeric=isinstance(v,(int,float)) and not isinstance(v,bool)
+                    typ='' if numeric else ' t="str"'
+                    cached=_xml_esc('' if v is None else v)
+                    cells.append(f'<c r="{ref}"{st}{typ}><f>{f}</f><v>{cached}</v></c>')
+                elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                    cells.append(f'<c r="{ref}"{st}><v>{v}</v></c>')
+                else:
+                    cells.append(f'<c r="{ref}"{st} t="inlineStr"><is><t>{_xml_esc(v)}</t></is></c>')
+            yield (f'<row r="{rn}">{"".join(cells)}</row>')
     sheet_title = _xml_esc(str(sheet_name)[:31] or 'Лист')
     parts = {
         '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -5562,11 +5571,30 @@ def _xlsx_from_rows(headers, data_rows, sheet_name='Лист', header_rows=None,
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
             '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
-        'xl/worksheets/sheet1.xml': sheet}
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
-        for name, content in parts.items(): z.writestr(name, content)
-    return out.getvalue()
+        }
+    out=tempfile.TemporaryFile(mode='w+b')
+    try:
+        with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for name,content in parts.items():z.writestr(name,content)
+            # Row-major, inline-string output: no full sheet XML or shared
+            # string dictionary. A fixed byte buffer amortizes ZIP writes.
+            with z.open('xl/worksheets/sheet1.xml','w',force_zip64=True) as sheet:
+                sheet.write(b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>')
+                pending=bytearray()
+                for row in sheet_rows():
+                    pending.extend(row.encode('utf-8'))
+                    if len(pending)>=65536:sheet.write(pending);pending.clear()
+                if pending:sheet.write(pending)
+                sheet.write(b'</sheetData></worksheet>')
+        out.seek(0);return out
+    except BaseException:
+        out.close();raise
+
+
+def _xlsx_from_rows(headers,data_rows,sheet_name='Лист',header_rows=None,yellow=None,formulas=None):
+    # Compatibility API for legacy callers; HTTP Ozon uses the file API.
+    with _xlsx_from_rows_file(headers,data_rows,sheet_name,header_rows,yellow,formulas) as output:
+        return output.read()
 
 def _export_styles(meta):
     import xml.etree.ElementTree as ET
@@ -5966,37 +5994,78 @@ def ozon_row_meta(p, idx, vat='Не облагается', discount_pct=0, vehic
     cols = {'weight': 12, 'width': 13, 'height': 14, 'length': 15}
     return row, {cols[k] for k in std_fields}
 
-def _ozon_rows_data(conn, keys=None, discount_pct=0, vat='Не облагается', chz_codes=None):
-    pairs = _pairs_map(conn) or None
-    rows = conn.execute('SELECT * FROM products ORDER BY article,brand').fetchall()
-    out, yellow = [], set()
-    for r in rows:
-        d = dict(r)
-        # v12.9.153: скрытые SKU (visible=false в приложении) в выгрузку Ozon не идут
-        if str(d.get('visible', '1')).lower() in ('0', '0.0', 'false', 'нет'): continue
-        if str(d.get('excluded', '0')).lower() in ('1', 'true', 'да'): continue
-        if keys is not None and (d['article'], d['brand']) not in keys: continue
-        row, std_cols = ozon_row_meta(d, len(out) + 1, vat=vat, discount_pct=discount_pct,
-                                      pairs=pairs, chz_codes=chz_codes)
-        for c in std_cols: yellow.add((len(out), c))
-        out.append(row)
-    return out, yellow
+def _iter_ozon_rows_meta(conn,keys=None,discount_pct=0,vat='Не облагается',chz_codes=None):
+    pairs=_pairs_map(conn) or None
+    cursor=conn.execute('SELECT * FROM products ORDER BY article,brand')
+    count=0
+    try:
+        for raw in cursor:
+            d=dict(raw)
+            if str(d.get('visible','1')).lower() in ('0','0.0','false','нет'):continue
+            if str(d.get('excluded','0')).lower() in ('1','true','да'):continue
+            if keys is not None and (d['article'],d['brand']) not in keys:continue
+            row,marks=ozon_row_meta(d,count+1,vat=vat,discount_pct=discount_pct,pairs=pairs,chz_codes=chz_codes)
+            count+=1;yield row,marks
+    finally:cursor.close()
 
-def export_ozon_csv_bytes(conn, discount_pct=0, vat='Не облагается', enc='utf-8', keys=None, chz_codes=None):
-    import csv as _csv
-    buf = io.StringIO(); w = _csv.writer(buf, delimiter=';')
-    w.writerow(OZON_HEADERS)
-    for row in _ozon_rows_data(conn, keys, discount_pct, vat, chz_codes)[0]:
-        w.writerow([safe_csv_text(v) for v in row])
-    text = buf.getvalue()
-    return encode_csv(text,enc)
 
-def export_ozon_xlsx_bytes(conn, discount_pct=0, vat='Не облагается', keys=None, chz_codes=None):
-    rows, yellow = _ozon_rows_data(conn, keys, discount_pct, vat, chz_codes)
-    tpl = ozon_template_rows()
-    if tpl:
-        return _xlsx_from_rows(tpl[1], rows, 'Ozon', header_rows=[tpl[0], tpl[2], tpl[3]], yellow=yellow)
-    return _xlsx_from_rows(OZON_HEADERS, rows, 'Ozon', yellow=yellow)
+def _ozon_rows_data(conn,keys=None,discount_pct=0,vat='Не облагается',chz_codes=None):
+    # Legacy list API retained; production file exports consume the iterator.
+    out,yellow=[],set()
+    for row,marks in _iter_ozon_rows_meta(conn,keys,discount_pct,vat,chz_codes):
+        yellow.update((len(out),c) for c in marks);out.append(row)
+    return out,yellow
+
+
+def export_ozon_csv_file(conn,discount_pct=0,vat='Не облагается',enc='utf-8',keys=None,chz_codes=None):
+    import csv as _csv,tempfile
+    output=tempfile.TemporaryFile(mode='w+b')
+    class Sink:
+        def __init__(self):self.parts=[];self.chars=0
+        def flush(self):
+            if not self.parts:return
+            text=''.join(self.parts)
+            # encode_csv adds BOM for a whole UTF-8 document, not each block.
+            output.write(encode_csv(text,enc) if enc=='cp1251' else text.encode('utf-8'))
+            self.parts.clear();self.chars=0
+        def write(self,text):
+            self.parts.append(text);self.chars+=len(text)
+            if self.chars>=65536:self.flush()
+            return len(text)
+    try:
+        if enc!='cp1251':output.write(b'\xef\xbb\xbf')
+        sink=Sink();writer=_csv.writer(sink,delimiter=';');writer.writerow(OZON_HEADERS)
+        rows=_iter_ozon_rows_meta(conn,keys,discount_pct,vat,chz_codes)
+        try:
+            # Retain formula-injection protection with the optimized common
+            # path. Code identifiers remain unchanged; XLSX writes them as text.
+            for row,_ in rows:writer.writerow([safe_csv_text(v) for v in row])
+        finally:rows.close()
+        sink.flush();output.seek(0);return output
+    except BaseException:
+        output.close();raise
+
+
+def export_ozon_csv_bytes(conn,discount_pct=0,vat='Не облагается',enc='utf-8',keys=None,chz_codes=None):
+    with export_ozon_csv_file(conn,discount_pct,vat,enc,keys,chz_codes) as output:return output.read()
+
+
+def export_ozon_xlsx_file(conn,discount_pct=0,vat='Не облагается',keys=None,chz_codes=None):
+    yellow=set()
+    meta=_iter_ozon_rows_meta(conn,keys,discount_pct,vat,chz_codes)
+    def rows():
+        for i,(row,marks) in enumerate(meta):
+            yellow.clear();yellow.update((i,c) for c in marks)
+            yield row
+    tpl=ozon_template_rows()
+    try:
+        return _xlsx_from_rows_file(tpl[1] if tpl else OZON_HEADERS,rows(),'Ozon',
+            header_rows=[tpl[0],tpl[2],tpl[3]] if tpl else None,yellow=yellow)
+    finally:meta.close()
+
+
+def export_ozon_xlsx_bytes(conn,discount_pct=0,vat='Не облагается',keys=None,chz_codes=None):
+    with export_ozon_xlsx_file(conn,discount_pct,vat,keys,chz_codes) as output:return output.read()
 
 # ---------------- HTTP ----------------
 def _app_html_path():
@@ -6222,20 +6291,19 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             chz = [x for x in (qs.get('chz') or [''])[0].split(',') if x.strip()] or None
-            data = export_ozon_xlsx_bytes(conn,
+            with export_ozon_xlsx_file(conn,
                 discount_pct=num((qs.get('discount_pct') or ['0'])[0]),
-                vat=(qs.get('vat') or ['Не облагается'])[0], chz_codes=chz)
-            return self._send_bytes(200, data,
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
+                vat=(qs.get('vat') or ['Не облагается'])[0],chz_codes=chz) as output:
+                return self._send_file(output,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','UC_ozon_engine.xlsx')
         if self.path.startswith('/export/ozon.csv'):
-            from urllib.parse import urlparse, parse_qs
-            qs = parse_qs(urlparse(self.path).query)
-            chz = [x for x in (qs.get('chz') or [''])[0].split(',') if x.strip()] or None
-            return self._send_bytes(200, export_ozon_csv_bytes(conn,
+            from urllib.parse import urlparse,parse_qs
+            qs=parse_qs(urlparse(self.path).query)
+            chz=[x for x in (qs.get('chz') or [''])[0].split(',') if x.strip()] or None
+            enc=(qs.get('enc') or ['utf-8'])[0]
+            with export_ozon_csv_file(conn,
                 discount_pct=num((qs.get('discount_pct') or ['0'])[0]),
-                vat=(qs.get('vat') or ['Не облагается'])[0],
-                enc=(qs.get('enc') or ['utf-8'])[0], chz_codes=chz),
-                'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
+                vat=(qs.get('vat') or ['Не облагается'])[0],enc=enc,chz_codes=chz) as output:
+                return self._send_file(output,'text/csv; charset='+('windows-1251' if enc=='cp1251' else 'utf-8'),'UC_ozon_engine.csv')
         if self.path.startswith('/export/catalog'):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -6397,18 +6465,18 @@ class Handler(BaseHTTPRequestHandler):
                 keys = None
                 if body.get('articles') is not None:
                     keys = {(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']}
-                return self._send_bytes(200, export_ozon_csv_bytes(conn,
-                    discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys,
-                    chz_codes=body.get('chz_codes')),
-                    'text/csv; charset=utf-8', 'UC_ozon_engine.csv')
+                with export_ozon_csv_file(conn,
+                    discount_pct=num(body.get('discount_pct')),vat=body.get('vat') or 'Не облагается',keys=keys,
+                    chz_codes=body.get('chz_codes')) as output:
+                    return self._send_file(output,'text/csv; charset=utf-8','UC_ozon_engine.csv')
             if self.path == '/export/ozon.xlsx':
-                keys = None
+                keys=None
                 if body.get('articles') is not None:
-                    keys = {(str(a.get('article', '')), str(a.get('brand', ''))) for a in body['articles']}
-                return self._send_bytes(200, export_ozon_xlsx_bytes(conn,
-                    discount_pct=num(body.get('discount_pct')), vat=body.get('vat') or 'Не облагается', keys=keys,
-                    chz_codes=body.get('chz_codes')),
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'UC_ozon_engine.xlsx')
+                    keys={(str(a.get('article','')),str(a.get('brand',''))) for a in body['articles']}
+                with export_ozon_xlsx_file(conn,
+                    discount_pct=num(body.get('discount_pct')),vat=body.get('vat') or 'Не облагается',keys=keys,
+                    chz_codes=body.get('chz_codes')) as output:
+                    return self._send_file(output,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','UC_ozon_engine.xlsx')
             if self.path in ('/export/data-only.csv','/export/data-only.xlsx'):
                 fmt='xlsx' if self.path.endswith('.xlsx') else 'csv'
                 with export_data_only_file(conn,body.get('columns'),fmt,body.get('revision')) as output:
