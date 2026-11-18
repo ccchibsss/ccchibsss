@@ -280,4 +280,9 @@ node tests/export-zip-benchmark.js
 открыть до закрытия первого.
 
 Тесты: `node tests/run-tests.js`, 34 клиентских набора, 9 наборов IndexedDB,
-277 тестов движка — все проходят.
+277 тестов движка — все проходят. Сквозные браузерные проверки экспорта
+(`browser-io-memory-e2e`, `browser-export-e2e`) в CI проходят: в их выводе
+`maxActive: 1` (один лист ZIP за раз) и `streamBytes`/`legacyBytes` совпадают
+по структуре. Недоступный локально шаг — только `browser-enrichment-parity-e2e`
+с проверкой «Persist/reopen differs from memory»: он падает и на `main`
+(прогон коммита `135a932`), к этим правкам отношения не имеет.
