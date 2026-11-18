@@ -418,9 +418,31 @@ assert(!/\n        HVC\.rebuildIndex\(S\.rows\);\n        rowsChanged/.test(app)
     'ленивый индекс OE: проход по каталогу только при совпадении');
   assert(app.includes("await catalogLookup.ensureOe();await catalogLookup.oeBatch(inputBatch,oeMaps);"),
     'ленивый индекс OE: браузерный справочник работает как раньше');
-  assert(app.includes("StorageCtl._verifiedReason !== 'rows' && StorageCtl._verifiedReason !== 'equal'"),
-    'вторая полная проекция не выполняется, когда сравнивать было не с чем');
+  /* v12.9.171: пропуск сверки по _verifiedReason прошлой операции убран — после
+     любой полной записи он заставлял следующее неизменённое сохранение
+     перезаписывать каталог и публиковать новую ревизию (регресс
+     browser-import-conflict-e2e). Условие ниже держит обе стороны: сверка
+     выполняется всегда, а дорогой путь не включается, потому что при
+     несовпадении числа строк она выходит по одному count(). */
+  assert(!app.includes("StorageCtl._verifiedReason !== 'rows'"),
+    'пропуска сверки по состоянию прошлого сохранения нет');
+  assert(app.includes('if(verifyUnchanged&&await StorageCtl.saveVerifiedMetadata(S.rows,withId)){'),
+    'сверка с диском выполняется всегда, даже сразу после полной перезаписи');
   assert(app.includes("if(count!==rows.length){reason='count';return false;}"), 'причина «не совпало» видна вызывающему коду');
+}
+
+// v12.9.171: переоткрытие базы не меняет каталог — производные OE-поля
+// восстанавливаются при загрузке (иначе чек app «Persist/reopen differs from
+// memory» краснел и на main). Поведением это проверяет
+// tests/persist-reopen-parity-indexeddb.js, здесь — что код восстановления на
+// месте и стоит после загрузки настроек (разделитель OE читается оттуда).
+{
+  const iSettings = app.indexOf('normalizeFormatSettings();\n    /* v12.9.171: производные OE-поля');
+  assert(iSettings > 0, 'восстановление OE-полей идёт сразу после загрузки настроек');
+  assert(app.includes('if (p.oe_list === undefined) p.oe_list = oe;'), 'oe_list восстанавливается из oe_numbers');
+  assert(app.includes('if (p.oe_norm === undefined) {'), 'oe_norm восстанавливается только когда его нет');
+  assert(app.includes('const oe = p.oe_numbers;\n        if (!oe) continue;'),
+    'у строк без OE полей не появляется');
 }
 
 // v12.9.77: таргетный dedupe сливает только заданные связки, полный — все

@@ -23296,16 +23296,17 @@ async function _persistNowImpl(changedList, forceBrowserStorage=false, verifyUnc
     for(const row of _writeSource){_writeBytes+=StorageCtl.recordBytes(row);if(_writeBytes>4*1024*1024)break;}
     const _bigWrite = rowCount > (num(CONST.CHUNKED_WRITE_ROWS) || 20000)||_writeBytes>4*1024*1024;
     writePhase='запись товаров и метаданных ('+StorageCtl.mode()+')';
-    /* v12.9.170: saveVerifiedMetadata уже сравнил ВСЕ строки с диском. Если она
-       ответила «не совпало» из-за числа строк / незавершённой записи / чужого
-       черновика, на диске всё равно нет того каталога, с которым можно
-       сравнивать, — это полная перезапись. Раньше в этом случае
-       saveChunked → productBatches → withId ещё раз собирал проекцию всех
-       строк, и это был второй полный проход на каждое сохранение (на 124 459
-       SKU — секунды и десятки мегабайт мусора). */
-    const _verifiedMissedWhole = verifyUnchanged && StorageCtl._verifiedReason &&
-      StorageCtl._verifiedReason !== 'rows' && StorageCtl._verifiedReason !== 'equal';
-    if(verifyUnchanged&&!_verifiedMissedWhole&&await StorageCtl.saveVerifiedMetadata(S.rows,withId)){
+    /* Проверка «на диске тот же каталог» — всегда, когда запрошена точная
+       сверка: смотреть на StorageCtl._verifiedReason предыдущего сохранения
+       нельзя, это состояние другой операции. Так было в v12.9.170-12.9.171:
+       после любой полной записи («count») следующая неизменённая запись
+       принудительно перезаписывала каталог и публиковала новую ревизию —
+       в другой вкладке это выглядело как чужое изменение, и её импорт
+       останавливался (регресс browser-import-conflict-e2e, чек app).
+       Сама сверка дешёвая: при несовпадении числа строк / незавершённой записи
+       / чужом черновике она выходит из транзакции по одному count(), до чтения
+       и сравнения строк дело не доходит. */
+    if(verifyUnchanged&&await StorageCtl.saveVerifiedMetadata(S.rows,withId)){
       // Metadata committed above; no product writes are needed. Aux tables
       // still go through their own awaited saves below.
     }else if (StorageCtl.mode() === 'economy') {
