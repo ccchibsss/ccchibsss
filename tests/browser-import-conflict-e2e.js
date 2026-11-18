@@ -20,6 +20,15 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
    Object.defineProperty(S,'_catalogToken',{configurable:true,enumerable:true,
      get(){return tok;},
      set(v){ if(v!==tok) window.__rev.push('TOKEN '+(new Error().stack||'').split('\n').slice(2,7).join(' | ')); tok=v; }});
+   /* Что решила сверка и почему. */
+   const _sv=StorageCtl.saveVerifiedMetadata.bind(StorageCtl);
+   StorageCtl.saveVerifiedMetadata=async function(rows,withId){
+     let r; try { r=await _sv(rows,withId); } catch(e){ window.__rev.push('VERIFY threw '+e.name+': '+e.message); throw e; }
+     window.__rev.push('VERIFY '+r+' reason='+String(this._verifiedReason)+' rows='+rows.length+' counts='+(S._cacheLastWrite&&S._cacheLastWrite.count));
+     return r;
+   };
+   const _da=StorageCtl.saveDiffAtomic.bind(StorageCtl);
+   StorageCtl.saveDiffAtomic=function(a){ window.__rev.push('DIFF fullWrite='+a.fullWrite+' rowCount='+a.rowCount+' changed='+(Array.isArray(a.changedList)?a.changedList.length:'нет')); return _da(a); };
    const _cv=StorageCtl.catalogValue.bind(StorageCtl);
    StorageCtl.catalogValue=(...a)=>{const v=_cv(...a);window.__rev.push('PUBLISH '+v.revision+' :: '+(new Error().stack||'').split('\n').slice(2,7).join(' | '));return v;};
    S.rows=[{id:1,article:'00001',brand:'Brand',cost:10,custom:{}}];S._econPending=true;
