@@ -54,7 +54,7 @@ function parseZip(buf){
     assert.equal(readU32(buf,dOff+8),comp,'сжатый размер в data descriptor');
     assert.equal(readU32(buf,dOff+12),size,'исходный размер в data descriptor');
     files[name]=plain.toString('utf8');
-    files.__meta=files.__meta||{};files.__meta[name]={crc,comp,size,method,flags,lFlags};
+    files.__meta=files.__meta||{};files.__meta[name]={crc,comp,size,method,flags,lFlags,dataStart};
     p+=46+nameLen+extra+comment;
   }
   return files;
@@ -177,5 +177,33 @@ function crc32js(b){let t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)
   const fbFiles=ctx2.fflate.unzipSync(new Uint8Array(fbBuf));
   assert.equal(new TextDecoder().decode(fbFiles['x.xml']),'<x>fallback</x>','фолбэк собирает корректный архив');
 
-  console.log('OK: нативный ZIP-райтер — порядок байт, data descriptor, CRC, несколько листов, пустой лист, защита от незакрытого листа и фолбэк на fflate');
+  /* 6. Два пути упаковки дают ОДИН И ТОТ ЖЕ архив по содержимому: нативный
+     (CompressionStream) и fflate. Сравниваем не байты сжатия (zlib разных
+     реализаций), а разобранные файлы + CRC/размеры распакованных данных и
+     реальные потоки: fflate.unzipSync и zlib.inflateRawSync. Любая ошибка в
+     локальных заголовках/дескрипторах/каталоге ловится именно сверкой путей. */
+  const sample=[['a.xml','<a>'+('текст & <теги> "кавычки" \u0001\uFFFE '*4000)+'</a>'],
+                ['b.xml',''],['c.xml','x'],
+                ['d.xml','🎉'.repeat(3000)+'Ж'.repeat(5000)],
+                ['e.xml','<x>'+('abcdefghij'.repeat(20000))+'</x>']];
+  const nativeZip=await Native.create();
+  for(const [n,t] of sample)await nativeZip.add(n,t);
+  const nBuf=Buffer.from(await nativeZip.finish());
+  const ffZip=await ctx2.Zip.create();
+  for(const [n,t] of sample)await ffZip.add(n,t);
+  const fBuf=Buffer.from(await ffZip.finish());
+  const nFiles=parseZip(nBuf),fFiles=parseZip(fBuf);
+  assert.deepEqual(Object.keys(nFiles).filter(k=>k!=='__meta').sort(),Object.keys(fFiles).filter(k=>k!=='__meta').sort(),'оба пути пишут один набор файлов');
+  for(const [n,t] of sample){
+    assert.equal(new TextDecoder().decode(ctx.fflate.unzipSync(new Uint8Array(nBuf))[n]),t,'fflate читает нативный архив: '+n);
+    assert.equal(new TextDecoder().decode(ctx2.fflate.unzipSync(new Uint8Array(fBuf))[n]),t,'fflate читает архив fflate: '+n);
+    assert.deepEqual(zlib.inflateRawSync(nBuf.slice(nFiles.__meta[n].dataStart,nFiles.__meta[n].dataStart+nFiles.__meta[n].comp)),Buffer.from(t,'utf8'),'zlib.inflateRawSync нативного архива: '+n);
+    assert.equal(nFiles.__meta[n].crc.toString(16),fFiles.__meta[n].crc.toString(16),'CRC совпадает у обоих путей: '+n);
+    assert.equal(nFiles.__meta[n].size,fFiles.__meta[n].size,'размер до сжатия совпадает: '+n);
+    assert.equal(nFiles.__meta[n].size,Buffer.byteLength(t,'utf8'),'размер до сжатия — UTF-8 исходника: '+n);
+    assert.equal(nFiles[n],t,'контент нативного архива совпадает с исходником: '+n);
+  }
+  console.log('два пути упаковки: '+sample.length+' файлов, содержимое и CRC совпадают, читаются fflate и zlib');
+
+  console.log('OK: нативный ZIP-райтер — порядок байт, data descriptor, CRC, несколько листов, пустой лист, защита от незакрытого листа, совпадение с fflate-путём и фолбэк');
 })().catch(e=>{console.error(e);process.exitCode=1});
