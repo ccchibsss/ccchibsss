@@ -21,6 +21,12 @@ for(const name of ['stripXmlIllegal','safeCsvText']){
  const start=html.indexOf('function '+name+'('), end=html.indexOf('\n}',start)+2;
  vm.runInContext(html.slice(start,end),context);
 }
+// константы, на которые опираются эти функции в сборке (v12.9.171: быстрый путь)
+for(const name of ['XML_ILLEGAL_RE','XCSV_SLOW']){
+ const start=html.indexOf('const '+name), end=html.indexOf('\n',start)+1;
+ if(start>0) vm.runInContext(html.slice(start,end),context);
+}
+if(!('XML_ILLEGAL_RE' in context)) vm.runInContext('var XML_ILLEGAL_RE=/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\uFFFE\\uFFFF]/;',context);
 process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(0,'utf8')).map(v=>context.safeCsvText(v))));
 """
         expected=json.loads(subprocess.check_output(['node','-e',script],cwd=pathlib.Path(__file__).resolve().parents[2],input=json.dumps(values),text=True))
