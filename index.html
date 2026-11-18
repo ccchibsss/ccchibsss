@@ -29602,7 +29602,7 @@ const BrowserImportSources = {
       while(buffer.length){
         let size=64,count=0;
         for(const row of buffer){
-          const bytes=StorageCtl.recordBytes(row);
+          const bytes=JSON.stringify(row).length*2+64;
           if(count&&(size+bytes>512*1024||count>=this.BATCH))break;
           size+=bytes;count++;
         }
