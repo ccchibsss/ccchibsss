@@ -23851,20 +23851,25 @@ async function loadAll(legacySqlMigration=false) {
        восстанавливал: сразу после переоткрытия базы они отсутствовали, то есть
        состояние в памяти и на диске расходилось до первого пересчёта.
        Восстанавливаем здесь: oe_list = oe_numbers, oe_norm — нормализованный
-       список. Значения совпадают с тем, что было в памяти при записи. */
+       список. Значения совпадают с тем, что было в памяти при записи.
+       HVC.ensureNorm для этого не зовём: она пересчитывает ещё и article_norm,
+       который уже лежит на диске. Замер на 400k строк: пересчёт article_norm —
+       140 мс, вся проверка двух полей — 36 мс. Обычно оба поля на месте, и
+       строка отсекается первой же проверкой. */
     try {
       for (const p of S.rows) {
         if (!p || typeof p !== 'object') continue;
         /* Пустой список не восстанавливаем: «нет поля» и «пустая строка» в
            памяти неразличимы, а лишнее поле меняло бы состояние после
            переоткрытия в другую сторону. */
+        /* У подавляющего большинства строк оба поля уже есть — читаем только
+           их: проверка `oe_list !== undefined` сразу отсекает строку, до
+           чтения oe_numbers дело не доходит. */
+        if (p.oe_list !== undefined && p.oe_norm !== undefined) continue;
         const oe = p.oe_numbers;
         if (!oe) continue;
         if (p.oe_list === undefined) p.oe_list = oe;
-        if (p.oe_norm === undefined) {
-          if (typeof HVC !== 'undefined' && typeof HVC.ensureNorm === 'function') HVC.ensureNorm(p);
-          else p.oe_norm = codeList(oe).map(t => normArticle(t)).filter(Boolean).join(OE_DELIMITERS[oeMode()].join);
-        }
+        if (p.oe_norm === undefined) p.oe_norm = codeList(oe).map(t => normArticle(t)).filter(Boolean).join(OE_DELIMITERS[oeMode()].join);
       }
     } catch (e) { console.warn('[UC] восстановление OE-полей:', e); }
     /* Дедупликация — только после загрузки разделителя: mergeCodeLists использует его.
