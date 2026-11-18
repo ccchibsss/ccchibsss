@@ -19,7 +19,7 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
    const token=S._catalogToken;
    if(!await persistNow())throw Error('baseline verification failed');
    window.dispatchEvent(new PageTransitionEvent('pagehide'));await _persistQueue;
-   if(S._catalogToken!==token)throw Error('unchanged baseline created a false revision');
+   if(S._catalogToken!==token)throw Error('unchanged baseline created a false revision · было '+token+' · стало '+S._catalogToken+' · reason='+String(StorageCtl._verifiedReason)+' · mode='+PyEngine.processingMode()+' · rows='+S.rows.length+' · disk='+await db.products.count()+' · lastWrite='+JSON.stringify(S._cacheLastWrite)+' · econPending='+!!S._econPending);
    await Import.read(new File(['Артикул;Бренд;Наименование\n00001;Brand;Imported title\n'],'enrich.csv',{type:'text/csv'}));
    S.pending.map=S.pending.headers.map((src,i)=>({src,field:['article','brand','name'][i],target:['Артикул','Бренд','Наименование'][i],enabled:true,type:'text'}));Import.normalize();Import.render();
    document.querySelector('#impKey').value='article+brand';document.querySelector('#impOe').classList.remove('on');document.querySelector('#impEnrichRelated').checked=false;
