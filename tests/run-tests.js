@@ -70,9 +70,9 @@ assert(app.includes('rgba(250,204,21,.30)'), 'таблица каталога: �
 assert(app.includes('const explicit=this.findCode(p,false); if (explicit) return {status:\'preserved\''), 'ТН ВЭД: явный код из файла не затирается');
 assert(app.includes('HVC.enCol(\'tnved\') && !String(p.tnved || \'\').trim() && t.tnved'), 'Каталог V: ТН ВЭД только в пустое поле');
 assert(app.includes('const canCategory=NameCategory.blank(p.category)&&!explicitBlank;'), 'файл категорий: только пустые поля');
-assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.170-client+import-speed-memory'), 'версия клиента обновлена');
+assert(app.includes('12.9.70-client+export-guard') || app.includes('12.9.170-client+import-speed-memory.2'), 'версия клиента обновлена');
 // v12.9.79: светлый экспорт + компактный поштучный калькулятор без месячных расчётов
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.79');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.79');
 assert(!app.includes('FF1B2140'), 'чёрной заливки шапки экспорта не осталось');
 assert(app.includes("['markupPct','Заработок на закупку, % — формула'"), 'калькулятор: заработок на закупку');
 assert(app.includes("['logisticsRub','Логистика и доставка, ₽/ед — ввод'"), 'калькулятор 24: объединённая логистика');
@@ -161,7 +161,7 @@ assert(app.includes('function autoFillFields'), 'маркеры автоподс
 assert(app.includes('enrichCatMode()'), 'отдельный способ обогащения категории/ТН ВЭД');
 assert(app.includes("grp === 'cat'"), 'раздельные проходы обогащения main/cat');
 assert(app.includes('catConflict'), 'флаг конфликта категорий OE-доноров');
-assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.170-client+import-speed-memory'), 'версия клиента обновлена');
+assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.170-client+import-speed-memory.2'), 'версия клиента обновлена');
 {
   const hvcSrc = app.match(/const HVC = \{[\s\S]*?\n\};\n/)[0];
   const c2 = {
@@ -205,7 +205,7 @@ assert(app.includes('12.9.69-client+enrich-catmode') || app.includes('12.9.170-c
 assert(html.includes('id="econMissingNote"'), 'сноска недостающих данных в разделе «Данные»');
 assert(app.includes('function renderEconMissingNote()'), 'рендер сноски недостающих данных');
 assert(app.includes('renderEconMissingNote(); } catch'), 'сноска обновляется в filterUI');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия клиента обновлена');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия клиента обновлена');
 {
   const specSrc = app.slice(app.indexOf('const ECON_INPUT_SPEC = ['), app.indexOf('function econSpecOf'));
   const src = specSrc
@@ -292,13 +292,13 @@ console.log('OK: все тесты пройдены (' + rows.length + ' стр�
 // v12.9.75: импорт — точечный syncOeByKey и таргетная группировка в пайплайне
 assert(app.includes('HVC.syncOeByKey(changedList)'), 'импорт: syncOeByKey только по изменённым строкам');
 assert(app.includes('groupOeByKeyFromRows(undefined, undefined, _grpOnlyKeys)'), 'пайплайн: таргетная группировка OE при малой дельте');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия клиента обновлена');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия клиента обновлена');
 
 // v12.9.76: пайплайн пропускает неизменённые строки при любом известном changedRows
 assert(app.includes('if (changedRows && !changedRows.has(old)) continue;'), 'упаковка: пропуск неизменённых строк');
 assert(app.includes('if (changedRows && !isChangedRow(p)) { if (!sqlEnrichment && typeof AnomalyDetector'), 'расчёт: ранний пропуск неизменённых, карантин сохранён');
 assert(app.includes('const _grpOnlyKeys = (changedRows && Array.isArray(options.changedList)'), 'таргетная группировка OE при любой дельте');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия клиента обновлена');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия клиента обновлена');
 
 const importImpl=app.slice(app.indexOf('const Import = {'),app.indexOf('  _relatedRows(',app.indexOf('const Import = {')));
 assert(!importImpl.includes('UE.render()')&&!importImpl.includes('Dash.render()'), 'импорт: расчётные разделы не запускаются');
@@ -356,6 +356,69 @@ assert(!importImpl.includes('UE.render()')&&!importImpl.includes('Dash.render()'
   assert.ok(rowsTg[2].group_articles.includes('A1'), 'группа связанной связки C обновилась через byOe');
   assert.ok(rowsTg[3].group_articles.includes('A1'), 'группа связки E обновилась через новый OE');
 }
+// v12.9.170 §11.6: ensureIndex не перестраивает неизменённый каталог
+{
+  const c = {};
+  vm.createContext(c);
+  vm.runInContext(
+    'const S = { rows: [], catalogVersion: 1 };\n' +
+    'const HVC = {\n' +
+    '  _indexVersion: -1, _indexRows: null, calls: 0,\n' +
+    '  rebuildIndex(list) { this.calls++; this._indexRows = list; this._indexVersion = S.catalogVersion; return list.length; },\n' +
+    '  ' + grab(/ensureIndex\(list\) \{[\s\S]*?\n  \},/) + '\n};\nthis.HVC = HVC; this.S = S;', c);
+  const rows = [1, 2, 3];
+  assert.strictEqual(c.HVC.ensureIndex(rows), true, 'первый ensureIndex строит индекс');
+  assert.strictEqual(c.HVC.ensureIndex(rows), false, 'тот же каталог — перестроения нет');
+  assert.strictEqual(c.HVC.calls, 1);
+  c.S.catalogVersion++;                       // любая правка каталога (bumpVersion)
+  assert.strictEqual(c.HVC.ensureIndex(rows), true, 'после bumpVersion индекс перестраивается');
+  assert.strictEqual(c.HVC.ensureIndex(rows.slice()), true, 'другой список строк — перестроение');
+  assert.strictEqual(c.HVC.calls, 3);
+}
+assert(app.includes('if (typeof HVC !== \'undefined\') HVC._indexVersion = -1;'), 'bumpVersion сбрасывает отметку индекса');
+assert(app.includes('HVC._indexVersion = -1; HVC._indexRows = null;'), 'загрузка реестров сбрасывает отметку индекса');
+assert(!/\n        HVC\.rebuildIndex\(S\.rows\);\n        rowsChanged/.test(app), 'ручное обогащение не перестраивает индекс дважды');
+
+// v12.9.170 §11.3: применение передаёт только ключи, полная сигнатура остаётся
+{
+  const start = app.indexOf('      const describeKey='), end = app.indexOf('      describeKey.full=', start);
+  assert(start > 0 && end > start, 'describeKey найден');
+  const block = app.slice(start, end);
+  assert(!block.includes('signature'), 'describeKey при применении не считает сигнатуру');
+  assert(app.includes('describeKey.full=describeSource;'), 'полная сигнатура доступна восстановлению индекса');
+  assert(app.includes('await this.prepareKeys(meta.source,run,describe.full||describe,meta.fingerprint);'),
+    'восстановление индекса ключей считает полную сигнатуру');
+  assert(app.includes('BrowserImportSources.conflicts(collisionRun,inputBatch,describeKey)'),
+    'применение читает индекс по ключам');
+}
+
+// v12.9.170 §11.4: проекция в Worker — без объекта на строку, но байт-в-байт
+{
+  assert(app.includes('else text=JSON.stringify(r,u.keys);'), 'проекция каталога: массив ключей вместо объекта');
+  assert(app.includes('if(nested){'), 'вложенные значения уходят на прежний путь сериализации');
+  assert(app.includes("virtual:keys.includes('category_type')||keys.includes('tnved')"), 'виртуальные вид/ТН ВЭД — прежний путь');
+}
+
+// v12.9.170 §11.5: XLSX читается в Worker, копии файла в главном потоке нет
+{
+  assert(app.includes("if(typeof Blob!=='undefined'&&file instanceof Blob){await ask({type:'init',file});}"),
+    'XLSX: File передаётся в Worker без arrayBuffer() в главном потоке');
+  assert(app.includes('const input=e.data.file?await e.data.file.arrayBuffer():e.data.buf;'),
+    'XLSX: буфер читается внутри воркера, протокол init сохранён');
+}
+
+// v12.9.170 §11.1/§11.2: ленивый индекс OE и отсутствие второй полной проекции
+{
+  assert(app.includes('const oeIndexWarm = async r =>'), 'ленивый индекс OE: страж найден');
+  assert(app.includes('const hit = (await oeIndexWarm(r)) ? await findByOe(r) : null;'),
+    'ленивый индекс OE: проход по каталогу только при совпадении');
+  assert(app.includes("await catalogLookup.ensureOe();await catalogLookup.oeBatch(inputBatch,oeMaps);"),
+    'ленивый индекс OE: браузерный справочник работает как раньше');
+  assert(app.includes("StorageCtl._verifiedReason !== 'rows' && StorageCtl._verifiedReason !== 'equal'"),
+    'вторая полная проекция не выполняется, когда сравнивать было не с чем');
+  assert(app.includes("if(count!==rows.length){reason='count';return false;}"), 'причина «не совпало» видна вызывающему коду');
+}
+
 // v12.9.77: таргетный dedupe сливает только заданные связки, полный — все
 {
   const c4 = {};
@@ -393,7 +456,7 @@ assert(!importImpl.includes('UE.render()')&&!importImpl.includes('Dash.render()'
 assert(app.includes('HVC.rebuildIndex(S.rows, _rbKeys.size ? _rbKeys : undefined)'), 'импорт: таргетный rebuildIndex');
 assert(app.includes('dedupeCatalog(_dedupeKeys)'), 'импорт: таргетный dedupe после первого полного');
 assert(app.includes('persistChangedOnly: changedTouched > 0 && !dedup'), 'импорт: запись только дельты, если не было слияний');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия клиента обновлена');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия клиента обновлена');
 
 // v12.9.78: автосверка аномалий находит донора через реестр byOe (функционально, настоящий AnomalyOE+DimPolicy)
 ;(async () => {
@@ -446,7 +509,7 @@ assert(app.includes('12.9.170-client+import-speed-memory'), 'версия кли
 assert(app.includes('const donorRows=[];'), 'автосверка: отбор доноров по реестру');
 assert(app.includes("lsSet('uc.fullCalcFp', globalParamsFp())"), 'полный пересчёт фиксирует отпечаток параметров');
 assert(app.includes('профиль дельты: изменено строк'), 'журнал импорта: профиль дельты');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия клиента обновлена');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия клиента обновлена');
 
 // v12.9.93: потоковый CSV-парсер — разрезы чанков в любом месте не меняют результат
 {
@@ -480,7 +543,7 @@ assert(html.includes('id="btnDiskImport"'), 'кнопка дискового и�
 assert(app.includes('skipEconomics: true, persist: false, onProgress: prog, stepRange: [82, 97]'), 'дисковый импорт: экономика лениво, запись одной порцией');
 
 // v12.9.94: пакет оптимизаций
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.94');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.94');
 assert(app.includes('econSkipFresh'), 'пропуск пересчёта актуальной экономики');
 assert(app.includes("S._econFreshKey = _econFreshKey"), 'отметка актуальности экономики фиксируется');
 assert(app.includes('расчётные поля экономики (досчёт при экспорте)'), 'MemGuard: автосброс экономики при давлении памяти');
@@ -530,7 +593,7 @@ assert(app.includes('запись каталога одной порцией'), 
   assert.strictEqual(rows8[0][2], '149,81', 'воркер XLSX: значение ячейки текстом');
 }
 // v12.9.95: остальные разделы пакета
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.95');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.95');
 assert(app.includes('warnQuarantinedBeforeExport'), 'карантин: предупреждение перед выгрузкой');
 assert(app.includes('source=await BrowserImportSources.stage(file)'), 'обычный браузерный импорт: отдельная таблица IndexedDB');
 assert(app.includes('onChunk:flush'), 'браузерный CSV: backpressure при записи источника');
@@ -547,7 +610,7 @@ assert(app.includes('const UCCancel = {'), 'токен отмены присут
 assert(app.includes("e._ucCancelled = true"), 'отмена помечается для мягкой обработки');
 assert(app.includes("if (typeof UCCancel !== 'undefined') UCCancel.check();"), 'проверки отмены в длинных циклах');
 assert(app.includes("Toast.warn('Отменено пользователем'"), 'отмена — предупреждение, а не ошибка');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.96');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.96');
 // токен отмены работает как чистая логика
 {
   const c9 = {};
@@ -598,7 +661,7 @@ assert(app.includes('const ReviewQueue = {'), 'модуль очереди пр�
 assert(app.includes('uc.reviewDecisions'), 'память решений оператора');
 assert(app.includes('Артикулы пришли числами (XLSX)'), 'QA: артикулы-числа в XLSX');
 assert(html.includes('id="btnReviewExport"') && html.includes('id="btnReviewImport"'), 'кнопки очереди проверки');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.97');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.97');
 
 // v12.9.98 (аудит): round() в формулах = Excel-стиль, как round() приложения
 {
@@ -613,7 +676,7 @@ assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.9
   assert.strictEqual(E.eval('1 + 2 * 3', {}), 7, 'формулы: приоритет операций');
   assert.strictEqual(E.eval('10 / 4', {}), 2.5, 'формулы: деление');
 }
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.98');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.98');
 assert(app.includes('aAnalogs.includes(B.art)'), 'очередь: аналоги сравниваются токенами, не подстрокой');
 
 // v12.9.99 (аудит-2): cloneRowForCalc не теряет компактные поля (объём!)
@@ -635,7 +698,7 @@ assert(app.includes('aAnalogs.includes(B.art)'), 'очередь: аналоги
   assert.strictEqual(c.article, 'V1', 'клон для расчёта: обычные поля сохранены');
   c.volume = 9; assert.strictEqual(src.volume, 3.5, 'клон независим от оригинала');
 }
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.99');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.99');
 assert(app.includes('computeEconomics(cloneRowForCalc(p))'), 'WhatIf считает на полном клоне');
 assert(app.includes('const c = cloneRowForCalc(p);'), 'сценарий «что если» на полном клоне');
 
@@ -656,14 +719,14 @@ assert(app.includes('eco.solverNetUnit = sales > 0 ? eco.netProfit / sales : eco
 assert(!app.includes('function fbsLogistics('), 'мёртвая fbsLogistics удалена');
 assert(html.includes('ttlSec <= 21600 + SKEW'), 'GAS: одноразовость только для токенов ≤ 6 ч');
 assert(html.includes('освобождение — до 20 млн ₽/год, 5% — до 272,5 млн ₽, 7% — до 490,5 млн ₽'), 'подсказка о порогах НДС УСН');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.100');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.100');
 
 // v12.9.101: интеграция локального Python-движка
 assert(app.includes('const PyEngine = {'), 'модуль PyEngine в приложении');
 assert(app.includes('/calc/batch'), 'сверка экономики вторым контуром');
 assert(app.includes('uc.pyToken'), 'токен движка в localStorage');
 assert(html.includes('id="btnPyCheck"') && html.includes('id="pyEngineStatus"'), 'кнопка и статус Python-движка');
-assert(app.includes('12.9.170-client+import-speed-memory'), 'версия 12.9.101');
+assert(app.includes('12.9.170-client+import-speed-memory.2'), 'версия 12.9.101');
 assert(app.includes('window.__UC_PY_TOKEN__ || lsGet'), 'авто-токен движка без ручной вставки');
 
 assert(app.includes('async recalcCatalog()'), 'полный пересчёт каталога на движке');
