@@ -1,0 +1,29 @@
+# Test/benchmark-only pre-optimization functions from engine 12.9.170.
+# Not imported by the runtime. Globals/unchanged row iterator come from uc_engine.
+
+def safe_csv_text(value):
+    s='' if value is None else str(value)
+    s=re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]',' ',s)
+    if (re.match(r'^[\s\u00a0]*[=+@]',s) or re.match(r'^[ \u00a0]*[\t\r\n]',s) or
+        (re.match(r'^[\s\u00a0]*-',s) and not re.fullmatch(r'\s*-\d+(?:[.,]\d+)?\s*',s,flags=re.ASCII))):
+        s="'"+s
+    return s
+
+def export_ozon_csv_file(conn,discount_pct=0,vat='Не облагается',enc='utf-8',keys=None,chz_codes=None):
+    import csv as _csv,tempfile
+    output=tempfile.TemporaryFile(mode='w+b')
+    class Sink:
+        def write(self,text):
+            # encode_csv adds BOM for a whole UTF-8 document, not each row.
+            output.write(encode_csv(text,enc) if enc=='cp1251' else text.encode('utf-8'))
+            return len(text)
+    try:
+        if enc!='cp1251':output.write(b'\xef\xbb\xbf')
+        writer=_csv.writer(Sink(),delimiter=';');writer.writerow(OZON_HEADERS)
+        rows=_iter_ozon_rows_meta(conn,keys,discount_pct,vat,chz_codes)
+        try:
+            for row,_ in rows:writer.writerow([safe_csv_text(v) for v in row])
+        finally:rows.close()
+        output.seek(0);return output
+    except BaseException:
+        output.close();raise
