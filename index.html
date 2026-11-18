@@ -27628,21 +27628,28 @@ const BrowserExportZipNative = {
       for(const p of parts){out.set(p,o);o+=p.length;}
       return out;
     };
+    /* v12.9.171: у каждого файла свой «хвост» — последняя поставленная в очередь
+       запись. Ждать всю очередь (как раньше) значит ждать и сжатие ещё не
+       закрытых листов: их блоки дописываются уже после того, как главный лист
+       закончен, и порядок в архиве от этого не меняется. */
+    let tail=Promise.resolve();
     const writeQueued=bytes=>{
-      if(!bytes||!bytes.length)return queue;
-      queue=queue.then(async()=>{
+      if(!bytes||!bytes.length)return tail;
+      const job=tail.then(async()=>{
         const at=offset;
         offset+=bytes.length;
         await sink.write([new Blob([bytes])]);
         return at;
       });
-      queue.catch(e=>{failure=failure||e;});
-      return queue;
+      tail=job;
+      queue=queue.then(()=>job).catch(e=>{failure=failure||e;});
+      job.catch(e=>{failure=failure||e;});
+      return job;
     };
     return {
       native:true,
       get needsFlush(){return false;},   // сжатые блоки уходят в спул сразу
-      async flush(){await queue;check();},
+      async flush(){await tail;check();},
       sheet(name){
         check();
         if(active)throw new Error('Предыдущий лист ZIP ещё не завершён');
@@ -27711,7 +27718,7 @@ const BrowserExportZipNative = {
               await writeChain;
               await writer.close();
               await readerDone;
-              await queue;
+              await tail;
               check();
               entry.crc=(entry.crcState^-1)>>>0;
               if(entry.size>0xFFFFFFFF||entry.comp>0xFFFFFFFF)
@@ -27723,7 +27730,7 @@ const BrowserExportZipNative = {
           }
         };
       },
-      add(name,text){const f=this.sheet(name);f.w(text);return f.end();},
+      async add(name,text){const f=this.sheet(name);f.w(text);return await f.end();},
       async finish(){
         check();
         if(active)throw new Error('Лист ZIP не завершён');
@@ -27781,7 +27788,7 @@ const BrowserExportZip = {
         return {w(text){buf+=text;if(buf.length>=262144){file.push(toU8(buf),false);buf='';check();}},
           end(){active=null;file.push(toU8(buf),true);buf='';check();}};
       },
-      add(name,text){const file=this.sheet(name);file.w(text);file.end();},
+      async add(name,text){const file=this.sheet(name);file.w(text);await file.end();},
       async finish(){check();if(active)throw new Error('Лист ZIP не завершён');zip.end();check();if(!finished)throw new Error('Архив XLSX не завершён');await this.flush();return await sink.finish('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');},
       async abort(){zip.terminate();chunks.length=0;await sink.abort();}
     };
@@ -41929,12 +41936,12 @@ const OzonReference = {
       write(parts.join('')); await archive.flush(); if(prog)prog(`Строки ${fmt(end)} из ${fmt(rows.length)}…`); await Exp._yield();
     }
     write(`</sheetData><autoFilter ref="A1:U${rows.length+1}"/></worksheet>`);
-    file.end();await archive.flush();
-    add('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
-    add('_rels/.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
-    add('xl/workbook.xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Категории и типы" sheetId="1" r:id="rId1"/></sheets></workbook>');
-    add('xl/_rels/workbook.xml.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
-    add('xl/styles.xml',Exp._stylesXml([]));
+    await file.end();await archive.flush();
+    await add('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
+    await add('_rels/.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+    await add('xl/workbook.xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Категории и типы" sheetId="1" r:id="rId1"/></sheets></workbook>');
+    await add('xl/_rels/workbook.xml.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+    await add('xl/styles.xml',Exp._stylesXml([]));
     return await archive.finish();
     }catch(e){await archive.abort();throw e;}
   },
@@ -43262,12 +43269,12 @@ const DataOnlyExport = {
               if(typeof Prog!=='undefined'){Prog.msg('XLSX: '+Math.min(i+100,rows.length)+' из '+rows.length+' строк');Prog.step(10+70*Math.min(i+100,rows.length)/rows.length);}
               await Exp._yield();validate();
             }
-            file.w('</sheetData></worksheet>');file.end();
-            archive.add('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
-            archive.add('_rels/.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
-            archive.add('xl/workbook.xml','<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Данные" sheetId="1" r:id="rId1"/></sheets></workbook>');
-            archive.add('xl/_rels/workbook.xml.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
-            archive.add('xl/styles.xml',Exp._stylesXml([]));
+            file.w('</sheetData></worksheet>');await file.end();
+            await archive.add('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
+            await archive.add('_rels/.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+            await archive.add('xl/workbook.xml','<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Данные" sheetId="1" r:id="rId1"/></sheets></workbook>');
+            await archive.add('xl/_rels/workbook.xml.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+            await archive.add('xl/styles.xml',Exp._stylesXml([]));
             blob=await archive.finish();
           }catch(e){await archive.abort();throw e;}
 
@@ -44088,7 +44095,7 @@ const Exp = {
     if (protect) s1.w('<sheetProtection sheet="1" objects="1" scenarios="1" formatColumns="0" insertRows="0" deleteRows="0" sort="1" autoFilter="1"/>');
     s1.w(`<autoFilter ref="A1:${COL_LET(nC - 1)}${last}"/>`);
     cfs.forEach(cf => s1.w(`<conditionalFormatting sqref="${cf.sqref}">` + cf.rules.join('') + '</conditionalFormatting>'));
-    s1.w('</worksheet>'); s1.end();await archive.flush();
+    s1.w('</worksheet>'); await s1.end();
     const s2 = sheetW('xl/worksheets/sheet' + (sheetNames.indexOf('Вводы и ставки') + 1) + '.xml');
     const dimIdx = ['weight','length','width','height'].map(k => inCat.findIndex(c => c.k === k)).filter(i => i >= 0);
     const dimGroup = dimIdx.length > 1 && Math.max(...dimIdx) - Math.min(...dimIdx) === dimIdx.length - 1 ? { from: Math.min(...dimIdx), to: Math.max(...dimIdx) } : null;
@@ -44110,7 +44117,7 @@ const Exp = {
     }
     s2.w('</sheetData>');
     if (inCat.length) s2.w(`<autoFilter ref="A1:${COL_LET(inCat.length - 1)}${last}"/>`);
-    s2.w('</worksheet>'); s2.end();await archive.flush();
+    s2.w('</worksheet>'); await s2.end();
     if (prog) prog('Сводные листы: Категории, Тарифы, Сводка…'); Prog.step(72);
     await Exp._yield();
     /* ---- мелкие сводные листы (значения + формулы, одна книга) ---- */
@@ -44129,7 +44136,11 @@ const Exp = {
       const L = range.split(':')[0].replace(/\$/g, '');
       return { sqref: range, rules: [`<cfRule type="containsText" dxfId="${d}" priority="${prio++}" operator="containsText" text="${x(text)}"><formula>NOT(ISERROR(SEARCH("${x(text)}",${L})))</formula></cfRule>`] };
     };
-    const smallSheet = (name, cols, bodyFn, opts = {}) => {
+    /* v12.9.171: нативный ZIP-райтер закрывает лист асинхронно (сжатие
+       дописывается в конце), поэтому smallSheet обязан дождаться своего листа
+       до старта следующего: иначе следующий лист получал «предыдущий ещё не
+       завершён». Сквозная e2e-проверка экспорта это и поймала. */
+    const smallSheet = async (name, cols, bodyFn, opts = {}) => {
       const originalIndex = Number((name.match(/sheet(\d+)/) || [])[1]);
       const title = allSheetNames[originalIndex - 1];
       if (!selectedSheets.has(title)) return;
@@ -44154,12 +44165,12 @@ const Exp = {
       if (opts.filter !== false && lastRow > 1) sw.w(`<autoFilter ref="A1:${COL_LET(cols.length - 1)}${lastRow}"/>`);
       const cf = typeof opts.cf === 'function' ? opts.cf(lastRow) : (opts.cf || []);
       cf.forEach(rule => sw.w(`<conditionalFormatting sqref="${rule.sqref}">${rule.rules.join('')}</conditionalFormatting>`));
-      sw.w('</worksheet>'); sw.end();
+      sw.w('</worksheet>'); await sw.end();
     };
     const softGreen = { bg: 'FFE5F7EE', fg: 'FF136B43' }, softRed = { bg: 'FFFFE8E8', fg: 'FFB42318' }, softAmber = { bg: 'FFFFF4D6', fg: 'FF8C5A00' }, softBlue = { bg: 'FFEAF2FF', fg: 'FF2457A7' };
     const threeScale = ['FFFF6B6B', 'FFFFD166', 'FF5FF0A6'];
     /* Категории: COUNTIF/SUMIF по главному листу */
-    smallSheet('xl/worksheets/sheet3.xml', [['n', 'Категория', 26], ['s', 'SKU', 9], ['r', 'Цена, ₽/ед.', 15], ['p', 'ЧП, ₽/ед.', 15], ['m', 'Маржа, %', 11], ['d', 'Доля прибыли, %', 15]], add => {
+    await smallSheet('xl/worksheets/sheet3.xml', [['n', 'Категория', 26], ['s', 'SKU', 9], ['r', 'Цена, ₽/ед.', 15], ['p', 'ЧП, ₽/ед.', 15], ['m', 'Маржа, %', 11], ['d', 'Доля прибыли, %', 15]], add => {
       const byCat = Object.create(null); let incomplete = false;
       rows.forEach(p => { const category = p.category == null ? '' : String(p.category); const g = byCat[category] || (byCat[category] = { n: 0, rev: 0, net: 0, unavailable: false }); g.n++; if (genericEconExportUnavailable(p)) { g.unavailable = true; incomplete = true; } else { g.rev += num(p.revenue); g.net += num(p.netProfit); } });
       const totNet = Object.values(byCat).reduce((s2, g) => s2 + g.net, 0);
@@ -44186,7 +44197,7 @@ const Exp = {
       smallScaleCF(`F2:F${lastRow}`, [{ type: 'min' }, { type: 'num', value: 0 }, { type: 'max' }], threeScale)
     ] : [] });
     /* Тарифы всех маркетплейсов */
-    smallSheet('xl/worksheets/sheet4.xml', [
+    await smallSheet('xl/worksheets/sheet4.xml', [
       ['mp','Маркетплейс',16], ['t','Область / Категория',42], ['c','Комиссия %',12], ['pt','Эквайринг %',14], ['ag','Приём платежа ₽/ед',18],
       ['b','Реклама %',12], ['x','Налог %',10], ['m','Доставка клиенту ₽',18], ['cr','Кроссрегион ₽',14], ['mm','Магистраль / средняя миля ₽',24],
       ['ex','Экспресс ₽',12], ['so','Сортировка/Drop-off ₽',18], ['ib','Бронирование ₽',15], ['l','Логистика доп. ₽/л или ₽/кг',22], ['lb','Базовая логистика ₽',16],
@@ -44298,7 +44309,7 @@ const Exp = {
       smallCellCF(`Z2:Z${lastRow}`, 'greaterThan', 2, softRed)
     ] : [] });
     /* PnL */
-    smallSheet('xl/worksheets/sheet5.xml', [['p', 'Период', 16], ['r', 'Выручка факт', 15], ['n', 'ЧП факт', 14], ['f', 'ЧП прогноз', 14], ['d', 'Δ ₽', 13], ['pc', 'Δ %', 9], ['o', 'Заказы', 10]], add => {
+    await smallSheet('xl/worksheets/sheet5.xml', [['p', 'Период', 16], ['r', 'Выручка факт', 15], ['n', 'ЧП факт', 14], ['f', 'ЧП прогноз', 14], ['d', 'Δ ₽', 13], ['pc', 'Δ %', 9], ['o', 'Заказы', 10]], add => {
       let R = 2;
       pnlActualRows().forEach(x2 => {
         const fact=pnlGet(x2,'net_fact'), plan=pnlGet(x2,'net_forecast'), delta=fact===null || plan===null ? null : round(fact-plan),
@@ -44315,7 +44326,7 @@ const Exp = {
       smallBarCF(`G2:G${lastRow}`, 'FFF7B32B')
     ] : [] });
     /* Поставщики */
-    smallSheet('xl/worksheets/sheet6.xml', [['n', 'Поставщик', 30], ['i', 'ИНН', 13], ['t', 'Отсрочка, дн', 11], ['p', 'Предоплата %', 12], ['r', 'Рейтинг', 9], ['o', 'Заказов', 9], ['a', 'Сумма заказов, ₽', 16]], add => {
+    await smallSheet('xl/worksheets/sheet6.xml', [['n', 'Поставщик', 30], ['i', 'ИНН', 13], ['t', 'Отсрочка, дн', 11], ['p', 'Предоплата %', 12], ['r', 'Рейтинг', 9], ['o', 'Заказов', 9], ['a', 'Сумма заказов, ₽', 16]], add => {
       let R = 2;
       S.sups.forEach(s2 => { const ord = S.orders.filter(o2 => o2.supplier === s2.name); add(R, [[s2.name], [s2.inn || ''], [num(s2.term_days), null, 3], [num(s2.prepay_pct), null, 3], [num(s2.rating), null, 4], [ord.length, null, 3], [round(ord.reduce((q, o2) => q + (o2.amount || 0), 0)), null, 3]]); R++; });
     }, { cf: lastRow => lastRow > 1 ? [
@@ -44326,7 +44337,7 @@ const Exp = {
       smallBarCF(`F2:F${lastRow}`, 'FF5C9DFF'), smallBarCF(`G2:G${lastRow}`, 'FFF7B32B')
     ] : [] });
     /* Сводка: SUM по колонкам главного листа + ссылки на исходные строки топ-10. */
-    smallSheet('xl/worksheets/sheet7.xml', [['a', 'Показатель / Артикул', 34], ['b', 'Значение', 20], ['c', 'Категория', 22], ['d', 'Цена безубыт.', 15], ['e', 'Маржа, %', 11]], add => {
+    await smallSheet('xl/worksheets/sheet7.xml', [['a', 'Показатель / Артикул', 34], ['b', 'Значение', 20], ['c', 'Категория', 22], ['d', 'Цена безубыт.', 15], ['e', 'Маржа, %', 11]], add => {
       let R = 2;
       add(R, [['Unit-control — сводка экспорта (одна книга)']]); R++;
       add(R, [['Режим тарифов'], [S.tariffs.mode === 'api' ? 'API Яндекс Маркет' : 'ЛОКАЛЬНЫЙ EXCEL (СИМУЛЯЦИЯ)']]); R++;
@@ -44359,11 +44370,11 @@ const Exp = {
     ] : [] });
 
     /* ---- служебные части книги ---- */
-    addStr('xl/styles.xml', Exp._stylesXml(dxfs));
-    addStr('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' + sheetNames.map((n2, i) => `<sheet name="${x(n2)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') + '</sheets></workbook>');
-    addStr('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + sheetNames.map((n2, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('') + `<Relationship Id="rId${sheetNames.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`);
-    addStr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
-    addStr('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' + sheetNames.map((n2, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('') + '</Types>');
+    await addStr('xl/styles.xml', Exp._stylesXml(dxfs));
+    await addStr('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' + sheetNames.map((n2, i) => `<sheet name="${x(n2)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') + '</sheets></workbook>');
+    await addStr('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + sheetNames.map((n2, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('') + `<Relationship Id="rId${sheetNames.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`);
+    await addStr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+    await addStr('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' + sheetNames.map((n2, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('') + '</Types>');
     /* v10.8.7 (критич #3): пропущенные формулы не исчезают молча — одним
        предупреждением перечисляем колонки и причину (значение в них осталось). */
     if (skippedFormulas.size) {

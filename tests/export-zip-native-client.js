@@ -112,6 +112,29 @@ function crc32js(b){let t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)
   await assert.rejects(()=>a4.finish(),/уже закрыт/);
   assert.throws(()=>a4.sheet('y.xml'),/уже закрыт/);
 
+  // 4b. Регресс e2e (Chromium): между листами нельзя открывать новый лист,
+  // пока предыдущий не закрыт — нативный райтер закрывает лист асинхронно.
+  // Раньше smallSheet() в streamXlsx закрывал сводные листы без await.
+  const a4b=await Native.create();
+  const first=a4b.sheet('a.xml');first.w('<a/>');
+  await first.end();
+  const second=a4b.sheet('b.xml');second.w('<b/>');
+  assert.throws(()=>a4b.sheet('c.xml'),/Предыдущий лист ZIP ещё не завершён/,'второй лист не открывается, пока не закрыт первый');
+  await second.end();
+  const buf4b=await a4b.finish();
+  assert.equal(zlib.inflateRawSync(...(()=>{ // содержимое каждого листа читается
+    const eocd=buf4b.lastIndexOf(Buffer.from([0x50,0x4b,0x05,0x06]));
+    let p=buf4b.readUInt32LE(eocd+16);const names=[];
+    for(let i=0;i<buf4b.readUInt16LE(eocd+10);i++){
+      const nameLen=buf4b.readUInt16LE(p+28),extra=buf4b.readUInt16LE(p+30),comm=buf4b.readUInt16LE(p+32);
+      names.push({name:buf4b.slice(p+46,p+46+nameLen).toString(),comp:buf4b.readUInt32LE(p+20),off:buf4b.readUInt32LE(p+42)});
+      p+=46+nameLen+extra+comm;
+    }
+    const b=names.find(n=>n.name==='b.xml');
+    const ds=b.off+30+buf4b.readUInt16LE(b.off+26)+buf4b.readUInt16LE(b.off+28);
+    return [buf4b.slice(ds,ds+b.comp)];
+  })()).toString(),'<b/>','второй лист записан целиком');
+
   // 5. Фолбэк: без CompressionStream остаётся прежний fflate-путь.
   const ctx2={console,TextEncoder,Blob,Uint8Array,DataView,Promise,setTimeout,Math,Number,String,Array,Object,JSON,Error};
   ctx2.self=ctx2;ctx2.window=ctx2;vm.createContext(ctx2);
