@@ -432,27 +432,72 @@ assert(!/\n        HVC\.rebuildIndex\(S\.rows\);\n        rowsChanged/.test(app)
 }
 
 // v12.9.171: переоткрытие базы не меняет каталог — производные OE-поля
-// восстанавливаются при загрузке (иначе чек app «Persist/reopen differs from
-// memory» краснел и на main). Поведением это проверяет
-// tests/persist-reopen-parity-indexeddb.js, здесь — что код восстановления на
-// месте и стоит после загрузки настроек (разделитель OE читается оттуда).
+// восстанавливаются при загрузке. Поведением это проверяет
+// tests/persist-reopen-parity-indexeddb.js (реальная запись и переоткрытие);
+// здесь блок восстановления ИСПОЛНЯЕТСЯ на матрице состояний: он должен
+// восстановить недостающее и не трогать то, что уже есть.
 {
   const iSettings = app.indexOf('normalizeFormatSettings();\n    /* v12.9.171: производные OE-поля');
   assert(iSettings > 0, 'восстановление OE-полей идёт сразу после загрузки настроек');
-  assert(app.includes('if (p.oe_list !== undefined && p.oe_norm !== undefined) continue;'),
-    'строки с готовыми полями пропускаются до чтения oe_numbers');
-  assert(app.includes('if (p.oe_list === undefined) p.oe_list = oe;'), 'oe_list восстанавливается из oe_numbers');
-  assert(app.includes('if (p.oe_norm === undefined) p.oe_norm = codeList(oe)'),
-    'oe_norm восстанавливается только когда его нет');
-  assert(app.includes('const oe = p.oe_numbers;\n        if (!oe) continue;'),
-    'у строк без OE полей не появляется');
-  /* v12.9.171: ensureNorm сюда звать нельзя — она пересчитывает article_norm на
-     каждой строке (218 мс на 400k против 13 мс), хотя он уже лежит на диске. */
-  const oeRestore = app.slice(app.indexOf('/* v12.9.171: производные OE-поля'), app.indexOf('/* Дедупликация — только после загрузки разделителя'));
+
+  const oeRestore = app.slice(app.indexOf('/* v12.9.171: производные OE-поля'),
+    app.indexOf('/* Дедупликация — только после загрузки разделителя'));
   /* В комментарии слово ensureNorm остаётся (объясняем, почему не зовём) —
      ищем именно вызов. */
-  assert(!/HVC\.ensureNorm\s*\(/.test(oeRestore), 'восстановление не зовёт ensureNorm (пересчёт article_norm на всех строках)');
-  assert(oeRestore.length > 200 && oeRestore.length < 2000, 'блок восстановления остался маленьким');
+  assert(!/HVC\.ensureNorm\s*\(/.test(oeRestore),
+    'восстановление не зовёт ensureNorm (пересчёт article_norm на всех строках)');
+
+  /* Исполняем настоящий код блока: for-цикл восстановления из самого index.html. */
+  const body = oeRestore.match(/for \(const p of S\.rows\) \{[\s\S]*?\n      \}/);
+  assert(body, 'не найден цикл восстановления OE-полей');
+  const c = {};
+  vm.createContext(c);
+  /* Настоящие зависимости блока: норм-функция, разбор списков и разделители —
+     берём их из index.html, а не переписываем, иначе проверяем не тот код. */
+  vm.runInContext(
+    'const _normArticleCache = new Map();\n' +
+    grab(/const OE_DELIMITERS = \{[\s\S]*?\n\};\n/) +
+    'const S = { settings: { oeDelimiter: "auto" }, rows: [] };\n' +
+    'function oeMode(mode) { const candidate = mode || (typeof S !== "undefined" && S.settings ? S.settings.oeDelimiter : "auto");' +
+    ' return Object.prototype.hasOwnProperty.call(OE_DELIMITERS, candidate) ? candidate : "auto"; }\n' +
+    grab(/const normArticle = s => \{[\s\S]*?\n\};\n/) +
+    grab(/function splitCodeValues\(v, mode\) \{[\s\S]*?\n\}\n/) +
+    grab(/function codeList\(v, mode\) \{[\s\S]*?\n\}\n/) +
+    'this.S = S;', c);
+  /* Тело цикла выполняется явно ниже (при загрузке контекста S.rows пуст). */
+  const S = c.S;
+
+  /* Матрица: состояние строки → ожидаемое состояние после восстановления. */
+  const cases = [
+    /* полные состояния не меняются */
+    [{ oe_numbers: 'A1', oe_list: 'A1', oe_norm: 'A1' }, 'A1', 'A1', 'A1'],
+    [{ oe_numbers: 'A1', oe_list: 'A1 / X', oe_norm: 'A1' }, 'A1', 'A1 / X', 'A1'],
+    [{ oe_numbers: 'A1', oe_list: 'A1', oe_norm: 'A1 / Y' }, 'A1', 'A1', 'A1 / Y'],
+    /* недостающее восстанавливается */
+    [{ oe_numbers: 'A1', oe_norm: 'A1' }, 'A1', 'A1', 'A1'],
+    [{ oe_numbers: 'A1', oe_list: 'A1' }, 'A1', 'A1', 'A1'],
+    [{ oe_numbers: 'A1' }, 'A1', 'A1', 'A1'],
+    /* нормализация: разделители и регистр приводятся к виду oe_norm */
+    [{ oe_numbers: 'a11 / b22' }, 'a11 / b22', 'a11 / b22', 'A11 / B22'],
+    /* пустой и отсутствующий список не порождает полей */
+    [{ oe_numbers: '' }, '', undefined, undefined],
+    [{}, undefined, undefined, undefined]
+  ];
+  const got = (p, k) => (p[k] === undefined ? '__нет__' : p[k]);
+  for (const [row, n, l, m] of cases) {
+    S.rows = [{ ...row }];
+    /* цикл уже исполнился в контексте через vm.runInContext? нет — запускаем явно: */
+    const src = 'for (const p of S.rows) {\n' + body[0].slice(body[0].indexOf('{') + 1, body[0].lastIndexOf('}')) + '\n}';
+    vm.runInContext(src, c);
+    const p = S.rows[0];
+    assert.equal(got(p, 'oe_numbers'), n === undefined ? '__нет__' : n, 'oe_numbers: ' + JSON.stringify(row));
+    assert.equal(got(p, 'oe_list'), l === undefined ? '__нет__' : l, 'oe_list: ' + JSON.stringify(row));
+    assert.equal(got(p, 'oe_norm'), m === undefined ? '__нет__' : m, 'oe_norm: ' + JSON.stringify(row));
+  }
+  /* Строки без OE и «чужие» значения не должны ломать проход. */
+  S.rows = [null, undefined, 42, 'строка', { oe_numbers: 'Z9' }];
+  vm.runInContext('for (const p of S.rows) {\n' + body[0].slice(body[0].indexOf('{') + 1, body[0].lastIndexOf('}')) + '\n}', c);
+  assert.equal(S.rows[4].oe_list, 'Z9', 'нормальная строка восстановлена в смешанном массиве');
 }
 
 // v12.9.77: таргетный dedupe сливает только заданные связки, полный — все
