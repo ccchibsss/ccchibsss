@@ -127,6 +127,16 @@
   создаёт настоящую контрольную точку через BrowserApplyCheckpoint.begin(),
   перезапускает страницу и кликает «Закрыть»; до исправления — диалог остаётся,
   после — закрывается, а контрольная точка сохраняется до явного решения.
+  v12.9.173 — ЧИСЛА ИЗ «ДАТНЫХ» ЯЧЕЕК ЭКСПОРТА ОСТАЮТСЯ ЧИСЛАМИ.
+  Если у числовой ячейки прайса стоял формат «Дата» (нередко так приезжает вес,
+  габариты и характеристика), SheetJS с cellDates:true отдавал Date: вес 8.5
+  становился 07.01.1900, габарит 41014 — 15.04.2012. Вес/габариты после импорта
+  терялись (0/пусто), а характеристика выгружалась текстом «Sun Apr 15 2012
+  00:00:00 GMT+0000…» — в выгрузке числа выглядели датами. Теперь воркер
+  источника возвращает исходный Excel-серийник из Date (NumericCellGuard),
+  сверяя календарный день через SSF.parse_date_code; при любой несостыковке
+  значение не подменяется. Проверено на 5 000 серийников в 5 часовых поясах и
+  сквозным тестом tests/browser-import-date-cells-e2e.js (импорт → экспорт).
   v12.9.171 — ЭКСПОРТ И ИМПОРТ: БЫСТРЕЕ, ПРИ ТЕХ ЖЕ ФАЙЛАХ НА ВЫХОДЕ.
   (1) XLSX-АРХИВ СОБИРАЕТСЯ СЖАТИЕМ БРАУЗЕРА вместо fflate: CompressionStream
   ('deflate-raw') на каждый лист, один поток записи на временное хранилище
@@ -13720,7 +13730,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.172-client+modal-close-fix';
+const APP_VERSION = '12.9.173-date-cells-as-numbers';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -30402,7 +30412,9 @@ const BrowserImportSources = {
     }finally{this.active.delete(id);}
   },
   async xlsx(file,onBatch) {
-    const source=DiskImport._xlsxLibSource()+'\n('+BrowserSourceXlsxWorker.toString()+')();';
+    /* Помощник NumericCellGuard живёт в главном бандле, а воркер собирается из
+       строки — его исходник добавляем в тело воркера так же, как библиотеку XLSX. */
+    const source=DiskImport._xlsxLibSource()+'\nconst NumericCell=('+NumericCellGuard.toString()+')();\n('+BrowserSourceXlsxWorker.toString()+')();';
     const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
     let worker;try{worker=new Worker(url);}catch(e){URL.revokeObjectURL(url);throw e;}let pending=null;
     const ask=message=>new Promise((resolve,reject)=>{pending={resolve,reject};worker.postMessage(message,message.buf?[message.buf]:[]);});
@@ -30748,19 +30760,97 @@ const BrowserImportSources = {
     modal('#mBrowserSources');
   }
 };
+/* Excel-ячейка с числовым значением и «датным» форматом (вес 8.5, габарит 41014,
+ * цена 1.25) — это ЧИСЛО в датной обёртке, а не дата. XLSX.read({cellDates:true})
+ * отдаёт такую ячейку объектом Date, и значение 41014 превращается в 15.04.2012
+ * (а 8.5 — в 07.01.1900), после чего вес/габариты/характеристики выгружались как
+ * даты. Обратное преобразование возвращает исходное число прямо из Date, поэтому
+ * второй разбор книги (это +90 % времени и памяти на прайсе в десятки мегабайт) не
+ * нужен. Формула ровно та, которой SheetJS строит дату из серийника; результат
+ * сверяется с календарным днём через SSF.parse_date_code, и при несостыковке
+ * число не подставляется (строка остаётся с прежним поведением).
+ * У ячейки с датным форматом числовое значение — ВСЕГДА число, даже если человек
+ * набрал дату: в файле она и хранится серийником. */
+function NumericCellGuard() {
+ return {
+  _sr: null,          // 30.12.1899 — опорная дата Excel-серийников
+  /* Опорная дата одна на весь лист: она не зависит от файла. */
+  bind() {
+    if (!this._sr) this._sr = new Date(1899, 11, 30, 0, 0, 0);
+  },
+  /* Серийник из Date; null — если восстановить нельзя или проверка не прошла. */
+  serialOf(d) {
+    if (!(d instanceof Date)) return null;
+    const t = d.getTime();
+    if (!isFinite(t)) return null;
+    const sr = this._sr || (this._sr = new Date(1899, 11, 30, 0, 0, 0));
+    const srOff = sr.getTimezoneOffset();
+    let serial = (t - sr.getTime()) / 86400000;
+    /* Смещение опорной даты (и переходы на летнее время) уточняем итеративно:
+       ровно так же считает fr() внутри SheetJS. */
+    for (let i = 0; i < 3; i++) {
+      const off = d.getTimezoneOffset();
+      serial = (t - (sr.getTime() + (off - srOff) * 60000)) / 86400000;
+    }
+    if (!isFinite(serial)) return null;
+    /* Округляем до микросекунды дня — дальше идут только шумы плавающей точки. */
+    serial = Math.round(serial * 1e9) / 1e9;
+    /* Сверка дня. Обратный разбор SheetJS не знает про сдвиг часового пояса
+       относительно 30.12.1899 (на датах после 1900 г. расхождение достигает
+       десятков секунд), поэтому сверяем КАЛЕНДАРНЫЙ ДЕНЬ, а не время суток:
+       ошибка опорной даты или системы дат сразу даёт сдвиг на дни. Для
+       серийников 0…61 разбор SheetJS заведомо условен (мнимая дата 29.02.1900,
+       1899 год), там сверять нечего — принимаем как есть.
+       Система дат 1904 отдельного сдвига здесь не требует: в этой сборке SheetJS
+       серийник в Date переводится без него, и обратный пересчёт совпадает с
+       исходным значением ячейки. */
+    if (serial > 61) {
+      const back = typeof XLSX !== 'undefined' && XLSX.SSF && XLSX.SSF.parse_date_code ? XLSX.SSF.parse_date_code(serial) : null;
+      if (!back) return null;
+      const dayBack = Date.UTC(back.y, back.m - 1, back.d);
+      const dayLocal = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+      if (!isFinite(dayBack) || Math.abs(dayBack - dayLocal) > 86400000) return null;
+    }
+    /* Правдоподобность: вне диапазона Excel серийник не имеет смысла. */
+    if (serial < -1 || serial > 2958466) return null;
+    return serial;
+  },
+  /* Замена Date на число в уже собранных строках выдачи. */
+  restore(rows) {
+    if (!rows || !rows.length) return rows;
+    for (const line of rows) {
+      if (!line) continue;
+      for (let i = 0; i < line.length; i++) {
+        if (line[i] instanceof Date) {
+          const n = this.serialOf(line[i]);
+          if (n !== null) line[i] = n;
+        }
+      }
+    }
+    return rows;
+  }
+};
+}
 function BrowserSourceXlsxWorker() {
   let ws=null,range=null,next=0;
+  /* Помощник NumericCell приходит в воркер вместе с этим исходником. Если его
+     нет (воркер собран из одной этой функции, например в тестах), датные ячейки
+     остаются как есть — прежнее поведение, без падения импорта. */
+  const dateCellNums=typeof NumericCell!=='undefined'&&NumericCell?NumericCell:null;
   self.onmessage=async e=>{try{
     if(e.data.type==='init'){
       /* §11.5: файл читается в воркере; в главном потоке копии нет. */
       const input=e.data.file?await e.data.file.arrayBuffer():e.data.buf;
       const wb=XLSX.read(input instanceof Uint8Array?input:new Uint8Array(input),{type:'array',cellDates:true,sheets:0});
+      /* Датные ячейки возвращаются к исходному числу до выдачи строк (см. NumericCellGuard). */
+      if(dateCellNums)dateCellNums.bind();
       ws=wb.Sheets[wb.SheetNames[0]];range=ws?.['!ref']?XLSX.utils.decode_range(ws['!ref']):null;next=range?range.s.r:0;
       self.postMessage({ready:true});
     }else{
       if(!range||next>range.e.r){self.postMessage({rows:[],done:true});return;}
       const end=Math.min(next+999,range.e.r);
       const rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:'',blankrows:false,range:{s:{r:next,c:range.s.c},e:{r:end,c:range.e.c}}});
+      if(dateCellNums)dateCellNums.restore(rows);
       next=end+1;self.postMessage({rows,done:next>range.e.r});
     }
   }catch(error){self.postMessage({error:String(error.message||error)});}};
