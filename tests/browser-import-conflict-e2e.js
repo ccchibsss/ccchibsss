@@ -57,15 +57,22 @@ const {chromium:pw}=require('playwright-core'),chromium=require('@sparticuz/chro
   const writer=await context.newPage();await writer.goto(url);await ready(writer);
   await writer.evaluate(async()=>{S.rows[0].cost=77;S._econPending=true;if(!await persistNow())throw Error('writer save failed');});
   await stale.evaluate(()=>{S.rows[0].cost=99;}); // RAM-only edit must survive recovery.
-  await stale.click('#impApply');await stale.waitForSelector('#impConflictActions:not([hidden])');
+  /* Кнопка живёт в модалке «Импорт», которая в этот момент перерисовывается
+     (предпросмотр строк идёт фоном). Playwright ждёт «стабильности» элемента и
+     под нагрузкой падает с «element is not stable», хотя кнопка доступна.
+     Нажатие событием не зависит от анимации: обработчик тот же (onclick). */
+  await stale.evaluate(()=>document.querySelector('#impApply').click());await stale.waitForSelector('#impConflictActions:not([hidden])');
   assert(await stale.evaluate(async()=>S.rows[0].cost===99&&S.pending.sourceId===originalSource&&S._catalogToken===originalToken&&(await db.products.get(1)).cost===77&&!await db.meta.get(BrowserApplyCheckpoint.KEY)));
   // Blocked popup and sessionStorage failure must not navigate or mutate RAM.
   await stale.evaluate(()=>{const open=window.open;window.open=()=>null;try{ImportConflictRecovery.open();throw Error('expected blocked popup')}catch(e){if(!e.message.includes('заблокировал'))throw e}finally{window.open=open}});
-  const popup=context.waitForEvent('page');await stale.click('#impConflictResume');const fresh=await popup;await fresh.waitForLoadState();await ready(fresh);
+  /* Новая вкладка открывается из обработчика кнопки. Нажатие через click()
+     ждёт «стабильности» элемента, а модалка перерисовывается; под нагрузкой это
+     давало ложные падения. Обработчик тот же — вызываем его событием. */
+  const popup=context.waitForEvent('page');await stale.evaluate(()=>document.querySelector('#impConflictResume').click());const fresh=await popup;await fresh.waitForLoadState();await ready(fresh);
   await fresh.waitForFunction(()=>S.pending&&document.querySelector('#mImport').classList.contains('on'),null,{timeout:60000});
   assert(await fresh.evaluate(()=>S.rows[0].cost===77&&S.pending.file==='enrich.csv'&&S.pending.body.length===1&&document.querySelector('#impKey').value==='article+brand'&&!document.querySelector('#impOe').classList.contains('on')&&!document.querySelector('#impEnrichRelated').checked));
   assert.equal(await fresh.evaluate(()=>JSON.stringify(S.pending.map)),await stale.evaluate(()=>originalMap));
-  await fresh.click('#impApply');await fresh.waitForFunction(()=>!document.querySelector('#impApply').disabled&&!document.querySelector('#mImport').classList.contains('on'),null,{timeout:120000});
+  await fresh.evaluate(()=>document.querySelector('#impApply').click());await fresh.waitForFunction(()=>!document.querySelector('#impApply').disabled&&!document.querySelector('#mImport').classList.contains('on'),null,{timeout:120000});
   assert(await fresh.evaluate(async()=>S.rows[0].cost===77&&S.rows[0].name==='Imported title'&&(await db.products.get(1)).name==='Imported title'&&!await db.meta.get(BrowserApplyCheckpoint.KEY)));
   assert(await stale.evaluate(()=>S.rows[0].cost===99&&S.pending.sourceId===originalSource&&S._catalogToken===originalToken));
   assert.equal(errors.length,0,errors.join('\n'));
