@@ -115,6 +115,18 @@
   под таблицей каталога перечисляется, каких входных данных не хватает и у
   скольких SKU (себестоимость, весогабариты, цена, ставка тарифа, продажи,
   логистика Ozon), со столбцами для догрузки. Источник — econReadiness().
+  v12.9.172 — «ЗАКРЫТЬ» В ДИАЛОГЕ «ПРЕРВАННЫЙ ИМПОРТ» РАБОТАЕТ.
+  Диалог восстановления после прерванного импорта показывает
+  BrowserApplyCheckpoint.recover() внутри loadAll(), то есть ДО UI.bind().
+  Обработчики крестика, кнопки «Закрыть» и клика по фону навешивались только
+  в UI.bind() — к моменту показа диалога их не было, и «Закрыть» ничего не
+  делала (промис оставался неисполненным, экран оставался заблокированным).
+  Теперь закрытие модалок привязано в bindAll() (шаг 1 запуска, до чтения
+  данных) одной функцией bindModalClose(); UI.bind() вызывает её же.
+  Проверено на реальном Chromium: тест tests/browser-import-recover-dialog-e2e.js
+  создаёт настоящую контрольную точку через BrowserApplyCheckpoint.begin(),
+  перезапускает страницу и кликает «Закрыть»; до исправления — диалог остаётся,
+  после — закрывается, а контрольная точка сохраняется до явного решения.
   v12.9.171 — ЭКСПОРТ И ИМПОРТ: БЫСТРЕЕ, ПРИ ТЕХ ЖЕ ФАЙЛАХ НА ВЫХОДЕ.
   (1) XLSX-АРХИВ СОБИРАЕТСЯ СЖАТИЕМ БРАУЗЕРА вместо fflate: CompressionStream
   ('deflate-raw') на каждый лист, один поток записи на временное хранилище
@@ -13708,7 +13720,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.171-client+export-import-speed';
+const APP_VERSION = '12.9.172-client+modal-close-fix';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -27181,8 +27193,10 @@ const UI = {
     if (typeof OzonExport !== "undefined") OzonExport.bind();
     if (typeof OzonCatUI !== "undefined") OzonCatUI.init();
     $('#dbPeriod').onclick = e => { const b = e.target.closest('button'); if (!b) return; $$('#dbPeriod button').forEach(x => x.classList.remove('on')); b.classList.add('on'); Dash.period = num(b.dataset.p); Dash.render(); };
-    $$('.modal [data-close]').forEach(b => b.onclick = () => b.closest('.modal').classList.remove('on'));
-    $$('.modal').forEach(m => m.onclick = e => { if (e.target === m) m.classList.remove('on'); });
+    /* Закрытие модалок (крестик, «Закрыть», фон) уже привязано в bindAll() до
+       загрузки данных — здесь только подстраховка для новых элементов
+       (идемпотентно, обработчики не перезаписываются). */
+    bindModalClose();
     $('#prHide').onclick = () => { $('#progress').classList.remove('on'); Prog.n = 0; clearInterval(Prog.timer); Prog.timer = null; };
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') $$('.modal.on').forEach(m => m.classList.remove('on'));
@@ -49387,7 +49401,16 @@ window.setTaxRegime = function(regime, pct) {
   else if ((location.hash.slice(1) || 'dashboard') === 'competitors') CompetitorIntel.render();
 };
 
+/* Закрытие модалок (крестик, «Закрыть», клик по фону) нужно ДО загрузки данных:
+   диалог «Прерванный импорт» показывает BrowserApplyCheckpoint.recover() внутри
+   loadAll(), а UI.bind() вызывается уже после него — иначе кнопка «Закрыть»
+   остаётся без обработчика и диалог не закрывается. Привязка идемпотентна. */
+function bindModalClose() {
+  $$('.modal [data-close]').forEach(b => b.onclick = () => b.closest('.modal').classList.remove('on'));
+  $$('.modal').forEach(m => m.onclick = e => { if (e.target === m) m.classList.remove('on'); });
+}
 function bindAll() {
+  bindModalClose();
   OzonAdvisor.bind();
   // Multi-marketplace UI bindings
   // Enterprise Backend subpanel tabbar switching
