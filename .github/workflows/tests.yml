@@ -95,6 +95,7 @@ jobs:
           smoke node tests/browser-import-recover-dialog-e2e.js
           smoke node tests/browser-import-conflict-e2e.js
           smoke node tests/browser-export-e2e.js
+          smoke node tests/browser-import-date-cells-e2e.js
           smoke env E2E_ROWS=1000 node tests/browser-import-e2e.js
           smoke env E2E_ROWS=30000 E2E_PARTIAL_WRITE=1 E2E_TIMEOUT_MS=180000 node tests/browser-import-e2e.js
           smoke env E2E_STAGE_ONLY=1 E2E_PREFLIGHT=1 E2E_TARGET_INDEX=1 E2E_TIMEOUT_MS=300000 E2E_ROWS=1000000 node tests/browser-import-e2e.js
