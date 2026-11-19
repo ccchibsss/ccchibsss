@@ -92,6 +92,7 @@ jobs:
           smoke env E2E_PRICE_ENRICHED=1 node tests/browser-wide-values-e2e.js
           smoke env REPEAT_ROWS=1000 node tests/browser-import-repeat-memory-e2e.js
           smoke node tests/browser-import-abort-e2e.js
+          smoke node tests/browser-import-recover-dialog-e2e.js
           smoke node tests/browser-import-conflict-e2e.js
           smoke node tests/browser-export-e2e.js
           smoke env E2E_ROWS=1000 node tests/browser-import-e2e.js
