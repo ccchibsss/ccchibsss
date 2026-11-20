@@ -127,6 +127,21 @@
   создаёт настоящую контрольную точку через BrowserApplyCheckpoint.begin(),
   перезапускает страницу и кликает «Закрыть»; до исправления — диалог остаётся,
   после — закрывается, а контрольная точка сохраняется до явного решения.
+  v12.9.174 — ВЫГРУЗКА БОЛЬШОГО КАТАЛОГА БОЛЬШЕ НЕ УПИРАЕТСЯ В КВОТУ БРАУЗЕРА.
+  Временный XLSX раньше писался в OPFS — в ту же квоту, которую уже занимает
+  каталог в IndexedDB, поэтому выгрузка 122 941 SKU падала с QuotaExceededError,
+  хотя на диске было свободно сотни мегабайт. Замер: при 403 КБ свободных
+  выгрузка 20 000 SKU пишет 14,6 МБ и падает, при тех же условиях с записью
+  прямо в файл — проходит. Теперь перед сборкой открывается системный диалог
+  («Скачать Excel») и байты идут в выбранный файл через createWritable: квота
+  браузера не расходуется вообще. При отказе от диалога или в браузере без
+  File System Access API остаётся прежний путь через OPFS, а вместо текста
+  Chrome показывается причина и выход. Спул при старте выгрузки убирает свои
+  прежние временные файлы (раньше они жили до 24 ч и держали десятки МБ), плюс
+  кнопка «Удалить временные файлы выгрузок» в «Хранилище и квота» (замер:
+  освобождает 12 МБ из 12). Проверено на реальном Chromium при 150–400 КБ
+  свободных: 15 000 SKU → 10,4 МБ записаны в файл, каталог и фильтр целы,
+  повторная выгрузка в том же сеансе (без перезагрузки) проходит.
   v12.9.173 — ЧИСЛА ИЗ «ДАТНЫХ» ЯЧЕЕК ЭКСПОРТА ОСТАЮТСЯ ЧИСЛАМИ.
   Если у числовой ячейки прайса стоял формат «Дата» (нередко так приезжает вес,
   габариты и характеристика), SheetJS с cellDates:true отдавал Date: вес 8.5
@@ -9208,6 +9223,7 @@ try {
         <button type="button" class="btn sm gh" id="cacheRefresh">Обновить состояние</button>
         <button type="button" class="btn sm gh" id="cacheCheckDb">Проверить базу IndexedDB</button>
         <button type="button" class="btn sm gh" id="cachePersist">Запросить постоянное хранилище</button>
+        <button type="button" class="btn sm gh" id="cacheClearExportTemp" title="Временные файлы прежних выгрузок Excel/CSV. Они держат квоту браузера, из-за чего новая выгрузка может упасть с ошибкой места.">Удалить временные файлы выгрузок</button>
       </div>
       <div class="hint">Проверка базы открывает её и читает счётчик без замены каталога. Если вкладка уже работает в памяти, проверка не переключит её автоматически, чтобы не затереть изменения. Постоянное хранилище снижает риск автоматического удаления браузером, но не исправляет ошибку открытия IndexedDB и не является резервной копией. Квоту и разрешение определяет браузер.</div>
       <div><label class="f" for="cacheWriteMode">Способ записи больших каталогов</label>
@@ -13730,7 +13746,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.173-date-cells-as-numbers';
+const APP_VERSION = '12.9.174-export-quota-free';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -13983,7 +13999,11 @@ const Prog = {
   }
 };
 /** Гарантированная обёртка: скрытие индикатора в finally, лог в консоль при ошибке. */
-async function withProgress(op, msg, fn) {
+/* opts.silentError: вызывающий сам покажет ошибку своим текстом (exportGuard —
+   про квоту и способ её обойти), поэтому второй тост с сырым сообщением Chrome
+   не нужен. Ошибка всё равно помечается _ucShown, чтобы её не продублировал
+   unhandledrejection. */
+async function withProgress(op, msg, fn, opts) {
   Prog.show(op, msg);
   const t = performance.now();
   try { const r = await fn(p => Prog.msg(p)); return r; }
@@ -13994,7 +14014,7 @@ async function withProgress(op, msg, fn) {
       throw e;
     }
     console.error('[UC]', op, e);
-    Toast.push('err', 'Ошибка · ' + op, storageErrorText(e).slice(0, 400));
+    if (!(opts && opts.silentError)) Toast.push('err', 'Ошибка · ' + op, storageErrorText(e).slice(0, 400));
     /* v12.2: помечаем ошибку как уже показанную — иначе её же продублирует
        глобальный обработчик unhandledrejection («Необработанная ошибка»). */
     try { if (e && typeof e === 'object') e._ucShown = true; } catch (e2) { }
@@ -18696,6 +18716,17 @@ const StorageCtl = {
   },
   bind() {
     $('#btnCacheSettings').onclick = () => { modal('#mCache'); this.refresh(); };
+    /* Временные файлы прежних выгрузок занимают квоту, пока открыта вкладка или
+       пока не истекут их 10 минут. Кнопка освобождает это место без перезагрузки:
+       активной выгрузки в этот момент нет — кнопка в модалке хранилища. */
+    const clearTemp = $('#cacheClearExportTemp');
+    if (clearTemp) clearTemp.onclick = async () => {
+      const freed = await BrowserExportSpool.clearTemp();
+      Toast.ok('Временные файлы выгрузок удалены', freed
+        ? 'Освобождено около ' + freed + ' МБ. Теперь можно повторить выгрузку.'
+        : 'Временных файлов не было — квота занята каталогом и другими данными.');
+      this.refresh();
+    };
     $('#cacheRefresh').onclick = () => this.refresh();
     $('#cacheCheckDb').onclick = async () => {
       if (this._checkingDb) return;
@@ -23649,8 +23680,17 @@ async function exportGuard(name, fn) {
     if (S.rows !== rowsRef) S.rows = rowsRef;
     try { applyFilter(); Table.paint(); Dash.render(); } catch (_) { }
     try { if (e && typeof e === 'object') e._ucShown = true; } catch (_) { }
+    /* Квота браузера: текст ошибки Chrome («The operation failed because it would
+       cause the application to exceed its storage quota») не подсказывает, что
+       делать. Говорим причину и выход: сохранить файл напрямую (тогда место в
+       браузере не нужно) или освободить его одной кнопкой. */
+    const quota = !!(e && (e.name === 'QuotaExceededError' || /quota/i.test(String(e.message || ''))));
     Toast.err('Ошибка выгрузки — данные НЕ потеряны',
-      name + ': ' + String(e && e.message || e).slice(0, 140) + '. Каталог на месте: ' + fmt(S.rows.length) + ' SKU' +
+      (quota
+        ? 'В браузере закончилось место под временный файл (каталог ' + fmt(S.rows.length) + ' SKU уже занимает квоту). ' +
+          'Нажмите «Скачать Excel» ещё раз и подтвердите сохранение в папку на диске — тогда место в браузере не расходуется. ' +
+          'Либо освободите его в «Хранилище и квота» → «Очистить временные файлы выгрузок». '
+        : name + ': ' + String(e && e.message || e).slice(0, 140) + '. ') + 'Каталог на месте: ' + fmt(S.rows.length) + ' SKU' +
       (saved ? ', и он сохранён на диск' : '') + '. Заново загружать файлы не нужно — просто повторите выгрузку.');
     return null;
   }
@@ -27617,15 +27657,54 @@ const BrowserExportSpool = {
     }catch(e){await sink.abort();throw e;}
     finally{if(!complete)try{await reader.cancel();}catch(e){}reader.releaseLock();}
   },
+  /* Приёмник на диске (пользователь выбрал файл через showSaveFilePicker):
+     байты идут прямо в него, квота браузера не расходуется. Это и есть обход
+     QuotaExceededError, когда каталог уже занял почти всё место: временный файл
+     в OPFS не создаётся вовсе. Любая ошибка выбора файла/записи возвращает null,
+     и вызывающая сторона остаётся на прежнем пути (OPFS → память). */
+  async openDisk(handle){
+    if(!handle||typeof handle.createWritable!=='function')return null;
+    let writer;
+    try{writer=await handle.createWritable();}catch(e){return null;}
+    let closed=false;
+    return {disk:true,userFile:true,
+      async write(blobs){for(const blob of blobs)await writer.write(blob);},
+      async finish(){if(closed)throw new Error('Файл уже закрыт');closed=true;await writer.close();
+        return (typeof handle.getFile==='function'?await handle.getFile():null);},
+      async abort(){if(closed)return;closed=true;try{await writer.abort();}catch(e){}}
+    };
+  },
+  /* Очистка временных файлов выгрузок по запросу пользователя.
+     Возвращает освобождённые мегабайты (0 — чистить было нечего). */
+  async clearTemp(){
+    let dir;
+    try{
+      if(!navigator.storage?.getDirectory)return 0;
+      const root=await navigator.storage.getDirectory();
+      dir=await root.getDirectoryHandle('uc-export-temp-v1',{create:true});
+    }catch(e){return 0;}
+    const before=await navigator.storage.estimate().catch(()=>null);
+    let removed=0;
+    for await(const [key] of dir.entries()){
+      try{await dir.removeEntry(key);removed++;}catch(e){}
+    }
+    const after=await navigator.storage.estimate().catch(()=>null);
+    if(!removed)return 0;
+    if(before&&after&&after.usage<before.usage)return Math.round((before.usage-after.usage)/1048576);
+    return removed;
+  },
   async create(){
     let dir,handle,name,writer;
     try{
       if(!navigator.storage?.getDirectory)throw Error('OPFS unavailable');
       const root=await navigator.storage.getDirectory();dir=await root.getDirectoryHandle('uc-export-temp-v1',{create:true});
-      // Recover only our own expired export files after an interrupted session.
+      /* Свои прежние временные файлы убираем СРАЗУ: квота общая на весь сайт, и
+         каждая покинутая выгрузка (вкладку закрыли до истечения 10 минут) держала
+         десятки мегабайт до суток. На каталоге в 122 941 SKU этого места как раз
+         не хватало, и следующая выгрузка падала с QuotaExceededError. Активная
+         выгрузка не страдает: свой файл создаётся уже после очистки. */
       for await(const [key] of dir.entries()){
-        const stamp=Number(key.split('-')[0]);
-        if(Number.isFinite(stamp)&&stamp>0&&Date.now()-stamp>86400000)try{await dir.removeEntry(key);}catch(e){}
+        try{await dir.removeEntry(key);}catch(e){}
       }
       name=Date.now()+'-'+crypto.randomUUID()+'.xlsx';handle=await dir.getFileHandle(name,{create:true});writer=await handle.createWritable();
     }catch(e){
@@ -27683,8 +27762,8 @@ const BrowserExportZipNative = {
     for(let i=0;i<bytes.length;i++)c=t[(c^bytes[i])&0xFF]^(c>>>8);
     return c;
   },
-  async create(prog){
-    const sink=await BrowserExportSpool.create(),entries=[];
+  async create(prog,target){
+    const sink=target||await BrowserExportSpool.create(),entries=[];
     if(!sink.disk&&prog)prog('Временное файловое хранилище недоступно: сжатый архив остаётся в памяти');
     const enc=new TextEncoder();
     let offset=0,active=null,closed=false,failure=null;
@@ -27840,13 +27919,22 @@ const BrowserExportZipNative = {
   }
 };
 const BrowserExportZip = {
-  async create(prog){
+  /* target — необязательный приёмник на диске (см. BrowserExportSpool.openDisk):
+     нужен, когда квота браузера уже занята каталогом и временный файл в OPFS
+     создать нельзя. Пробрасывается в оба райтера без изменений. */
+  async create(prog,target){
     if(BrowserExportZipNative.supported()){
-      try{return await BrowserExportZipNative.create(prog);}
-      catch(e){console.warn('[UC] нативная упаковка XLSX недоступна, используется fflate:',e);}
+      try{return await BrowserExportZipNative.create(prog,target);}
+      catch(e){
+        /* Ошибку записи в выбранный пользователем файл нельзя выдавать за
+           «нативный ZIP недоступен»: повторная упаковка в OPFS упрётся в ту же
+           квоту и потеряет уже выбранный файл. */
+        if(e&&e._ucUserFile)throw e;
+        console.warn('[UC] нативная упаковка XLSX недоступна, используется fflate:',e);
+      }
     }
     if(!window.fflate)throw new Error('Библиотека fflate не загрузилась');
-    const sink=await BrowserExportSpool.create(),chunks=[];
+    const sink=target||await BrowserExportSpool.create(),chunks=[];
     if(!sink.disk&&prog)prog('Временное файловое хранилище недоступно: сжатый архив остаётся в памяти');
     let failure=null,finished=false,active=null,queuedBytes=0;
     const zip=new fflate.Zip((err,data,final)=>{if(err)failure=err;else if(data.length){chunks.push(new Blob([data]));queuedBytes+=data.length;}if(final)finished=true;});
@@ -43986,9 +44074,27 @@ const Exp = {
         Prog.step(92);
         Exp.download(blob, 'UC_economics_' + mpTag() + '_' + new Date().toISOString().slice(0, 10) + '.csv');
       } else {
-        const blob = await Exp.streamXlsx(cat, rows, prog);
-        Prog.step(96);
-        Exp.download(blob, 'UC_unit_economics_' + mpTag() + '_' + new Date().toISOString().slice(0, 10) + '.xlsx');
+        /* Квота: временный XLSX пишется в OPFS и на 122 941 SKU упирается в
+           лимит браузера (QuotaExceededError), хотя места на диске достаточно.
+           Поэтому сначала предлагаем сохранить прямо в файл — тогда байты идут
+           в него и квота браузера не расходуется вовсе. Отказ от выбора файла
+           не ломает выгрузку: остаётся прежний путь через OPFS. */
+        const name = 'UC_unit_economics_' + mpTag() + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
+        let target = null;
+        try {
+          if (typeof window.showSaveFilePicker === 'function' && typeof window.isSecureContext !== 'undefined' && window.isSecureContext)
+            target = await BrowserExportSpool.openDisk(await window.showSaveFilePicker({ suggestedName: name }));
+        } catch (e) { target = null; }
+        let blob = null;
+        if (target) {
+          try { await Exp.streamXlsx(cat, rows, prog, target); Prog.step(96); }
+          catch (e) { try { await target.abort(); } catch (_) { } throw e; }
+        } else {
+          blob = await Exp.streamXlsx(cat, rows, prog);
+          Prog.step(96);
+        }
+        if (blob) Exp.download(blob, name);
+        else Toast.ok('Файл сохранён на диск', name + ' — место в браузере при этом не потрачено');
       }
       await Exp.snap('Экспорт ' + (isCsv ? 'CSV' : 'XLSX'), rows.length, cat.length);
       Toast.ok('Файл готов (одна книга)', `${fmt(rows.length)} строк · ${cat.length} колонок`);
@@ -44011,7 +44117,7 @@ const Exp = {
           Toast.info('CSV содержит значения, а не формулы', 'XLSX содержит частичные формулы по сохранённым удельным расходам; изменение цены и тарифов требует нового расчёта в приложении.');
         }
       } catch (e) { }
-    });
+    }, { silentError: true });
     return true;
   },
 
@@ -44028,7 +44134,7 @@ const Exp = {
     }
     return '';
   },
-  async streamXlsx(cat, rows, prog) {
+  async streamXlsx(cat, rows, prog, target) {
     if(rows.length>1048575||cat.length>16384)throw new Error('Превышен лимит XLSX; разделите выгрузку или используйте CSV');
     if (!window.fflate) throw new Error('Библиотека fflate не загрузилась (нет сети?) — экспорт XLSX недоступен, используйте CSV');
     const useF = $('#expFormulas') ? $('#expFormulas').classList.contains('on') : true;
@@ -44198,7 +44304,7 @@ const Exp = {
     }
 
     /* ---- bounded, sequential ZIP entries with disk-backed output ---- */
-    const archive=await BrowserExportZip.create(prog);
+    const archive=await BrowserExportZip.create(prog,target);
     try{
     const addStr=(name,str)=>archive.add(name,str),sheetW=name=>archive.sheet(name);
     /* ---- лист 1: Юнит-экономика (потоково, чанками строк) ---- */
