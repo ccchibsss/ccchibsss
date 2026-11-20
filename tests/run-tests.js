@@ -11,7 +11,7 @@ const app = scripts[scripts.length - 1];
 // v12.9.171: единственная строгая проверка версии. Раньше каждая проверка
 // перечисляла «или старая, или новая» строку — такая проверка проходит и на
 // необновлённой сборке, то есть ничего не гарантирует.
-const VERSION_OK = /const APP_VERSION = '12\.9\.175-dim-unit-normalization';/.test(app);
+const VERSION_OK = /const APP_VERSION = '12\.9\.176-std-dims-apply-button';/.test(app);
 new vm.Script(app); // синтаксис клиентского скрипта
 const gas = html.match(/<script type="text\/plain" id="gas-backend">([\s\S]*?)<\/script>/)[1];
 new vm.Script(gas); // синтаксис GAS-бэкенда

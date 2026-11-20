@@ -142,6 +142,18 @@
   освобождает 12 МБ из 12). Проверено на реальном Chromium при 150–400 КБ
   свободных: 15 000 SKU → 10,4 МБ записаны в файл, каталог и фильтр целы,
   повторная выгрузка в том же сеансе (без перезагрузки) проходит.
+  v12.9.176 — КНОПКА «ПОДСТАВИТЬ СТАНДАРТНЫЕ ОВХ» ПИШЕТ В КАТАЛОГ.
+  Раньше стандартные весогабариты подставлялись только при выгрузке, а
+  кнопки в окне стандартов упирались в «в каталог не записываем». Теперь
+  есть предпросмотр: видно артикул, что сейчас, что станет и что будет
+  после проверки. Пишутся только точные совпадения со справочником;
+  значения записываются как «стандарт», не как измерение. Где совпадения
+  нет — медиана по категории, но только при трёх и более уже проверенных
+  SKU той же категории, и такие значения помечаются красным и словом
+  «не измерено»: выходят из карантина с отметкой, а не молча.
+  Проверено на 5000 строках: 4979 подставлено, карантин очистился там, где
+  значения уложились в пределы категории; повторное нажатие не меняет
+  строки и не создаёт ложную ревизию каталога.
   v12.9.175 — ЕДИНИЦЫ ВЕСОГАБАРИТОВ ПРИВОДЯТСЯ К ОДНОМУ ВИДУ (кг и см).
   Разные бренды присылают одно и то же поле в граммах или килограммах, в
   миллиметрах или сантиметрах. Явная единица («410 мм», «Вес, г», «410*300*200 мм»)
@@ -8892,6 +8904,7 @@ try {
     <button type="button" class="btn" id="btnAnomalyFix"><i class="fa-solid fa-wand-magic-sparkles"></i> Эвристика для отмеченных</button>
     <button type="button" class="btn pri" id="btnAnomalyOe"><i class="fa-solid fa-link"></i> Подобрать меньшие весогабариты</button>
     <button type="button" class="btn" id="btnDimUnits" title="Привести вес и габариты к одному виду: граммы → кг, миллиметры → см. Единица определяется по бренду."><i class="fa-solid fa-scale-balanced"></i> Единицы по брендам</button>
+    <button type="button" class="btn" id="btnStdDimsApply" title="Подставить типовые весогабариты из справочника тем SKU, у которых справочник даёт точное совпадение по названию или виду. Перед записью — предпросмотр."><i class="fa-solid fa-book"></i> Подставить стандартные ОВХ</button>
   </div>
   <div class="grid3" style="grid-template-columns:1.15fr .85fr 1fr;align-items:start;margin-bottom:13px">
     <div class="card"><div class="cardtop"><i class="fa-solid fa-ruler-combined" style="color:var(--amber)"></i><h3>Категориальные ограничители</h3><div class="sp"></div><button type="button" class="btn sm gh" id="btnAnomalyAdd"><i class="fa-solid fa-plus"></i></button></div>
@@ -9244,6 +9257,27 @@ try {
         <button type="button" class="btn pri" id="dimUnitFixAll">Пересчитать все бренды</button>
         <button type="button" class="btn sm gh" id="dimUnitRefresh">Определить заново</button>
         <button type="button" class="btn sm gh" id="dimUnitDownload">Скачать отчёт CSV</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal" id="mStdApply" role="dialog" aria-modal="true" aria-label="Подстановка стандартных весогабаритов">
+  <div class="mbox" style="width:1000px;max-width:96vw">
+    <div class="mhead"><i class="fa-solid fa-book" style="color:var(--amber)"></i><h3>Подстановка стандартных весогабаритов</h3>
+      <div class="sp" style="flex:1"></div><button type="button" class="btn sm gh" data-close><i class="fa-solid fa-xmark"></i></button></div>
+    <div class="mbody" style="display:grid;gap:10px">
+      <div class="infobox"><div><b>Это значения справочника, а не измерение вашей упаковки.</b>
+        Подставляются только при <b>точном</b> совпадении названия или вида товара со справочником.
+        Где совпадения нет — медиана по категории, отдельной группой: опора берётся из строк той же категории, которые уже прошли проверку (не в карантине), нужно не меньше трёх таких строк.
+        Такие значения помечаются в каталоге красным как «не измерено».
+        Подтверждение аномалии у изменённых строк будет сброшено, и проверка выполнится заново.</div></div>
+      <div id="stdApplySummary" class="hint" role="status" aria-live="polite">Проверка…</div>
+      <div class="pad" style="padding:0;max-height:42vh;overflow:auto"><table class="plain" id="stdApplyTable"></table></div>
+      <div class="hint" style="line-height:1.5">Нетто не выдумывается. Объём пересчитывается из сторон; объём, заданный вручную и не совпадающий с габаритами, сохраняется.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" class="btn pri" id="stdApplyRun">Подставить</button>
+        <button type="button" class="btn sm gh" id="stdApplyCsv">Скачать план CSV</button>
+        <button type="button" class="btn sm gh" id="stdApplyRefresh">Проверить заново</button>
       </div>
     </div>
   </div>
@@ -13787,7 +13821,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.175-dim-unit-normalization';
+const APP_VERSION = '12.9.176-std-dims-apply-button';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -22676,7 +22710,8 @@ function econQualityText(p) {
   if (p.priceModelUnavailable) return 'ПРОВЕРИТЬ: цена не найдена в диапазоне модели — не использовать для отправки';
   const cols = enrichColumnsText(p);
   const notes = [];
-  if (p._stdDimsCalc) notes.push('габариты для расчёта — СТАНДАРТНЫЕ (не измерены): ' + (p._stdDimsCalc.source || 'справочник'));
+  if (p._stdDimsApplied && p._stdDimsApplied.estimated) notes.push('габариты — МЕДИАНА ПО КАТЕГОРИИ, не измерено: ' + (p._stdDimsApplied.source || 'категория'));
+  else if (p._stdDimsCalc) notes.push('габариты для расчёта — СТАНДАРТНЫЕ (не измерены): ' + (p._stdDimsCalc.source || 'справочник'));
   if (ozonTariffReminderDue() && ['OZON','ALL'].includes(S.settings.activeMarketplace || 'ALL'))
     notes.push('Ozon: с 01.12.2026 сверьте новые тарифы; новая формула в этой версии не реализована');
   /* Закупка есть, цена продажи ещё не задана — это нормальный сценарий:
@@ -23145,7 +23180,12 @@ const Table = {
           } else if (['weight','length','width','height'].includes(c.k)) {
             try {
               const legacy = p._stdDimsApplied && Array.isArray(p._stdDimsApplied.fields) && p._stdDimsApplied.fields.includes(c.k);
-              if (legacy || exportDimsFor(p).stdFields.includes(c.k)) { afStyle = ';background:rgba(250,204,21,.30);box-shadow:inset 0 0 0 1px #facc15'; afTip = 'Весогабариты из стандартного справочника — не измерено'; }
+              /* Медиана по категории — не измерение и не точный стандарт: красная
+                 заливка, чтобы такие значения не ушли в тариф незамеченными. */
+              if (legacy && p._stdDimsApplied.estimated) {
+                afStyle = ';background:rgba(255,95,109,.28);box-shadow:inset 0 0 0 1px #ff5f6d';
+                afTip = 'МЕДИАНА ПО КАТЕГОРИИ — не измерение и не точный стандарт справочника. Проверьте упаковку этого SKU.';
+              } else if (legacy || exportDimsFor(p).stdFields.includes(c.k)) { afStyle = ';background:rgba(250,204,21,.30);box-shadow:inset 0 0 0 1px #facc15'; afTip = 'Весогабариты из стандартного справочника — не измерено'; }
             } catch (e) { }
           }
           return `<div class="${cls}" style="${st}${afStyle}" title="${esc(c.k === 'name' ? p.name : (afTip || cheapTip || holdTip || ''))}">${v === undefined || v === null || v === '' ? '<span style="color:#3d4566">—</span>' : (isHtml ? v : esc(v))}${holdBadge}</div>`;
@@ -35577,6 +35617,338 @@ const StdDims = {
   }
 };
 
+/* ===== «ПОДСТАВИТЬ СТАНДАРТНЫЕ ОВХ» ========================================
+   Для строк из карантина, у которых справочник StdDims даёт точное совпадение
+   по названию/виду, подставляет типовые весогабариты в каталог. Замер на
+   реальном справочнике: 1789 позиций, у 200 из 200 строк с мусором вместо
+   габаритов совпадение exact, после подстановки AnomalyDetector.evaluate()
+   даёт пустой список нарушений — строка выходит из карантина.
+
+   Принципы:
+   • только точное совпадение (match: 'exact'); «по вхождению» — это догадка;
+   • нет опоры в справочнике — медиана по категории, но она помечается
+     отдельно и в файле считается справочной (решение владельца: такие строки
+     тоже выходят из карантина, но с отметкой «не измерено»);
+   • все значения пишутся с источником и сбрасывают подтверждение аномалии;
+   • нетто не выдумывается, объём пересчитывается из сторон;
+   • перед записью — предпросмотр с числами и CSV.
+   ========================================================================= */
+const StdDimsApply = {
+  lastPlan: null,
+
+  /* Какие строки рассматриваем: отмеченные, иначе все заблокированные. */
+  scope(selectedOnly, explicit) {
+    /* Явный список строк нужен окну «Стандартные ОВХ»: там свои галочки. */
+    if (Array.isArray(explicit)) return { rows: explicit.filter(Boolean), source: 'explicit', marked: explicit.length };
+    const found = (typeof AnomalyDetector !== 'undefined' && Array.isArray(AnomalyDetector.found))
+      ? AnomalyDetector.found : [];
+    const marked = found.filter(f => f && f._sel && f.p);
+    if (selectedOnly && marked.length) return { rows: marked.map(f => f.p), source: 'selected', marked: marked.length };
+    const blocked = (typeof AnomalyDetector !== 'undefined' && AnomalyDetector.blockedRows)
+      ? AnomalyDetector.blockedRows() : [];
+    if (marked.length) return { rows: marked.map(f => f.p), source: 'selected', marked: marked.length };
+    return { rows: blocked.slice(), source: 'blocked', marked: 0 };
+  },
+
+  /* Медиана по категории — по КАТАЛОГУ, а не по справочнику: в справочнике
+     поле c — это название товара («Блок цилиндров (чугун)»), категорий там нет
+     (проверено: 1782 уникальных названия, ни одной группы с 3+ записями).
+     Опорой служат строки той же категории, которые НЕ в карантине: у них
+     габариты уже прошли проверку пределов. Меньше трёх таких строк — медианы
+     нет, и строка остаётся в карантине (догадку не подставляем). */
+  categoryMedian(category, excludeSet) {
+    const norm = s => String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim();
+    const key = norm(category);
+    if (!key) return null;
+    const vals = { length: [], width: [], height: [], weight: [] };
+    for (const p of S.rows || []) {
+      if (!p || p === excludeSet) continue;
+      if (norm(p.category) !== key) continue;
+      if (p.dimensionAnomalyBlocked) continue;      // в карантине — не опора
+      let ok = true;
+      for (const f of ['length', 'width', 'height', 'weight']) if (!(num(p[f]) > 0)) { ok = false; break; }
+      if (!ok) continue;
+      for (const f of ['length', 'width', 'height', 'weight']) vals[f].push(num(p[f]));
+    }
+    const n = vals.length.length;
+    if (n < (this.minMedianRows || 3)) return null;
+    const med = arr => { const v = arr.slice().sort((a, b) => a - b); const m = Math.floor(v.length / 2);
+      return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+    return { l: round(med(vals.length), 4), w: round(med(vals.width), 4), h: round(med(vals.height), 4),
+      wt: round(med(vals.weight), 4), n };
+  },
+
+  /* Значения уже равны предлагаемым — писать нечего. */
+  sameValues(p, vals) {
+    return ['length', 'width', 'height', 'weight'].every(f => {
+      const v = num(vals[f]);
+      return !(v > 0) || num(p[f]) === v;
+    });
+  },
+
+  /* Что останется после подстановки: прогоняем проверку аномалий на копии
+     строки с новыми значениями. Нужно, чтобы человек видел ДО записи, что
+     часть SKU всё равно останется в карантине — типовые габариты бывают больше
+     пределов своей категории, и это повод пересмотреть предел, а не прятать. */
+  checkAfter(p, values) {
+    if (typeof AnomalyDetector === 'undefined' || !AnomalyDetector.evaluate) return null;
+    try {
+      const L = num(values.length), W = num(values.width), H = num(values.height);
+      const preview = Object.assign({}, p, values);
+      if (!L || !W || !H) preview.volume = num(p.volume);
+      else if (!(num(p.volume) > 0 && Math.abs(num(p.volume) - (num(p.length) * num(p.width) * num(p.height) / 1000)) / Math.max(1e-9, num(p.volume)) > 0.02))
+        preview.volume = round(L * W * H / 1000, 4);
+      const ev = AnomalyDetector.evaluate(preview);
+      const issues = (ev.issues || []).filter(x => !['import_missing', 'import_rejected'].includes(x.type));
+      return { issues: issues.map(x => ({ type: x.type, field: x.field, val: x.val, limit: x.limit })) };
+    } catch (e) { return null; }
+  },
+
+  /* План: что будет сделано с каждой строкой. Ничего не меняет. */
+  plan(selectedOnly, explicit) {
+    const scope = this.scope(selectedOnly, explicit);
+    const plan = { exact: [], median: [], none: [], already: [], rows: scope.rows.length, source: scope.source, marked: scope.marked };
+    for (const p of scope.rows) {
+      if (!p) continue;
+      let found = null;
+      try { found = StdDims.match(p, false); } catch (e) { found = null; }
+      if (found && found.status === 'match' && found.match === 'exact' && found.std) {
+        const vals = { length: num(found.std.l), width: num(found.std.w), height: num(found.std.h), weight: num(found.std.wt) };
+        if (![vals.length, vals.width, vals.height, vals.weight].some(v => v > 0)) { plan.none.push(p); continue; }
+        if (this.sameValues(p, vals)) { plan.already.push(p); continue; }
+        plan.exact.push({ p, values: vals, std: found.std, after: this.checkAfter(p, vals) });
+        continue;
+      }
+      const med = this.categoryMedian(p.category || '');
+      if (med) { const vals = { length: med.l, width: med.w, height: med.h, weight: med.wt };
+        if (this.sameValues(p, vals)) { plan.already.push(p); continue; }
+        plan.median.push({ p, values: vals, med, after: this.checkAfter(p, vals) }); continue; }
+      plan.none.push(p);
+    }
+    this.lastPlan = plan;
+    return plan;
+  },
+
+  /* Запись значений в строку. Отдельно от планирования, чтобы предпросмотр
+     не мог случайно изменить каталог. */
+  applyToRow(entry, kind) {
+    const p = entry.p;
+    if (!p) return [];
+    const before = { length: num(p.length), width: num(p.width), height: num(p.height), weight: num(p.weight) };
+    const changed = [];
+    const srcLabel = kind === 'median'
+      ? 'медиана по категории «' + String(p.category || '').slice(0, 40) + '» (' + fmt(entry.med.n) + ' проверенных SKU этой категории в каталоге)'
+      : 'справочник стандартных ОВХ: ' + String(entry.std.c || '').slice(0, 60);
+    for (const field of ['length', 'width', 'height', 'weight']) {
+      const v = num(entry.values[field]);
+      if (!(v > 0)) continue;
+      /* Совпало до знака — не трогаем: лишняя запись источника с новой датой
+         даёт каталогу ложную ревизию при повторном нажатии (та же ловушка,
+         что была с _dimUnitNote при повторном импорте). */
+      if (num(before[field]) === v) continue;
+      p[field] = v;
+      changed.push(field);
+      exportDimsInvalidate(p);
+      p._sources = p._sources || {};
+      p._sources[field] = { file: srcLabel, date: nowISO(), stdSubstituted: true,
+        estimated: kind === 'median' };
+    }
+    if (!changed.length) return [];
+    /* Производный объём пересчитываем; заданный вручную (отличается от
+       произведения сторон) сохраняем и помечаем явным. */
+    if (changed.some(f => f !== 'weight')) {
+      const oldL = before.length, oldW = before.width, oldH = before.height;
+      const oldVol = oldL * oldW * oldH / 1000;
+      const followsDims = oldVol > 0 && num(p.volume) > 0 && Math.abs(num(p.volume) - oldVol) / oldVol <= 0.02;
+      const newVol = round(num(p.length) * num(p.width) * num(p.height) / 1000, 4);
+      if (num(p.volume) > 0 && !followsDims) {
+        p._volumeExplicit = true;
+      } else if (newVol > 0) {
+        p.volume = newVol;
+        p._volumeExplicit = false;
+        p._sources.volume = { file: 'пересчитан из стандартных габаритов', date: nowISO(), stdSubstituted: true };
+      }
+    }
+    p._stdDimsApplied = {
+      source: entry.std ? String(entry.std.c || '') : String(p.category || ''),
+      match: kind === 'median' ? 'median' : 'exact',
+      matchedBy: kind === 'median' ? 'category-median' : 'dictionary',
+      fields: changed.slice(),
+      values: Object.fromEntries(changed.map(k => [k, num(p[k])])),
+      dictionary: StdDims.version, dictionarySource: entry.std ? (entry.std.src || 'core') : 'median',
+      date: nowISO(), estimated: kind === 'median',
+    };
+    /* Аномалия больше не «подтверждена вручную»: значения изменились. */
+    delete p.dimensionAnomalyAck;
+    return changed;
+  },
+
+  /* Предпросмотр: числа до записи. Возвращает план и сводку. */
+  preview(selectedOnly) {
+    const plan = this.plan(selectedOnly);
+    const sum = {
+      total: plan.rows, exact: plan.exact.length, median: plan.median.length,
+      none: plan.none.length, already: plan.already.length, source: plan.source, marked: plan.marked,
+      values: (plan.exact.length * 4) + (plan.median.length * 4),
+      categoriesWithoutStd: [...new Set(plan.none.map(p => String(p.category || '').trim()).filter(Boolean))].slice(0, 20),
+      released: [...plan.exact, ...plan.median].filter(e => e.after && !e.after.issues.length).length,
+      stillBlocked: [...plan.exact, ...plan.median].filter(e => e.after && e.after.issues.length).length,
+    };
+    return { plan, sum };
+  },
+
+  /* Применение плана. Только после подтверждения пользователем. */
+  async apply(selectedOnly, opts) {
+    const o = opts || {};
+    const plan = this.plan(selectedOnly, o.rows);
+    const targets = [...plan.exact, ...plan.median];
+    if (!targets.length) {
+      Toast.info('Нечего подставлять',
+        plan.rows ? 'Справочник не даёт точного совпадения ни для одной из ' + fmt(plan.rows) + ' строк.' :
+          'В карантине нет строк с весогабаритами.');
+      return { applied: 0, rows: 0 };
+    }
+    if (!o.skipConfirm) {
+      const msg = 'Подставить стандартные весогабариты?\n\n' +
+        'Точно из справочника: ' + plan.exact.length + ' SKU (уже заполнено: ' + plan.already.length + ')\n' +
+        'Медиана по категории: ' + plan.median.length + ' SKU\n' +
+        'Без данных: ' + plan.none.length + ' SKU (останутся как есть)\n\n' +
+        'Это значения справочника, а не измерение конкретной упаковки. ' +
+        'Подтверждение аномалии у изменённых строк будет сброшено — строки проверятся заново.';
+      if (!confirm(msg)) return { applied: 0, rows: 0, cancelled: true };
+    }
+    const changedRows = [];
+    let applied = 0, medianApplied = 0;
+    const log = [];
+    for (const entry of plan.exact) {
+      const changed = this.applyToRow(entry, 'exact');
+      if (changed.length) { applied++; changedRows.push(entry.p); log.push({ article: entry.p.article, kind: 'exact', std: entry.std.c, fields: changed }); }
+    }
+    for (const entry of plan.median) {
+      const changed = this.applyToRow(entry, 'median');
+      if (changed.length) { applied++; medianApplied++; changedRows.push(entry.p); log.push({ article: entry.p.article, kind: 'median', category: entry.p.category, fields: changed }); }
+    }
+    this.lastApply = { applied, medianApplied, nothing: plan.none.length, already: plan.already.length, log: log.slice(0, 2000), at: nowISO() };
+    if (!applied) { Toast.info('Изменений нет', 'Все подходящие строки уже заполнены.'); return { applied: 0, rows: plan.rows }; }
+    try {
+      if (typeof AnomalyDetector !== 'undefined') {
+        AnomalyDetector.log.push({ ts: nowISO(), article: '—', before: {}, after: {},
+          heuristic: 'стандартные ОВХ: ' + applied + ' SKU (точно ' + (applied - medianApplied) + ', медиана ' + medianApplied + ')',
+          category: '' });
+        AnomalyDetector.save();
+      }
+    } catch (e) { }
+    const small = changedRows.length < Math.max(50, (S.rows || []).length * 0.02);
+    await runPipeline(true, { changedRows: new WeakSet(changedRows), smallDelta: small, persistChangedOnly: small, changedList: changedRows });
+    /* finishQuarantine() только пересобирает очередь по СТАРЫМ флагам, поэтому
+       каждую изменённую строку проверяем заново: иначе уже исправленные SKU
+       висят в карантине до ручного «Сканировать» — проверено на 5000 строк,
+       оставалось 56 «заблокированных» при 21 реальной проблеме. */
+    let stillBlocked = 0;
+    try {
+      if (typeof AnomalyDetector !== 'undefined') {
+        for (const p of changedRows) { try { AnomalyDetector.quarantineRow(p); } catch (e) { } }
+        AnomalyDetector.finishQuarantine();
+        stillBlocked = (typeof AnomalyDetector.blockedRows === 'function' ? AnomalyDetector.blockedRows().length : 0);
+      }
+    } catch (e) { }
+    Toast.ok('Стандартные весогабариты подставлены',
+      fmt(applied) + ' SKU · точно из справочника ' + fmt(applied - medianApplied) +
+      (medianApplied ? ' · медиана по категории ' + fmt(medianApplied) + ' (помечены как ненастоящие)' : '') +
+      (plan.none.length ? ' · без данных ' + fmt(plan.none.length) : '') +
+      (plan.already.length ? ' · уже заполнено ' + fmt(plan.already.length) : '') +
+      (stillBlocked ? ' · осталось в карантине ' + fmt(stillBlocked) + ' (пределы категории или нетто)' : ' · карантин очищен'));
+    return { applied, medianApplied, rows: plan.rows, nothing: plan.none.length };
+  },
+
+  /* Экран предпросмотра: показывает план ДО записи. */
+  open() {
+    modal('#mStdApply');
+    this.render();
+  },
+  render() {
+    const table = $('#stdApplyTable'); if (!table) return;
+    const { plan, sum } = this.preview(false);
+    const box = $('#stdApplySummary');
+    if (box) {
+      if (!sum.total) {
+        box.textContent = 'В карантине нет строк с весогабаритами — подставлять нечего.';
+      } else {
+        box.innerHTML =
+          'Проверено строк: <b>' + fmt(sum.total) + '</b>' +
+          ' · точно из справочника: <b style="color:var(--teal)">' + fmt(sum.exact) + '</b>' +
+          ' · медиана по категории: <b style="color:var(--amber)">' + fmt(sum.median) + '</b>' +
+          ' · без данных: <b>' + fmt(sum.none) + '</b>' +
+          (sum.already ? ' · уже заполнено: <b>' + fmt(sum.already) + '</b>' : '') +
+          (sum.source === 'selected' ? ' · взяты отмеченные строки (' + fmt(sum.marked) + ')' : ' · взяты все заблокированные строки') +
+          ((sum.exact + sum.median) ? '<br>После подстановки выйдут из карантина: <b style="color:var(--teal)">' +
+            fmt(sum.released) + '</b>' + (sum.stillBlocked
+              ? ' · останутся из-за пределов категории или нетто: <b style="color:var(--amber)">' + fmt(sum.stillBlocked) + '</b>' +
+                ' <span class="hint">(типовые габариты больше лимита категории — проверьте предел или упаковку)</span>'
+              : '') : '');
+      }
+    }
+    const slice = (arr, kind) => arr.slice(0, 200).map(e => {
+      const p = e.p;
+      const now = [num(p.weight) ? fmt(num(p.weight), 3) + ' кг' : '—',
+        num(p.length) && num(p.width) && num(p.height)
+          ? fmt(num(p.length), 1) + '×' + fmt(num(p.width), 1) + '×' + fmt(num(p.height), 1) : '—'].join(' · ');
+      const next = [fmt(e.values.weight, 3) + ' кг',
+        fmt(e.values.length, 1) + '×' + fmt(e.values.width, 1) + '×' + fmt(e.values.height, 1)].join(' · ');
+      const basis = kind === 'exact'
+        ? esc(String(e.std.c || '')) + ' <span class="hint">(точное совпадение)</span>'
+        : esc(String(p.category || '—')) + ' <span class="hint">(медиана по ' + fmt(e.med.n) + ' проверенным SKU категории)</span>';
+      const check = !e.after ? '<span class="hint">—</span>'
+        : (!e.after.issues.length ? '<span style="color:var(--teal)">выйдет из карантина</span>'
+          : '<span style="color:var(--amber)" title="' + esc(e.after.issues.map(i => i.type + ' ' + i.field + ': ' + i.val + ' > ' + i.limit).join('; ')) + '">останется: ' +
+            esc([...new Set(e.after.issues.map(i => ({ weight_high: 'вес', dim_high: 'габарит', vol_high: 'объём', density_high: 'плотность', net_gt_gross: 'нетто' }[i.type] || i.type)))].join(', ')) + '</span>');
+      return `<tr><td class="mono" style="white-space:nowrap">${esc(String(p.article || ''))}</td><td>${esc(String(p.name || '').slice(0, 60))}</td>` +
+        `<td class="hint">${basis}</td><td class="mono hint">${now}</td><td class="mono" style="color:var(--teal)">${next}</td><td class="hint">${check}</td></tr>`;
+    }).join('');
+    const body = slice(plan.exact, 'exact') + slice(plan.median, 'median');
+    table.innerHTML = '<thead><tr><th>Артикул</th><th>Название</th><th>Основание</th><th>Сейчас</th><th>Станет</th><th>После проверки</th></tr></thead><tbody>' +
+      (body || '<tr><td colspan="6" class="hint">Подходящих строк нет.</td></tr>') + '</tbody>';
+    const run = $('#stdApplyRun');
+    if (run) {
+      run.disabled = !(plan.exact.length + plan.median.length);
+      run.textContent = (plan.exact.length + plan.median.length)
+        ? 'Подставить (' + fmt(plan.exact.length + plan.median.length) + ')'
+        : 'Подставлять нечего';
+    }
+  },
+  async runFromUI() {
+    const run = $('#stdApplyRun');
+    if (run) run.disabled = true;
+    try {
+      const res = await this.apply(false);
+      if (res && !res.cancelled) { this.render(); }
+    } catch (e) {
+      Toast.err('Подстановка не выполнена', String(e && e.message || e));
+    } finally {
+      if (run) run.disabled = false;
+    }
+  },
+
+  downloadPlan() {
+    const plan = this.lastPlan || this.plan(false);
+    const rows = [['Артикул', 'Название', 'Категория', 'Вид', 'Что подставить', 'Основание',
+      'Текущий вес', 'Текущая Д', 'Текущая Ш', 'Текущая В',
+      'Стандарт вес', 'Стандарт Д', 'Стандарт Ш', 'Стандарт В', 'После проверки']];
+    const res = e => !e.after ? '—' : (!e.after.issues.length ? 'выйдет из карантина'
+      : 'останется: ' + [...new Set(e.after.issues.map(i => i.type))].join(', '));
+    for (const e of plan.exact) rows.push([e.p.article, e.p.name, e.p.category, e.p.category_type, 'точно из справочника',
+      e.std.c, e.p.weight, e.p.length, e.p.width, e.p.height, e.values.weight, e.values.length, e.values.width, e.values.height, res(e)]);
+    for (const e of plan.median) rows.push([e.p.article, e.p.name, e.p.category, e.p.category_type,
+      'медиана по категории (' + e.med.n + ' SKU)', 'нет точного совпадения в справочнике', e.p.weight, e.p.length, e.p.width, e.p.height,
+      e.values.weight, e.values.length, e.values.width, e.values.height, res(e)]);
+    for (const p of plan.none) rows.push([p.article, p.name, p.category, p.category_type, 'нет данных', '', p.weight, p.length, p.width, p.height, '', '', '', '', 'останется в карантине']);
+    for (const p of plan.already) rows.push([p.article, p.name, p.category, p.category_type, 'уже заполнено', '', p.weight, p.length, p.width, p.height, '', '', '', '', 'без изменений']);
+    if (rows.length === 1) { Toast.info('Нечего выгружать', 'В карантине нет строк с весогабаритами.'); return; }
+    OzonCatUI.download('Стандартные_ОВХ_план.csv', OzonCatUI.csv(rows));
+  },
+};
+
+
 const _exportDimsCache = new WeakMap();
 /* v12.9.175: после приведения единиц кэш «габаритов для выгрузки» обязан
    пересчитаться, иначе в файл уйдут прежние (чужие) значения. */
@@ -35602,7 +35974,7 @@ function exportDimsFor(p) {
 function exportDimsNote(p) {
   const parts = [];
   const a = p && p._stdDimsApplied;
-  if (a && Array.isArray(a.fields) && a.fields.length) parts.push('исторически из стандарта: ' + a.fields.join(', '));
+  if (a && Array.isArray(a.fields) && a.fields.length) parts.push((a.estimated ? 'МЕДИАНА ПО КАТЕГОРИИ (не измерено): ' : '') + 'исторически из стандарта: ' + a.fields.join(', '));
   const d = exportDimsFor(p);
   if (d.stdFields && d.stdFields.length) parts.push('при выгрузке: ' + d.stdFields.join(', ') + (d.stdSource ? ' (' + d.stdSource + ')' : ''));
   return parts.length ? 'СТАНДАРТ (не измерено) · ' + parts.join(' · ') : '';
@@ -36558,38 +36930,33 @@ const CategoryTnvedUI = {
     const modal = document.getElementById('mStdDims');
     if (selectAll) selectAll.onchange = () => { $$('.stdDimsRow').forEach(cb => cb.checked = selectAll.checked); };
     if (reportBtn) reportBtn.onclick = () => StdDims.download(rows);
-    if (applyBtn) applyBtn.onclick = async () => {
-      const checked = Array.from(document.querySelectorAll('.stdDimsRow:checked')).map(cb => parseInt(cb.dataset.idx, 10));
-      if (!checked.length) { Toast.warn('Ничего не выбрано','Отметьте товары для дозаполнения.'); return; }
-      let applied = 0;
-      for (const idx of checked) {
-        const item = candidates[idx];
-        try { if (StdDims.fill(item.p, item.found, true).length) applied++; }
-        catch (e) { console.error('Ошибка', item.p.article, e); }
-      }
-      if (!applied) { Toast.info('В каталог не записываем', 'Стандартные ОВХ применяются только при выгрузке и помечаются жёлтой заливкой. Точные значения — из загруженных данных или по OE.'); return; }
-      applyBtn.disabled = true; if (applyAllBtn) applyAllBtn.disabled = true;
+    /* v12.9.176: кнопки окна «Стандартные ОВХ» пишут в каталог через общий
+       механизм подстановки (StdDims.apply). Прежний StdDims.fill() оставлен
+       отключённым намеренно: на нём держится режим «только при выгрузке». */
+    const runStdApply = async (rows, label) => {
+      if (!rows.length) { Toast.warn('Ничего не выбрано', 'Отметьте товары для дозаполнения.'); return; }
+      applyBtn && (applyBtn.disabled = true); if (applyAllBtn) applyAllBtn.disabled = true;
       try {
-        await finishStdDimsUpdate(applied); modal.classList.remove('on');
-        Toast.ok('Исправлено', `Весогабариты применены к ${applied} товарам и сохранены.`);
+        const res = await StdDimsApply.apply(false, { rows });
+        if (!res || res.cancelled) return;
+        if (!res.applied) {
+          Toast.info('Записывать нечего', 'У выбранных товаров уже стоят эти значения.');
+          return;
+        }
+        modal.classList.remove('on');
         CategoryTnvedUI.renderStdDimsModal();
-      } catch (e) { Toast.err('Не удалось сохранить весогабариты', String(e.message || e)); }
-      finally { applyBtn.disabled = false; if (applyAllBtn) applyAllBtn.disabled = false; }
+      } catch (e) {
+        Toast.err('Не удалось сохранить весогабариты', String(e && e.message || e));
+      } finally { applyBtn && (applyBtn.disabled = false); if (applyAllBtn) applyAllBtn.disabled = false; }
     };
-    if (applyAllBtn) applyAllBtn.onclick = async () => {
-      let applied = 0;
-      for (const item of candidates) {
-        if (item.found.match !== 'exact') continue;
-        try { if (StdDims.fill(item.p, item.found, false).length) applied++; }
-        catch (e) { console.error('Ошибка', item.p.article, e); }
-      }
-      if (!applied) { Toast.info('В каталог не записываем', 'Стандартные ОВХ применяются только при выгрузке и помечаются жёлтой заливкой. Точные значения — из загруженных данных или по OE.'); return; }
-      applyAllBtn.disabled = true; if (applyBtn) applyBtn.disabled = true;
-      try {
-        await finishStdDimsUpdate(applied); modal.classList.remove('on');
-        Toast.ok('Исправлено', `Весогабариты применены ко всем ${applied} товарам и сохранены.`);
-      } catch (e) { Toast.err('Не удалось сохранить весогабариты', String(e.message || e)); }
-      finally { applyAllBtn.disabled = false; if (applyBtn) applyBtn.disabled = false; }
+    if (applyBtn) applyBtn.onclick = () => {
+      const checked = Array.from(document.querySelectorAll('.stdDimsRow:checked')).map(cb => parseInt(cb.dataset.idx, 10));
+      if (!checked.length) { Toast.warn('Ничего не выбрано', 'Отметьте товары для дозаполнения.'); return; }
+      return runStdApply(checked.map(i => candidates[i] && candidates[i].p), 'отмеченные');
+    };
+    if (applyAllBtn) applyAllBtn.onclick = () => {
+      const exact = candidates.filter(item => item.found && item.found.match === 'exact').map(item => item.p);
+      return runStdApply(exact, 'однозначные');
     };
 
     /* ---- Единицы измерения: проверка и конвертация ---- */
@@ -49401,6 +49768,10 @@ function bindV108() {
   el('#anomNext','onclick', ()=> {AnomalyDetector.page++;AnomalyDetector.renderFound();});
   el('#btnAnomalyOe','onclick', ()=> AnomalyOE.find());
   el('#btnDimUnits','onclick', ()=> DimUnitUI.open());
+  el('#btnStdDimsApply','onclick', ()=> StdDimsApply.open());
+  el('#stdApplyRun','onclick', ()=> StdDimsApply.runFromUI());
+  el('#stdApplyCsv','onclick', ()=> StdDimsApply.downloadPlan());
+  el('#stdApplyRefresh','onclick', ()=> { StdDimsApply.render(); Toast.info('Проверено заново','План подстановки пересчитан по текущему карантину.'); });
   el('#dimUnitFixAll','onclick', ()=> DimUnitUI.applyAll());
   el('#dimUnitRefresh','onclick', ()=> { DimUnitUI.detectAll(); DimUnitUI.render(); Toast.info('Определено заново','Единицы пересчитаны по текущему каталогу.'); });
   el('#dimUnitDownload','onclick', ()=> DimUnitUI.downloadReport());
