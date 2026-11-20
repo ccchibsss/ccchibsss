@@ -142,6 +142,26 @@
   освобождает 12 МБ из 12). Проверено на реальном Chromium при 150–400 КБ
   свободных: 15 000 SKU → 10,4 МБ записаны в файл, каталог и фильтр целы,
   повторная выгрузка в том же сеансе (без перезагрузки) проходит.
+  v12.9.175 — ЕДИНИЦЫ ВЕСОГАБАРИТОВ ПРИВОДЯТСЯ К ОДНОМУ ВИДУ (кг и см).
+  Разные бренды присылают одно и то же поле в граммах или килограммах, в
+  миллиметрах или сантиметрах. Явная единица («410 мм», «Вес, г», «410*300*200 мм»)
+  разбиралась и раньше; дыра была в безразмерных числах: заголовок у всех один,
+  поэтому 41014 (граммы) попадало в каталог как 41014 кг, а 410 (мм) — как 410 см.
+  Теперь единица определяется один раз на файл по бренду: сверка со справочником
+  стандартных ОВХ по названию и виду (r ≈ 1 → кг/см, ≈ 1000 → г, ≈ 10 → мм),
+  при молчании справочника — медиана бренда, при закреплённом профиле — он.
+  Д/Ш/В решаются вместе (бренд не смешивает стороны); при неоднозначности единица
+  НЕ применяется, бренд помечается. Пересчёт записывается в источник строки
+  («приведено граммы → кг (по бренду …)»), кэш габаритов для выгрузки сбрасывается.
+  Экран «Аномалии» → «Единицы по брендам»: определить по текущему каталогу,
+  показать до записи, пересчитать все бренды, закрепить профиль бренда на будущие
+  импорты и скачать отчёт CSV. Сводная ячейка с единицей внутри значения теперь
+  учитывает её («410*300*200 мм» → 41×30×20 см).
+  Проверено на Chromium: три бренда (кг/см, г/см, кг/мм) с названиями из
+  справочника дают одинаковые значения после импорта; бренд вне справочника
+  остаётся как есть и попадает в предупреждение; закреплённый профиль применяется
+  к следующему файлу; значения, подтверждённые вручную, пересчитываются (решение
+  владельца) — предупреждение об этом есть в диалоге.
   v12.9.173 — ЧИСЛА ИЗ «ДАТНЫХ» ЯЧЕЕК ЭКСПОРТА ОСТАЮТСЯ ЧИСЛАМИ.
   Если у числовой ячейки прайса стоял формат «Дата» (нередко так приезжает вес,
   габариты и характеристика), SheetJS с cellDates:true отдавал Date: вес 8.5
@@ -8871,6 +8891,7 @@ try {
     <button type="button" class="btn tl" id="btnAnomalyScan"><i class="fa-solid fa-magnifying-glass-chart"></i> Сканировать каталог</button>
     <button type="button" class="btn" id="btnAnomalyFix"><i class="fa-solid fa-wand-magic-sparkles"></i> Эвристика для отмеченных</button>
     <button type="button" class="btn pri" id="btnAnomalyOe"><i class="fa-solid fa-link"></i> Подобрать меньшие весогабариты</button>
+    <button type="button" class="btn" id="btnDimUnits" title="Привести вес и габариты к одному виду: граммы → кг, миллиметры → см. Единица определяется по бренду."><i class="fa-solid fa-scale-balanced"></i> Единицы по брендам</button>
   </div>
   <div class="grid3" style="grid-template-columns:1.15fr .85fr 1fr;align-items:start;margin-bottom:13px">
     <div class="card"><div class="cardtop"><i class="fa-solid fa-ruler-combined" style="color:var(--amber)"></i><h3>Категориальные ограничители</h3><div class="sp"></div><button type="button" class="btn sm gh" id="btnAnomalyAdd"><i class="fa-solid fa-plus"></i></button></div>
@@ -9204,6 +9225,26 @@ try {
         <button type="button" class="btn sm gh" id="largeBootContinue">Продолжить полный запуск</button>
       </div>
       <div id="largeBootStatus" class="hint" role="status" aria-live="polite">Не очищайте данные браузера. При скачивании большого файла потребуется свободное место на диске.</div>
+    </div>
+  </div>
+</div>
+<div class="modal" id="mDimUnits" role="dialog" aria-modal="true" aria-label="Единицы весогабаритов по брендам">
+  <div class="mbox" style="width:980px;max-width:96vw">
+    <div class="mhead"><i class="fa-solid fa-ruler-combined" style="color:var(--amber)"></i><h3>Единицы весогабаритов по брендам</h3>
+      <div class="sp" style="flex:1"></div><button type="button" class="btn sm gh" data-close><i class="fa-solid fa-xmark"></i></button></div>
+    <div class="mbody" style="display:grid;gap:10px">
+      <div class="infobox"><div><b>Разные бренды — разные единицы.</b> В каталоге вес всегда в килограммах, габариты — в сантиметрах.
+        Единица определяется по справочнику стандартных ОВХ (сверка названия и вида) и, если справочник не помог, по медиане бренда.
+        При неоднозначности единица <b>не применяется</b>: такие строки перечислены ниже как «не определено», и их можно закрепить вручную.</div></div>
+      <div id="dimUnitSummary" class="hint" role="status" aria-live="polite"></div>
+      <div class="pad" style="padding:0;max-height:46vh;overflow:auto"><table class="plain" id="dimUnitTable"></table></div>
+      <div class="hint" style="line-height:1.5">«Закрепить» запоминает единицы бренда: следующие импорты приведут значения сразу, без повторного определения.
+        Пересчитываются все строки бренда; у изменённых строк подтверждение аномалии сбрасывается — проверьте их заново в разделе «Аномалии».</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" class="btn pri" id="dimUnitFixAll">Пересчитать все бренды</button>
+        <button type="button" class="btn sm gh" id="dimUnitRefresh">Определить заново</button>
+        <button type="button" class="btn sm gh" id="dimUnitDownload">Скачать отчёт CSV</button>
+      </div>
     </div>
   </div>
 </div>
@@ -13746,7 +13787,7 @@ const ROWH = 34, PAGE = 60;
 /* ================== ЕДИНЫЙ РЕЕСТР ЛИМИТОВ (без магических чисел) ==================
    Все пороги производительности/квот собраны здесь; меняются в одном месте. */
 /* v10.4: единая версия приложения (зеркало APP_VERSION в GAS-бэкенде) */
-const APP_VERSION = '12.9.174-export-quota-free';
+const APP_VERSION = '12.9.175-dim-unit-normalization';
 const CONST = {
   WORKER_THRESHOLD: 20000,    // с этого размера filter/sort уходят в Web Worker
   GAS_SYNC_MAX: 20000,        // клиентский предел синхронизации в GAS (лимит 6 мин)
@@ -24225,15 +24266,581 @@ function parseDimsTriple(raw, header) {
   if (!s || s.length > 64) return null;
   /* Без единицы в заголовке действует та же настройка, что и для одиночных
      колонок Д/Ш/В (по умолчанию сантиметры). */
-  const unit = dimensionUnitInHeader(header) || (typeof currentDimUnit === 'function' ? currentDimUnit() : 'cm');
+  let unit = dimensionUnitInHeader(header) || (typeof currentDimUnit === 'function' ? currentDimUnit() : 'cm');
   if (unit === 'unsupported') return null;
-  const parts = s.split(/\s*(?:[*x×х]|\/|\||;)\s*/).filter(Boolean);
+  /* v12.9.175: единица в самом значении («410*300*200 мм», «41 x 30 x 20 см»)
+     раньше игнорировалась, хотя в одиночной ячейке она работала. Суффикс ищем
+     только после третьего числа — иначе «2 x 3 x 4» совпал бы с буквой «m». */
+  const tail = s.match(/[*x×х/|;]\s*[0-9.,]+\s*([a-zа-яё]+)\s*$/i);
+  if (tail) {
+    const cellUnit = dimensionCellUnit(tail[1]);
+    if (cellUnit === 'unsupported') return null;
+    if (cellUnit) {
+      /* Противоречие с заголовком — не угадываем, как и в одиночных колонках. */
+      const headerUnit = dimensionUnitInHeader(header);
+      if (headerUnit && cellUnit !== headerUnit && !(headerUnit === 'cm' && cellUnit === 'mm')) return null;
+      unit = cellUnit;
+    }
+  }
+  const parts = s.replace(/[a-zа-яё]+\s*$/i, '').split(/\s*(?:[*x×х]|\/|\||;)\s*/).filter(Boolean);
   if (parts.length < 3) return null;
   const nums = parts.slice(0, 3).map(x => parseFloat(String(x).replace(/[^0-9.\-]/g, '')));
   if (!nums.every(n => Number.isFinite(n) && n > 0)) return null;
   const k = unit === 'mm' ? 0.1 : unit === 'm' ? 100 : 1;
-  return { length: round(nums[0] * k, 4), width: round(nums[1] * k, 4), height: round(nums[2] * k, 4) };
+  /* _explicit: единица была названа явно (в ячейке или заголовке). Импорт по
+     этому признаку решает, можно ли применять обнаружение по бренду — явную
+     единицу переопределять нельзя. */
+  const headUnit = dimensionUnitInHeader(header);
+  return { length: round(nums[0] * k, 4), width: round(nums[1] * k, 4), height: round(nums[2] * k, 4),
+    _unit: unit, _explicit: !!(headUnit || (tail && tail[1])) };
 }
+/* ===== ЕДИНИЦЫ ВЕСОГАБАРИТОВ: ОДИН ВИД В КАТАЛОГЕ ==========================
+   Разные бренды присылают одни и те же поля в граммах/килограммах и в
+   сантиметрах/миллиметрах. Явная единица в заголовке или в ячейке («Вес, г»,
+   «410 мм») разбирается парсерами выше и в определении не нуждается. Проблема —
+   безразмерные числа в чужой единице: заголовок у всех один, а значения разные.
+
+   Определение опирается на два независимых источника, оба проверены на
+   справочнике StdDims (1789 позиций) симуляцией «бренд из 40 товаров»:
+   • отношение к справочнику по названию/виду — 100 % точности во всех случаях
+     (r ≈ 1 → килограммы, r ≈ 1000 → граммы) и перестановка строк внутри бренда
+     на результат не влияет;
+   • медиана по бренду — надёжна, но слепа там, где все товары мелкие
+     (50–100 г неотличимы от 0,05–0,1 кг) — 64 %.
+   Поэтому справочник главный, медиана — запасной, а при их расхождении единица
+   не применяется: такие строки помечаются для проверки, а не «угадываются».
+   ========================================================================= */
+const DimUnit = {
+  /* Шаг округления: в определении отношения сырая ошибка импорта (41014)
+     не должна выглядеть как «мм» или «г». */
+  snap(n, d) { const f = Math.pow(10, d || 4); return Math.round(num(n) * f) / f; },
+
+  /* Один вызов = одно решение на весь файл значении одной колонки.
+     rows: [{brand, dims:{length,width,height,weight,volume}, name, category, category_type}]
+     Поле с явной единицей в него не попадает (его уже разобрал parseDimensionCm). */
+  detect(rows, opts) {
+    const o = opts || {};
+    const brands = new Map(), noBrand = [];
+    for (const r of rows || []) {
+      if (!r || !r.dims) continue;
+      const b = this.brandKey(r.brand);
+      if (b) { if (!brands.has(b)) brands.set(b, []); brands.get(b).push(r); }
+      else noBrand.push(r);
+    }
+    /* Бренда в файле нет (колонка не смапирована или пустая) — считаем один
+       общий «бренд», иначе определение не будет вовсе. Закреплять его нельзя:
+       строки без бренда не принадлежат ни одному бренду. */
+    const groups = new Map(brands);
+    if (!groups.size && noBrand.length) groups.set('', noBrand);
+    else if (noBrand.length) groups.set('\u0000', noBrand);
+    const out = { brands: {}, sticky: [], medians: null, notes: [] };
+    for (const [key, list] of groups) {
+      const res = this.detectGroup(list, o);
+      if (!key || key === '\u0000') { out.notes.push(res.note || ''); continue; }
+      out.brands[key] = res;
+      /* Медиана нужна и для строк без бренда — как запасной способ. */
+      if (res.median) out.medians = res.median;
+    }
+    if (!out.medians && o.fallbackMedian) out.medians = o.fallbackMedian;
+    return out;
+  },
+
+  brandKey(b) {
+    return String(b == null ? '' : b).toLowerCase().replace(/\s+/g, ' ').trim();
+  },
+
+  /* Медиана по значениям одного поля; пустые и нули не учитываются. */
+  median(values) {
+    const v = (values || []).map(x => num(x)).filter(x => x > 0).sort((a, b) => a - b);
+    if (!v.length) return null;
+    const m = Math.floor(v.length / 2);
+    return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+  },
+
+  /* Отношение «значение строки / стандарт справочника» по названию и виду.
+     Допускаются только точные совпадения справочника — догадок здесь нет. */
+  dictRatios(list, field) {
+    if (typeof StdDims === 'undefined' || !StdDims || typeof StdDims.match !== 'function') return [];
+    const key = { weight: 'wt', length: 'l', width: 'w', height: 'h' }[field];
+    if (!key) return [];
+    const out = [];
+    for (const r of list) {
+      const v = num(r.dims[field]);
+      if (!(v > 0)) continue;
+      let f = null;
+      try { f = StdDims.match(r, false); } catch (e) { f = null; }
+      if (!f || f.status !== 'match' || f.match !== 'exact' || !f.std) continue;
+      const d = num(f.std[key]);
+      if (d > 0) out.push({ ratio: this.snap(v / d, 4), row: r, ref: d });
+    }
+    return out;
+  },
+
+  /* Решение по одной группе бренда.
+     Д/Ш/В решаются ВМЕСТЕ: бренд присылает все три стороны в одной единице,
+     поэтому «длина в мм, ширина в см» — заведомо неверный результат. Пороги
+     консервативные: при неоднозначности единица не применяется и строка
+     помечается, а не «угадывается». */
+  detectGroup(list, opts) {
+    const o = opts || {};
+    const units = {}, evidence = {}, undefinedFields = [];
+    const medianOf = arr => this.median(arr);
+
+    /* Ближайший «человеческий» коэффициент: 1 (см/кг), 10 (мм), 1000 (г). */
+    const nearest = (ratio, allowed) => {
+      let best = null, gap = Infinity;
+      for (const [unit, f] of allowed) {
+        const rel = Math.abs(Math.log(ratio / f));
+        if (rel < gap) { gap = rel; best = { unit, f }; }
+      }
+      return gap <= Math.log(1.35) ? { unit: best.unit, rel: gap } : null;
+    };
+    const vote = (ratios, allowed) => {
+      const votes = new Map();
+      for (const r of ratios) {
+        const hit = nearest(r, allowed);
+        if (!hit) continue;
+        votes.set(hit.unit, (votes.get(hit.unit) || 0) + 1);
+      }
+      const ranked = [...votes.entries()].sort((a, b) => b[1] - a[1]);
+      if (!ranked.length) return null;
+      return { unit: ranked[0][0], share: ranked[0][1] / ratios.length, votes: votes.size };
+    };
+
+    /* --- ВЕС: справочник, иначе медиана --- */
+    const W_ALLOWED = [['g', 1000], ['kg', 1]];
+    const wRatios = this.dictRatios(list, 'weight').map(x => x.ratio);
+    let wDone = false;
+    if (wRatios.length >= (o.minDictRows || 3)) {
+      const v = vote(wRatios, W_ALLOWED);
+      if (v && v.share >= 0.8 && v.votes === 1) {
+        units.weight = v.unit; evidence.weight = { source: 'dict', share: v.share, rows: wRatios.length }; wDone = true;
+      }
+    }
+    if (!wDone) {
+      const med = medianOf(list.map(r => r.dims.weight));
+      if (med > 0 && list.length >= (o.minRows || 5)) {
+        if (med >= (o.weightGramsMedian || 1000)) { units.weight = 'g'; evidence.weight = { source: 'median', median: this.snap(med, 4), rows: list.length }; }
+        else if (med <= (o.weightKgMedian || 20)) { units.weight = 'kg'; evidence.weight = { source: 'median', median: this.snap(med, 4), rows: list.length }; }
+        else { undefinedFields.push('weight'); evidence.weight = { source: 'ambiguous', median: this.snap(med, 4), rows: list.length }; }
+      } else if (!(med > 0)) undefinedFields.push('weight');
+      else undefinedFields.push('weight');
+    }
+
+    /* --- Д/Ш/В: одно решение на все три стороны --- */
+    const D_ALLOWED = [['mm', 10], ['cm', 1]];
+    const dRatios = [];
+    for (const f of ['length', 'width', 'height']) dRatios.push(...this.dictRatios(list, f).map(x => x.ratio));
+    const dims = ['length', 'width', 'height'];
+    let dDone = false;
+    if (dRatios.length >= (o.minDictRows || 3)) {
+      const v = vote(dRatios, D_ALLOWED);
+      if (v && v.share >= 0.8 && v.votes === 1) {
+        for (const f of dims) units[f] = v.unit;
+        for (const f of dims) evidence[f] = { source: 'dict', share: v.share, rows: dRatios.length };
+        dDone = true;
+      }
+    }
+    if (!dDone) {
+      const vals = [];
+      for (const f of dims) for (const r of list) if (num(r.dims[f]) > 0) vals.push(num(r.dims[f]));
+      const med = medianOf(vals);
+      const enough = list.length >= (o.minRows || 5);
+      if (med > 0 && enough && med >= (o.dimMmMedian || 100)) {
+        for (const f of dims) units[f] = 'mm';
+        for (const f of dims) evidence[f] = { source: 'median', median: this.snap(med, 4), rows: list.length };
+      } else if (med > 0 && enough && med <= (o.dimCmMedian || 20)) {
+        for (const f of dims) units[f] = 'cm';
+        for (const f of dims) evidence[f] = { source: 'median', median: this.snap(med, 4), rows: list.length };
+      } else {
+        /* Нет опоры или значение в «серой зоне» (20…100): решать нечем. */
+        for (const f of dims) { undefinedFields.push(f); evidence[f] = { source: med > 0 ? 'ambiguous' : 'none', median: this.snap(med, 4), rows: list.length }; }
+      }
+    }
+
+    return {
+      units, evidence,
+      undefinedFields,
+      rows: list.length,
+      dictRows: wRatios.length + dRatios.length,
+    };
+  },
+
+  /* Перевод одного значения по решению для бренда. null — значение уже
+     в канонических единицах или решения нет (тогда ничего не трогаем). */
+  convertValue(field, value, res) {
+    if (!res || !res.units) return null;
+    const unit = res.units[field];
+    const f = this.factor(field, unit);
+    if (f === 1) return null;
+    const v = num(value);
+    if (!(v > 0)) return null;
+    return { value: round(v * f, 4), unit, from: v };
+  },
+
+  /* Коэффициент перевода в канонические единицы каталога (кг и см). */
+  factor(field, unit) {
+    if (!unit) return 1;
+    if (field === 'weight') return unit === 'g' ? 0.001 : unit === 'kg' ? 1 : 1;
+    return unit === 'mm' ? 0.1 : unit === 'cm' ? 1 : 1;
+  },
+
+  label(field, unit) {
+    if (!unit) return 'не определена';
+    return (field === 'weight' ? { g: 'граммы', kg: 'килограммы' } : { mm: 'миллиметры', cm: 'сантиметры' })[unit] || unit;
+  },
+
+  /* Применение решения к одной строке. Явная единица (parsed.explicit) всегда
+     сильнее: такие значения сюда не передаются. Возвращает изменённые поля. */
+  apply(row, units) {
+    const changed = [];
+    if (!row || !units) return changed;
+    for (const field of ['weight', 'length', 'width', 'height']) {
+      const unit = units[field];
+      const f = this.factor(field, unit);
+      if (!(f !== 1)) continue;
+      const v = num(row[field]);
+      if (!(v > 0)) continue;
+      row[field] = round(v * f, 4);
+      changed.push({ field, unit, from: v, to: row[field] });
+    }
+    return changed;
+  },
+
+  /* Физическая проверка результата: даже «правильная» по бренду единица не
+     должна давать 41 метр или 8 тонн. Совпадает с порогами карантина. */
+  sanity(p, limits) {
+    const lim = limits || { maxW: 400, maxL: 300, maxVol: 1000 };
+    const w = num(p && p.weight), l = num(p && p.length), wi = num(p && p.width), h = num(p && p.height);
+    const bad = [];
+    if (w > num(lim.maxW)) bad.push('weight');
+    if (Math.max(l, wi, h) > num(lim.maxL)) bad.push('dims');
+    const vol = l * wi * h / 1000;
+    if (vol > num(lim.maxVol)) bad.push('volume');
+    if (w > 0 && vol > 0 && w / vol > 30) bad.push('density');
+    return bad;
+  },
+};
+
+/* Закреплённые единицы бренда: «у Brand X вес в граммах, габариты в мм».
+   Хранятся в настройках, чтобы не определять заново каждый импорт и чтобы
+   ИМПОРТ и пересчёт старого каталога принимали одинаковые решения. */
+DimUnit.profiles = function () {
+  try {
+    const p = S.settings && S.settings.dimUnitProfiles;
+    return p && typeof p === 'object' && !Array.isArray(p) ? p : {};
+  } catch (e) { return {}; }
+};
+DimUnit.stickyFor = function (brand) {
+  const k = this.brandKey(brand);
+  if (!k) return null;
+  const rec = this.profiles()[k];
+  if (!rec || typeof rec !== 'object' || !rec.units) return null;
+  if (rec.off) return null;
+  return { units: rec.units, evidence: { source: 'sticky', at: rec.at || '' }, rows: 0 };
+};
+/* Слияние: закреплённый профиль сильнее автоопределения по этому бренду. */
+DimUnit.resolveBrand = function (brand, plan) {
+  const sticky = this.stickyFor(brand);
+  const auto = plan && plan.brands ? plan.brands[this.brandKey(brand)] : null;
+  if (sticky && auto) {
+    return { units: Object.assign({}, auto.units, sticky.units), evidence: Object.assign({}, auto.evidence),
+      source: 'sticky', auto, sticky, mixed: true };
+  }
+  if (sticky) return { units: sticky.units, evidence: {}, source: 'sticky', auto: null, sticky };
+  if (auto) return { units: auto.units, evidence: auto.evidence, source: 'auto', auto, sticky: null };
+  return null;
+};
+DimUnit.remember = function (brand, units, note) {
+  const k = this.brandKey(brand);
+  if (!k || !units) return null;
+  if (!S.settings.dimUnitProfiles || typeof S.settings.dimUnitProfiles !== 'object' || Array.isArray(S.settings.dimUnitProfiles))
+    S.settings.dimUnitProfiles = {};
+  const clean = {};
+  for (const f of ['weight', 'length', 'width', 'height']) if (units[f]) clean[f] = units[f];
+  if (!Object.keys(clean).length) return null;
+  const prev = S.settings.dimUnitProfiles[k];
+  S.settings.dimUnitProfiles[k] = { units: clean, at: nowISO(), note: String(note || (prev && prev.note) || '').slice(0, 160) };
+  return S.settings.dimUnitProfiles[k];
+};
+DimUnit.forget = function (brand) {
+  const k = this.brandKey(brand);
+  if (k && S.settings.dimUnitProfiles) delete S.settings.dimUnitProfiles[k];
+};
+/* Подсказка в мастере импорта: что будет применено к каждому бренду до
+   нажатия «Применить». Возвращает строки для панели и сводку. */
+DimUnit.preview = function (brandsWithCounts, plan) {
+  const rows = [];
+  for (const item of brandsWithCounts || []) {
+    const res = this.resolveBrand(item.brand, plan);
+    if (!res) { rows.push({ brand: item.brand, count: item.count, text: 'единицы не определены — значения будут прочитаны как есть' }); continue; }
+    const parts = [];
+    for (const f of ['weight', 'length', 'width', 'height']) if (res.units[f]) parts.push(DimUnit.label(f, res.units[f]));
+    rows.push({ brand: item.brand, count: item.count,
+      text: (parts.length ? parts.join(', ') : 'не определены') +
+        (res.source === 'sticky' ? ' · закреплено' : ' · по данным файла'),
+      units: res.units, source: res.source });
+  }
+  return rows;
+};
+
+/* ===== ЭКРАН «ЕДИНИЦЫ ПО БРЕНДАМ» ==========================================
+   Старый каталог мог быть загружен до появления определения единиц: у одного
+   бренда вес в граммах, у другого габариты в миллиметрах. Здесь единицы
+   определяются по уже загруженным строкам, показываются ДО записи и
+   применяются только после подтверждения. Правило можно закрепить за брендом —
+   тогда импорт и пересчёт принимают одинаковые решения.
+   ========================================================================= */
+const DimUnitUI = {
+  detected: null,          // { brand: {units, evidence, rows, undefinedFields} }
+  counts: {},              // brand → строк в каталоге
+  lastApply: null,
+
+  open() {
+    this.detectAll();
+    this.render();
+    modal('#mDimUnits');
+  },
+
+  /* Источник данных — каталог: никаких файлов заново загружать не нужно. */
+  collect(maxPerBrand) {
+    const cap = Math.max(20, Math.min(1000, maxPerBrand || 400));
+    const map = new Map();
+    for (const p of S.rows || []) {
+      if (!p) continue;
+      if (p.dimensionAnomalyBlocked && !(num(p.weight) > 0)) continue;
+      const key = DimUnit.brandKey(p.brand);
+      if (!map.has(key)) map.set(key, { brand: String(p.brand || ''), list: [], count: 0 });
+      const g = map.get(key);
+      g.count++;
+      if (g.list.length >= cap) continue;
+      const dims = {};
+      for (const f of ['length', 'width', 'height', 'weight']) {
+        const v = num(p[f]);
+        if (v > 0) dims[f] = v;
+      }
+      if (!Object.keys(dims).length) continue;
+      g.list.push({ brand: String(p.brand || ''), name: String(p.name || ''), category: String(p.category || ''),
+        category_type: String(p.category_type || ''), dims });
+    }
+    return map;
+  },
+
+  detectAll() {
+    const groups = this.collect(400);
+    const all = [], counts = {};
+    for (const [k, g] of groups) { counts[k] = g.count; all.push(...g.list); }
+    const plan = DimUnit.detect(all, {});
+    this.detected = plan.brands;
+    this.counts = counts;
+    this.brandNames = {};
+    for (const [k, g] of groups) this.brandNames[k] = g.brand;
+    return plan;
+  },
+
+  rowsForTable() {
+    const out = [];
+    const profiles = DimUnit.profiles();
+    const keys = new Set([...Object.keys(this.detected || {}), ...Object.keys(profiles)]);
+    for (const k of keys) {
+      const auto = (this.detected || {})[k];
+      const sticky = profiles[k];
+      const res = DimUnit.resolveBrand(this.brandNames ? this.brandNames[k] : k, { brands: this.detected || {} });
+      const units = res && res.units ? res.units : {};
+      const parts = [];
+      if (units.weight) parts.push('вес: ' + DimUnit.label('weight', units.weight));
+      if (units.length || units.width || units.height) {
+        const d = DimUnit.label('length', units.length || units.width || units.height);
+        parts.push('габариты: ' + d);
+      }
+      const undef = auto ? (auto.undefinedFields || []) : [];
+      const sourceText = res ? (res.source === 'sticky' ? 'закреплено' : 'по данным каталога') : 'не определено';
+      out.push({
+        key: k,
+        brand: this.brandNames ? (this.brandNames[k] || k) : k,
+        rows: this.counts[k] || (auto ? auto.rows : 0),
+        units, text: parts.length ? parts.join(', ') : 'не определено',
+        source: sourceText,
+        undef, sticky: !!sticky,
+      });
+    }
+    /* Сначала те, где единицы не определены или требуется перевод, затем по числу строк. */
+    out.sort((a, b) => (b.undef.length - a.undef.length) || (b.rows - a.rows));
+    return out;
+  },
+
+  render() {
+    const box = $('#dimUnitTable'); if (!box) return;
+    const rows = this.rowsForTable();
+    const need = rows.filter(r => r.units && (r.units.weight === 'g' || r.units.length === 'mm')).length;
+    const undef = rows.filter(r => !r.text || r.text === 'не определено' || r.undef.length).length;
+    const sum = $('#dimUnitSummary');
+    if (sum) {
+      sum.innerHTML = rows.length
+        ? `Брендов: <b>${fmt(rows.length)}</b> · требуется перевод: <b>${fmt(need)}</b>` +
+          (undef ? ` · единица не определена: <b style="color:var(--amber)">${fmt(undef)}</b>` : '') +
+          ` · строк в каталоге: <b>${fmt(rows.reduce((n, r) => n + r.rows, 0))}</b>`
+        : 'В каталоге нет строк с заполненными весогабаритами.';
+    }
+    box.innerHTML = '<thead><tr><th>Бренд</th><th class="t-r">Строк</th><th>Единицы</th><th>Источник</th><th>Действие</th></tr></thead><tbody>' +
+      (rows.length ? rows.map((r, i) => `<tr>
+        <td>${esc(r.brand || '— без бренда —')}</td>
+        <td class="t-r mono">${fmt(r.rows)}</td>
+        <td>${esc(r.text)}${r.undef.length ? ` <span class="hint" style="color:var(--amber)">(${esc(r.undef.join(', '))} не определены)</span>` : ''}</td>
+        <td class="hint">${esc(r.source)}</td>
+        <td style="white-space:nowrap">
+          <button type="button" class="btn sm gh" data-dim-fix="${i}">Пересчитать</button>
+          ${r.sticky ? `<button type="button" class="btn sm gh" data-dim-unstick="${i}" title="Удалить закреплённые единицы">Снять</button>`
+            : `<button type="button" class="btn sm gh" data-dim-stick="${i}" title="Запомнить единицы для этого бренда — импорт будет применять их сразу">Закрепить</button>`}
+        </td></tr>`).join('')
+        : '<tr><td colspan="5" class="hint">Нет данных для определения единиц.</td></tr>') +
+      '</tbody>';
+    $$('#dimUnitTable [data-dim-fix]').forEach(b => b.onclick = () => this.applyBrand(rows[+b.dataset.dimFix]));
+    $$('#dimUnitTable [data-dim-stick]').forEach(b => b.onclick = () => this.stick(rows[+b.dataset.dimStick]));
+    $$('#dimUnitTable [data-dim-unstick]').forEach(b => b.onclick = () => this.unstick(rows[+b.dataset.dimUnstick]));
+    const all = $('#dimUnitFixAll');
+    if (all) {
+      const active = rows.filter(r => r.units && (r.units.weight === 'g' || r.units.length === 'mm'));
+      all.disabled = !active.length;
+      all.textContent = active.length ? `Пересчитать все бренды (${active.length})` : 'Пересчитывать нечего';
+    }
+  },
+
+  /* Пересчёт одного бренда: строки каталога, у которых единица не подтверждена
+     вручную. Подтверждённые вручную значения не трогаем — иначе исправление
+     пользователя будет отменено пересчётом. */
+  applyBrand(row, silent) {
+    if (!row || !row.units) { Toast.warn('Единицы не определены', 'Нечего применять: у бренда нет решения по единицам.'); return 0; }
+    const key = row.key;
+    const changed = [], log = [];
+    for (const p of S.rows || []) {
+      if (DimUnit.brandKey(p.brand) !== key) continue;
+      let dimsChanged = false;
+      /* Объём проверяем по ФАКТУ, а не по флагу: в старом каталоге объём,
+         вычисленный из сторон, может считаться «заданным», и тогда после
+         «мм → см» в строке остаётся объём в 1000 раз больше. Если сохранённый
+         объём совпадает с произведением прежних сторон, он производный — его
+         пересчитываем; если нет, это ручное значение и его не трогаем. */
+      const _oldL = num(p.length), _oldW = num(p.width), _oldH = num(p.height);
+      const _oldVol = _oldL * _oldW * _oldH / 1000;
+      /* Флаг «объём задан вручную» считается лениво и в старом каталоге бывает
+         неверным (объём уже перезаписан расчётом). Поэтому опираемся на
+         арифметику: объём, равный произведению сторон, производный. */
+      const _volFollowsDims = _oldVol > 0 && num(p.volume) > 0 &&
+        Math.abs(num(p.volume) - _oldVol) / _oldVol <= 0.02;
+      /* Пересчитываем, если объём производный; сохраняем, если он отличается
+         от произведения сторон (упаковка/тариф считаются по своему объёму). */
+      const _volKeep = num(p.volume) > 0 && !_volFollowsDims;
+      const res = { units: row.units };
+      /* Проверка пределов — по ВСЕЙ строке после всех переводов. Раньше она
+         делалась по одному полю, а остальные стороны ещё оставались в чужих
+         единицах: бренд с мм по всем сторонам получал «длина 65 см при
+         650×300×100» и уходил в карантин по габаритам, хотя перевод верный. */
+      const trial = {};
+      const convs = [];
+      for (const field of ['weight', 'length', 'width', 'height']) {
+        const conv = DimUnit.convertValue(field, p[field], res);
+        if (conv) { convs.push({ field, conv }); trial[field] = conv.value; }
+      }
+      if (!convs.length) continue;
+      const bad = DimUnit.sanity(Object.assign({}, p, trial), AnomalyDetector.getLimit(p.category || ''));
+      if (bad.length) {
+        for (const { field, conv } of convs) {
+          log.push({ article: p.article, field, from: conv.from,
+            reason: 'после перевода строка выходит за физические пределы (' + bad.join(', ') + ') — оставлено как есть' });
+        }
+        continue;
+      }
+      for (const { field, conv } of convs) {
+        p[field] = conv.value;
+        if (field !== 'weight') dimsChanged = true;
+        exportDimsInvalidate(p);
+        p._sources = p._sources || {};
+        p._sources[field] = { file: 'приведено ' + DimUnit.label(field, conv.unit) + ' → ' +
+          (field === 'weight' ? 'кг' : 'см') + ' (по бренду «' + String(row.brand).slice(0, 40) + '»)',
+          date: nowISO(), unitAdjusted: true };
+        p._dimUnitAdjustedAt = nowISO();
+        log.push({ article: p.article, field, from: conv.from, to: conv.value, unit: conv.unit });
+      }
+      delete p.dimensionAnomalyAck;
+      changed.push(p);
+      if (dimsChanged) {
+        const _newVol = round(num(p.length) * num(p.width) * num(p.height) / 1000, 4);
+        if (_volKeep) {
+          /* Значение пользователя важнее: объём мог быть задан отдельно от
+             габаритов (своя упаковка). Сохраняем и явно помечаем как ручной,
+             иначе расчёт заменит его произведением сторон. */
+          p._volumeExplicit = true;
+          log.push({ article: p.article, field: 'volume', from: p.volume, to: p.volume,
+            reason: 'объём не совпадает с произведением сторон — сохранён как заданный вручную' });
+        } else if (_newVol > 0) {
+          p.volume = _newVol;
+          p._volumeExplicit = false;
+          p._sources = p._sources || {};
+          p._sources.volume = { file: 'пересчитан из приведённых габаритов', date: nowISO(), unitAdjusted: true };
+        }
+      }
+    }
+    if (!changed.length) {
+      if (!silent) Toast.info('Пересчитывать нечего', 'Все значения бренда уже в кг и см.');
+      return 0;
+    }
+    this.lastApply = { brand: row.brand, changed: changed.length, log };
+    if (!silent) {
+      AnomalyDetector.log.push({ ts: nowISO(), article: '—', before: {}, after: {},
+        heuristic: 'единицы бренда «' + row.brand + '»: ' + row.text, category: '' });
+      AnomalyDetector.save();
+      runPipeline(true, { changedRows: new WeakSet(changed), smallDelta: true, persistChangedOnly: true, changedList: changed })
+        .then(() => { try { AnomalyDetector.finishQuarantine(); } catch (e) { } })
+        .catch(e => Toast.err('Пересчёт не завершён', String(e && e.message || e)));
+      Toast.ok('Единицы применены', fmt(changed.length) + ' значений · бренд «' + row.brand + '». Источник записан в карточки.');
+    }
+    return changed.length;
+  },
+
+  applyAll() {
+    const rows = this.rowsForTable().filter(r => r.units && (r.units.weight === 'g' || r.units.length === 'mm'));
+    if (!rows.length) { Toast.info('Пересчитывать нечего', 'Все бренды уже в кг и см.'); return 0; }
+    const total = rows.reduce((n, r) => n + (this.counts[r.key] || 0), 0);
+    if (!confirm(`Пересчитать весогабариты у ${rows.length} брендов (${fmt(total)} строк)?\n\n` +
+      `Значения, выходящие за физические пределы, останутся как есть и попадут в журнал. ` +
+      `У изменённых строк подтверждение аномалии сбрасывается.`)) return 0;
+    let n = 0;
+    for (const r of rows) n += this.applyBrand(r, true);
+    this.render();
+    if (n) {
+      runPipeline(true);
+      Toast.ok('Единицы приведены', fmt(n) + ' значений у ' + rows.length + ' брендов. Проверьте карантин: часть строк могла выйти из него.');
+    } else Toast.info('Изменений нет', 'Все значения уже в кг и см.');
+    return n;
+  },
+
+  stick(row) {
+    if (!row || !row.units) { Toast.warn('Единицы не определены', 'Закреплять нечего.'); return; }
+    DimUnit.remember(row.brand, row.units, 'закреплено вручную ' + nowISO());
+    try { if (typeof UI2 !== 'undefined') UI2.saveSettings().catch(() => { }); } catch (e) { }
+    this.render();
+    Toast.ok('Единицы закреплены за брендом', '«' + (row.brand || 'без бренда') + '»: ' + row.text + '. Импорт применит их сразу.');
+  },
+
+  unstick(row) {
+    if (!row) return;
+    DimUnit.forget(row.brand);
+    try { if (typeof UI2 !== 'undefined') UI2.saveSettings().catch(() => { }); } catch (e) { }
+    this.render();
+    Toast.info('Закрепление снято', 'Бренд «' + (row.brand || 'без бренда') + '» снова определяется по данным.');
+  },
+
+  downloadReport() {
+    const rows = this.rowsForTable();
+    if (!rows.length) { Toast.info('Нет данных', 'В каталоге нет весогабаритов.'); return; }
+    const out = [['Бренд', 'Строк', 'Вес', 'Габариты', 'Источник', 'Не определено']];
+    for (const r of rows) out.push([r.brand || '(без бренда)', r.rows, DimUnit.label('weight', r.units.weight),
+      DimUnit.label('length', r.units.length), r.source, r.undef.join(', ')]);
+    OzonCatUI.download('Весогабариты_единицы_по_брендам.csv', OzonCatUI.csv(out));
+  },
+};
+
 function validCanonicalOvhNumber(v) {
   if (v===null || v===undefined || v==='') return true; // отсутствие — отдельный статус отгрузки
   if (v instanceof Date || typeof v==='boolean') return false;
@@ -27256,7 +27863,7 @@ const UI = {
     });
   }
 };
-const modal = (id, on) => { const m = $(id); if (on !== false) m.classList.add('on'); setTimeout(() => { Table.paint(); }, 40); };
+const modal = (id, on) => { const m = $(id); if (!m) return; if (on !== false) m.classList.add('on'); setTimeout(() => { Table.paint(); }, 40); };
 /* v10.4: промис-обёртки поверх mGen — замена блокирующих window.prompt и window.confirm.
    Отмена (крестик/Esc/фон) резолвит null/false через наблюдателя класса модалки. */
 function _mgDone(resolve, val, applyLabel) {
@@ -31288,6 +31895,10 @@ const Import = {
       // Legacy saved settings and DOM checkbox state cannot enable economics.
       S.settings.importLightMode = true;
       let enrichOnlySkipped = 0;
+      /* v12.9.175: приведение единиц весогабаритов к одному виду (кг и см). */
+      const unitConverts = [];
+      const fileDims = new Map();       // brand → [{brand,name,category,category_type,dims}]
+      let dimPlan = null;               // решение по брендам, считается один раз
       const keyMode = S.settings.keyMode;
       /* v12.9.84 → v12.9.85: расширенный поиск SKU прайса для обогащения — только
          два ключа: артикул+бренд (выше) и OE-номер. Если артикул файла не совпал,
@@ -31295,6 +31906,65 @@ const Import = {
          используется. Индекс OE строится один раз лениво по строкам каталога на
          старте импорта (текущий прайс); OE, принадлежащий нескольким SKU,
          не используется (неоднозначно). */
+      /* Сбор безразмерных значений по брендам для определения единиц: нужны
+         только строки, где единица НЕ названа явно, с названием/видом для
+         сверки со справочником ОВХ. Читаем один раз, до основного прохода. */
+      const _dimCols = ['weight','length','width','height'].map(f => mapped.find(x => x.target === f)).filter(Boolean);
+      if (_dimCols.length) {
+        const _brandCol = mapped.find(x => x.target === 'brand');
+        const _nameCol = mapped.find(x => x.target === 'name');
+        const _kindCol = mapped.find(x => x.target === 'category_type');
+        const _catCol = mapped.find(x => x.target === 'category');
+        const _DETECT_CAP = 8000;      // достаточно для решения; весь файл не держим
+        let _seen = 0;
+        for (let _off = 0; _off < body.length && _seen < _DETECT_CAP; _off += 2000) {
+          const _page = sourceId ? await BrowserImportSources.page(sourceId, _off, Math.min(2000, body.length - _off))
+            : body._sqlSource ? await PyEngine.parsedSourcePage(body._sqlSource, _off, Math.min(2000, body.length - _off))
+            : body.slice(_off, _off + 2000);
+          for (const _r of _page) {
+            if (_seen >= _DETECT_CAP) break;
+            _seen++;
+            const _b = _brandCol ? String(_r[_brandCol.col] == null ? '' : _r[_brandCol.col]).trim() : '';
+            const _dims = {};
+            let _any = false;
+            for (const _c of _dimCols) {
+              const _raw = _r[_c.col];
+              if (_raw === '' || _raw == null) continue;
+              const _p = _c.target === 'weight' ? parseWeightKg(_raw, _c.m.src) : parseDimensionCm(_raw, _c.m.src);
+              if (_p && _p.value === null) continue;        // ошибка/противоречие — не в определение
+              if (_p && _p.explicit) continue;              // единица названа явно — решать не нужно
+              const _v = _p ? _p.value : HVC.safeNum(_raw, true);
+              if (Number.isFinite(_v) && _v > 0) { _dims[_c.target] = _v; _any = true; }
+            }
+            if (!_any) continue;
+            const _k = DimUnit.brandKey(_b);
+            if (!fileDims.has(_k)) fileDims.set(_k, []);
+            const _list = fileDims.get(_k);
+            if (_list.length < 400) _list.push({                               // на бренд — до 400 строк
+              brand: _b,
+              name: _nameCol ? String(_r[_nameCol.col] == null ? '' : _r[_nameCol.col]) : '',
+              category: _catCol ? String(_r[_catCol.col] == null ? '' : _r[_catCol.col]) : '',
+              category_type: _kindCol ? String(_r[_kindCol.col] == null ? '' : _r[_kindCol.col]) : '',
+              dims: _dims,
+            });
+          }
+        }
+        if (fileDims.size) {
+          const _all = [];
+          for (const list of fileDims.values()) _all.push(...list);
+          dimPlan = DimUnit.detect(_all, {});
+          Prog.msg('Единицы весогабаритов: ' + (Object.keys(dimPlan.brands).length || 1) + ' бренд(ов) проверено');
+        }
+      }
+      /* Решение по бренду с учётом закреплённых профилей; кэш на время файла. */
+      const _dimCache = new Map();
+      const dimensionResolve = (brand, plan, byBrand) => {
+        const k = DimUnit.brandKey(brand);
+        if (_dimCache.has(k)) return _dimCache.get(k);
+        const res = DimUnit.resolveBrand(brand, plan);
+        _dimCache.set(k, res);
+        return res;
+      };
       const oeMaps = mapped.filter(x => ['oe_numbers','oe_list','oe'].includes(x.target));
       let oeIdx = null;
       const AMBIG = {};
@@ -31564,11 +32234,32 @@ const Import = {
             else val = (cm.stDef && cm.stDef.t === 'num') || cm.m.type === 'num' ? HVC.safeNum(raw, isDim)
               : cm.stDef && cm.stDef.t === 'bool' ? ['1', 'true', 'да', 'yes', 'обязательно', 'требуется'].includes(String(raw).trim().toLowerCase())
               : (cm.target === 'ozon_category' || cm.target === 'ozon_type') ? String(raw) : String(raw).trim();
+            /* v12.9.175: безразмерное число в чужой единице. Заголовок у всех
+               брендов один, поэтому 41014 (граммы) раньше попадало в каталог как
+               41014 кг. Решение принимается один раз на файл по бренду
+               (закреплённый профиль → справочник ОВХ → медиана) и здесь только
+               применяется. Явную единицу («410 мм», «Вес, г», «410*300*200 мм»)
+               не переопределяем: parsedOvh.explicit сильнее любого решения. */
+            const _dimExplicit = !!(parsedOvh && parsedOvh.explicit);
+            if (!_dimExplicit && val != null && ['weight','length','width','height'].includes(cm.target) && Number.isFinite(val) && val > 0) {
+              const _rawBrand = brandMap ? String(r[brandMap.col] == null ? '' : r[brandMap.col]).trim() : '';
+              const _brandName = _rawBrand || String(p.brand || '');
+              const _du = dimensionResolve(_brandName || brandInFile, dimPlan, fileDims);
+              const _conv = _du ? DimUnit.convertValue(cm.target, val, _du) : null;
+              if (_conv) {
+                unitConverts.push({ field:cm.target, article:art, from:_conv.from, to:_conv.value,
+                  unit:_conv.unit, source:_du.source, brand:_brandName });
+                val = _conv.value;
+                const _src = 'приведено ' + DimUnit.label(cm.target, _conv.unit) + ' → ' +
+                  (cm.target === 'weight' ? 'кг' : 'см') + (_brandName ? ' (по бренду «' + _brandName.slice(0, 40) + '»)' : '');
+                p._dimUnitNote = Object.assign(p._dimUnitNote || {}, { [cm.target]: _src });
+              }
+            }
             /* Сводная ячейка «23/17/8» в колонке одной стороны (Д*Ш*В, «габариты»):
                берём из неё только свою составляющую. */
             if (['length','width','height'].includes(cm.target) && (val === null || !Number.isFinite(val) || val <= 0)) {
               const triple = parseDimsTriple(raw, cm.m.src);
-              if (triple && triple[cm.target] > 0) { val = triple[cm.target]; parsedOvh = { value: val, error: '' }; }
+              if (triple && triple[cm.target] > 0) { val = triple[cm.target]; parsedOvh = { value: val, error: '', explicit:!!triple._explicit }; }
             }
             /* Некорректная ячейка не стирает прежнее измерение; нулевое значение
                новой записи остаётся отсутствующим, а не доказанной величиной. */
@@ -31707,6 +32398,28 @@ const Import = {
           }
           /* Даже неизменившийся комплект в новой полной строке может впервые
              дать доказательство происхождения; его необходимо сохранить. */
+          /* v12.9.175: источник приведённых значений — в карточке и отчётах видно,
+             что это не «как в файле»: «приведено граммы → кг (по бренду …)». */
+          if (p._dimUnitNote && Object.keys(p._dimUnitNote).length) {
+            p._sources = p._sources || {};
+            /* Строка считается изменённой только если метка источника реально
+               другая: повторный импорт того же файла не должен создавать
+               ревизию и переписывать каталог (тест browser-import-conflict-e2e). */
+            let _noteChanged = false;
+            for (const _f of Object.keys(p._dimUnitNote)) {
+              const _cur = p._sources[_f];
+              const _prev = _cur && typeof _cur === 'object' ? String(_cur.file || '') : String(_cur == null ? '' : _cur);
+              if (_prev !== p._dimUnitNote[_f]) { _noteChanged = true; break; }
+            }
+            if (_noteChanged) {
+              for (const _f of Object.keys(p._dimUnitNote)) {
+                p._sources[_f] = { file: p._dimUnitNote[_f], date: nowISO(), unitAdjusted: true };
+              }
+              p._dimUnitAdjustedAt = nowISO();
+              rowChanged = true;
+            }
+            delete p._dimUnitNote;   // служебное поле не должно попадать в каталог
+          }
           if (AnomalyOE.observeImportTuple(p,rawTuple,importSource,ri+1,importTupleStates)) rowChanged=true;
           if (AnomalyOE.rememberImportCodes(p,rawOeInputs)) rowChanged=true;
           // A changed label invalidates old IDs. A new pair is accepted only as a complete,
@@ -31787,6 +32500,30 @@ const Import = {
         `${fmt(articleDateCells)} строк: Excel мог преобразовать код в дату (например, «янв. 97» вместо «01.1997»). ` +
         'Проверьте колонку «Артикул» в исходном файле — формат ячейки должен быть текстовым. Значения сохранены как текст.');
       if (typeof AnomalyDetector !== 'undefined') AnomalyDetector.renderImportErrors();
+      /* v12.9.175: единицы. Явные («410 мм», «Вес, г») разобраны парсерами; здесь —
+         безразмерные значения, приведённые по бренду, и честный отчёт о том, у
+         каких брендов единицу определить не удалось (их значения оставлены как есть). */
+      if (unitConverts.length) {
+        const fields = [...new Set(unitConverts.map(x => x.field + ':' + x.unit))];
+        const brands = new Set(unitConverts.map(x => x.brand).filter(Boolean));
+        S.lastDimUnitReport = {
+          file: String(S.pending.file || ''), at: nowISO(),
+          converted: unitConverts.length, brands: [...brands],
+          fields, items: unitConverts.slice(0, 2000),
+          undefined: dimPlan ? Object.entries(dimPlan.brands).filter(([, v]) => (v.undefinedFields || []).length)
+            .map(([k, v]) => ({ brand: k, fields: v.undefinedFields, rows: v.rows })) : [],
+        };
+        Toast.ok('Весогабариты приведены к кг и см',
+          fmt(unitConverts.length) + ' значений · ' + (brands.size || 1) + ' бренд(ов) · ' +
+          (fields.length ? fields.join(', ') : '') + '. Источник записан в карточку каждого SKU.');
+      }
+      const _undefBrands = dimPlan ? Object.entries(dimPlan.brands).filter(([, v]) => (v.undefinedFields || []).length) : [];
+      if (_undefBrands.length) {
+        Toast.warn('Единицы не определены у части брендов',
+          _undefBrands.slice(0, 5).map(([b, v]) => (b || 'без бренда') + ' (' + fmt(v.rows) + ' строк)').join(', ') +
+          (_undefBrands.length > 5 ? ' и ещё ' + (_undefBrands.length - 5) : '') +
+          '. Значения оставлены как есть — проверьте их в разделе «Аномалии» → «Единицы по брендам».');
+      }
       if (rejectedDimensionCells) Toast.warn('Некорректные весогабариты пропущены', fmt(rejectedDimensionCells) + ' ячеек: прежние значения при наличии сохранены; затронутые SKU требуют проверки. Артикулы и причины — в разделе аномалий.');
       /* Схлопывание дублей, накопленных прошлыми загрузками (артикул+бренд) */
       if (prog) prog('проверка дублей по артикулу…');
@@ -34841,6 +35578,9 @@ const StdDims = {
 };
 
 const _exportDimsCache = new WeakMap();
+/* v12.9.175: после приведения единиц кэш «габаритов для выгрузки» обязан
+   пересчитаться, иначе в файл уйдут прежние (чужие) значения. */
+function exportDimsInvalidate(p) { try { _exportDimsCache.delete(p); } catch (e) { } }
 function exportDimsFor(p) {
   if (!p || typeof p !== 'object') return { length:0, width:0, height:0, weight:0, stdFields:[], stdSource:'' };
   const hit = _exportDimsCache.get(p); if (hit) return hit;
@@ -48660,6 +49400,10 @@ function bindV108() {
   el('#anomPrev','onclick', ()=> {AnomalyDetector.page--;AnomalyDetector.renderFound();});
   el('#anomNext','onclick', ()=> {AnomalyDetector.page++;AnomalyDetector.renderFound();});
   el('#btnAnomalyOe','onclick', ()=> AnomalyOE.find());
+  el('#btnDimUnits','onclick', ()=> DimUnitUI.open());
+  el('#dimUnitFixAll','onclick', ()=> DimUnitUI.applyAll());
+  el('#dimUnitRefresh','onclick', ()=> { DimUnitUI.detectAll(); DimUnitUI.render(); Toast.info('Определено заново','Единицы пересчитаны по текущему каталогу.'); });
+  el('#dimUnitDownload','onclick', ()=> DimUnitUI.downloadReport());
   el('#anomOeApply','onclick', ()=> AnomalyOE.apply());
   el('#anomOePrev','onclick', ()=> {AnomalyOE.page--;AnomalyOE.render();});
   el('#anomOeNext','onclick', ()=> {AnomalyOE.page++;AnomalyOE.render();});
