@@ -33,6 +33,7 @@ jobs:
           node tests/sql-memory-guards-client.js
           node tests/browser-worker-memory-client.js
           node tests/export-spool-client.js
+          node tests/dim-units-client.js
           node tests/enrichment-lifecycle-client.js
           node tests/enrichment-rules-client.js
           node tests/import-enrichment-keys-client.js
