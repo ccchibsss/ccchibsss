@@ -32402,11 +32402,23 @@ const Import = {
              что это не «как в файле»: «приведено граммы → кг (по бренду …)». */
           if (p._dimUnitNote && Object.keys(p._dimUnitNote).length) {
             p._sources = p._sources || {};
+            /* Строка считается изменённой только если метка источника реально
+               другая: повторный импорт того же файла не должен создавать
+               ревизию и переписывать каталог (тест browser-import-conflict-e2e). */
+            let _noteChanged = false;
             for (const _f of Object.keys(p._dimUnitNote)) {
-              p._sources[_f] = { file: p._dimUnitNote[_f], date: nowISO(), unitAdjusted: true };
+              const _cur = p._sources[_f];
+              const _prev = _cur && typeof _cur === 'object' ? String(_cur.file || '') : String(_cur == null ? '' : _cur);
+              if (_prev !== p._dimUnitNote[_f]) { _noteChanged = true; break; }
             }
-            p._dimUnitAdjustedAt = nowISO();
-            rowChanged = true;
+            if (_noteChanged) {
+              for (const _f of Object.keys(p._dimUnitNote)) {
+                p._sources[_f] = { file: p._dimUnitNote[_f], date: nowISO(), unitAdjusted: true };
+              }
+              p._dimUnitAdjustedAt = nowISO();
+              rowChanged = true;
+            }
+            delete p._dimUnitNote;   // служебное поле не должно попадать в каталог
           }
           if (AnomalyOE.observeImportTuple(p,rawTuple,importSource,ri+1,importTupleStates)) rowChanged=true;
           if (AnomalyOE.rememberImportCodes(p,rawOeInputs)) rowChanged=true;

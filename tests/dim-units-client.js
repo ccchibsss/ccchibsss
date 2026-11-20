@@ -153,6 +153,10 @@ assert(h.includes('const bad = DimUnit.sanity(Object.assign({}, p, trial)'), 'п
 /* Производный объём пересчитывается, заданный вручную — сохраняется. */
 assert(h.includes('const _volFollowsDims ='), 'объём не сверяется с произведением сторон');
 assert(h.includes('p._volumeExplicit = true;'), 'ручной объём не помечается — расчёт его перезапишет');
+/* Повторный импорт того же файла не должен считаться изменением: иначе
+   создаётся ложная ревизия каталога (browser-import-conflict-e2e). */
+assert(h.includes('let _noteChanged = false;'), 'метка источника пишется всегда — повторный импорт даст ложную ревизию');
+assert(h.includes('delete p._dimUnitNote;'), 'служебное поле остаётся в каталоге');
 /* Явная единица сильнее решения по бренду. */
 assert(h.includes('const _dimExplicit = !!(parsedOvh && parsedOvh.explicit);'));
 
